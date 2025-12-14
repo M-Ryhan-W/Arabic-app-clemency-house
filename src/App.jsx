@@ -26,7 +26,7 @@ function App() {
   const [quizFinished, setQuizFinished] = useState(false);
 
   // LESSON FLOW STATE
-  const [lessonPhase, setLessonPhase] = useState("lesson"); 
+  const [lessonPhase, setLessonPhase] = useState("lesson");
   // "lesson" | "vocab" | "explain"
 
   // VOCAB / EXPLANATION STATE
@@ -481,8 +481,8 @@ function App() {
         <div className="auth-overlay" />
         <div className="auth-content fade-in">
           <div className="auth-left">
-            <div className="auth-logo">العربيّة</div>
-            <h1>Learn Modern Standard Arabic.</h1>
+            <div className="auth-logo">🐫</div>
+            <h1 className="text-display">Learn Arabic the fun way.</h1>
             <p>
               Short, focused lessons. Real conversations. A clean path from
               zero to fluent reading and listening.
@@ -590,11 +590,10 @@ function App() {
                 <div
                   className="quiz-progress-fill"
                   style={{
-                    width: `${
-                      ((currentQuestionIndex + 1) /
-                        Math.max(questions.length, 1)) *
+                    width: `${((currentQuestionIndex + 1) /
+                      Math.max(questions.length, 1)) *
                       100
-                    }%`,
+                      }%`,
                   }}
                 />
               </div>
@@ -761,8 +760,8 @@ function App() {
                       {audioPlaying
                         ? "Playing…"
                         : audioCompleted
-                        ? "Replay audio"
-                        : "Start lesson audio"}
+                          ? "Replay audio"
+                          : "Start lesson audio"}
                     </button>
                     {audioCompleted && !audioPlaying && (
                       <span className="muted" style={{ fontSize: "0.8rem" }}>
@@ -1009,21 +1008,28 @@ function App() {
                     <li key={lesson.id}>
                       <button
                         onClick={() => openLesson(lesson)}
-                        className={`lesson-row ${
-                          completed ? "lesson-completed" : ""
-                        }`}
+                        className={`lesson-row ${completed ? "lesson-completed" : ""
+                          }`}
                       >
-                        <div>
-                          <div className="lesson-row-title">
-                            {lesson.title}
-                          </div>
-                          <div className="lesson-row-desc">
-                            {lesson.description}
+                        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+                          <span style={{
+                            fontSize: "1.5rem",
+                            color: completed ? "var(--yellow)" : "var(--gray-300)"
+                          }}>
+                            {completed ? "★" : "●"}
+                          </span>
+                          <div>
+                            <div className="lesson-row-title">
+                              {lesson.title}
+                            </div>
+                            <div className="lesson-row-desc">
+                              {lesson.description}
+                            </div>
                           </div>
                         </div>
                         {completed && (
                           <span className="pill pill-completed">
-                            ✓ Completed
+                            ✓ Done
                           </span>
                         )}
                       </button>
