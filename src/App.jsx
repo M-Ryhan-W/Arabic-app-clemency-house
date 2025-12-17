@@ -48,6 +48,8 @@ function App() {
 
   // LESSON PROGRESS STATE
   const [lessonProgress, setLessonProgress] = useState([]); // [{lesson_id, hearts_left}, ...]
+  const [showExitModal, setShowExitModal] = useState(false);
+  const [audioProgress, setAudioProgress] = useState(0);
 
   // ---------- HELPERS FOR PROGRESS ----------
 
@@ -135,6 +137,63 @@ function App() {
     setUser(null);
     setLessonProgress([]);
   }
+
+  // ---------- SCROLL TO TOP ON VIEW CHANGE ----------
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [lessonPhase, activeLesson, quizActive, selectedStage]);
+
+  // ---------- SOUND EFFECTS ----------
+
+  useEffect(() => {
+    // Simple "blob" / "bloop" sound generator using Web Audio API
+    // This avoids needing external assets and allows dynamic control
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    let audioCtx;
+
+    function playClickSound() {
+      try {
+        if (!audioCtx) audioCtx = new AudioContext();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+
+        const oscillator = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+
+        oscillator.type = 'sine';
+
+        // Pitch envelope: Start slightly high, drop quickly (the "bloop" shape)
+        const t = audioCtx.currentTime;
+        oscillator.frequency.setValueAtTime(600, t);
+        oscillator.frequency.exponentialRampToValueAtTime(300, t + 0.1);
+
+        // Amplitude envelope: Short and snappy, quite quiet
+        gainNode.gain.setValueAtTime(0.15, t);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, t + 0.1);
+
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+
+        oscillator.start();
+        oscillator.stop(t + 0.15);
+      } catch (e) {
+        console.error("Sound play failed", e);
+      }
+    }
+
+    function handleGlobalClick(e) {
+      // Play sound for buttons, links, or elements with clickable-like classes
+      const target = e.target.closest('button, a, .stage-card, .lesson-row, input, [role="button"]');
+      if (target) {
+        playClickSound();
+      }
+    }
+
+    window.addEventListener('click', handleGlobalClick);
+    return () => {
+      window.removeEventListener('click', handleGlobalClick);
+      if (audioCtx) audioCtx.close();
+    };
+  }, []);
 
   // ---------- LOAD STAGES + ALL LESSONS ----------
 
@@ -371,20 +430,23 @@ function App() {
   function handleStartLessonAudio() {
     if (!activeLesson?.audio_url || !audioRef.current) return;
 
-    try {
-      audioRef.current.currentTime = 0;
-      audioRef.current
-        .play()
-        .then(() => {
-          setAudioPlaying(true);
-          setAudioCompleted(false);
-        })
-        .catch((err) => {
-          console.error("Audio play failed:", err);
-        });
-    } catch (err) {
-      console.error("Audio error:", err);
-    }
+    // 1 second delay before playing
+    setTimeout(() => {
+      try {
+        audioRef.current.currentTime = 0;
+        audioRef.current
+          .play()
+          .then(() => {
+            setAudioPlaying(true);
+            setAudioCompleted(false);
+          })
+          .catch((err) => {
+            console.error("Audio play failed:", err);
+          });
+      } catch (err) {
+        console.error("Audio error:", err);
+      }
+    }, 1000);
   }
 
   // ---------- QUIZ CONTROL ----------
@@ -479,22 +541,25 @@ function App() {
     return (
       <div className="auth-page">
         <div className="auth-overlay" />
-        <div className="auth-content fade-in">
+        <div className="auth-content">
           <div className="auth-left">
-            <div className="auth-logo">🐫</div>
-            <h1 className="text-display">Learn Arabic the fun way.</h1>
-            <p>
-              Short, focused lessons. Real conversations. A clean path from
-              zero to fluent reading and listening.
+            <div className="auth-logo animate-slide-up">
+              <img src="/logo.png" alt="Clemency House Logo" style={{ width: '120px', height: 'auto' }} />
+            </div>
+            <h1 className="text-display animate-slide-up delay-100">
+              Welcome to the Clemency House Arabic App!
+            </h1>
+            <p className="animate-slide-up delay-200" style={{ fontSize: '1.2rem', lineHeight: '1.6', maxWidth: '500px' }}>
+              Designed by students for students, to aid your journey towards mastering Arabic.
             </p>
-            <div className="auth-badge-row">
-              <span className="auth-badge">9 stages</span>
-              <span className="auth-badge">Dialogue based</span>
-              <span className="auth-badge">Progress saved</span>
+            <div className="auth-badge-row animate-slide-up delay-300">
+              <span className="auth-badge">Using العربية للناشئين books</span>
+              <span className="auth-badge">Dialogue based to aid listening skills</span>
+              <span className="auth-badge">Progress saved with quizzes</span>
             </div>
           </div>
 
-          <div className="auth-right">
+          <div className="auth-right animate-slide-up delay-300">
             <div className="auth-card">
               <h2>
                 {authMode === "signin" ? "Welcome back" : "Create account"}
@@ -565,9 +630,8 @@ function App() {
     return (
       <div className="app-shell">
         <header className="app-header">
-          <div className="app-logo">العربيّة</div>
+          <div className="app-logo"><img src="/logo.png" alt="Logo" style={{ height: '50px' }} /></div>
           <div className="app-header-right">
-            <span className="app-user-email">{user?.email}</span>
             <button className="btn-outline" onClick={handleSignOut}>
               Sign out
             </button>
@@ -697,227 +761,374 @@ function App() {
 
     return (
       <div className="app-shell">
-        <header className="app-header">
-          <div className="app-logo">العربيّة</div>
-          <div className="app-header-right">
-            <span className="app-user-email">{user?.email}</span>
-            <button className="btn-outline" onClick={handleSignOut}>
-              Sign out
-            </button>
-          </div>
-        </header>
+        {/* Only show standard header for Phase 1 and 3 (optional, user said 'remove play audio button' implying custom UI for vocab) */}
+        {lessonPhase !== "vocab" && (
+          <header className="app-header">
+            <div className="app-logo"><img src="/logo.png" alt="Logo" style={{ height: '50px' }} /></div>
+            <div className="app-header-right">
+              <button className="btn-outline" onClick={handleSignOut}>
+                Sign out
+              </button>
+            </div>
+          </header>
+        )}
 
         <main className="app-main">
-          <div className="page-card">
-            <button className="btn-link" onClick={backToLessons}>
-              ← Back to lessons
-            </button>
+          {lessonPhase === "lesson" && (
+            <div className="page-card">
+              <button className="btn-link" onClick={backToLessons}>
+                ← Back to lessons
+              </button>
 
-            {/* Hidden audio element (used by Start lesson button) */}
-            {activeLesson.audio_url && (
-              <audio
-                ref={audioRef}
-                src={activeLesson.audio_url}
-                onEnded={() => {
-                  setAudioPlaying(false);
-                  setAudioCompleted(true);
-                }}
-                onPlay={() => setAudioPlaying(true)}
-                onPause={(e) => {
-                  if (e.target.currentTime < e.target.duration) {
-                    setAudioPlaying(false);
-                  }
-                }}
-                style={{ display: "none" }}
-              />
-            )}
+              {/* Hidden audio element (used by Start lesson button) */}
+              {activeLesson.audio_url && (
+                <audio
+                  ref={audioRef}
+                  src={activeLesson.audio_url}
+                  onTimeUpdate={(e) => {
+                    if (e.target.duration > 0) {
+                      setAudioProgress((e.target.currentTime / e.target.duration) * 100);
+                    }
+                  }}
+                  onEnded={() => {
+                    // Add 0.5s delay before marking as complete/enabling Proceed
+                    setTimeout(() => {
+                      setAudioPlaying(false);
+                      setAudioCompleted(true);
+                    }, 500);
+                  }}
+                  onPlay={() => setAudioPlaying(true)}
+                  onPause={(e) => {
+                    if (e.target.currentTime < e.target.duration) {
+                      setAudioPlaying(false);
+                    }
+                  }}
+                  style={{ display: "none" }}
+                />
+              )}
 
-            <div className="lesson-header-row">
-              <h1 className="lesson-title">{activeLesson.title}</h1>
-              {completed && (
-                <span className="pill pill-completed">✓ Completed</span>
+              <div className="lesson-header-row">
+                <h1 className="lesson-title">{activeLesson.title}</h1>
+                {completed && (
+                  <span className="pill pill-completed">✓ Completed</span>
+                )}
+              </div>
+              <p className="lesson-description">{activeLesson.description}</p>
+
+              {/* PHASE 1: MAIN LESSON / STORY */}
+              {lessonPhase === "lesson" && (
+                <>
+                  {activeLesson.audio_url && (
+                    <div
+                      style={{
+                        marginBottom: "1rem",
+                        display: "flex",
+                        gap: "0.5rem",
+                        alignItems: "center",
+                      }}
+                    >
+                      <button
+                        className="btn-primary"
+                        onClick={handleStartLessonAudio}
+                        disabled={audioPlaying}
+                      >
+                        {audioPlaying
+                          ? "Playing…"
+                          : audioCompleted
+                            ? "Replay audio"
+                            : "Start lesson audio"}
+                      </button>
+                    </div>
+                  )}
+
+                  <section className="section">
+                    <h2 className="section-title">النص العربي</h2>
+                    <div className="arabic-box">
+                      {activeLesson.transcript_ar || "لا يوجد نص عربي بعد"}
+                    </div>
+                  </section>
+
+                  <section className="section">
+                    <h3 className="section-subtitle">Translation</h3>
+                    <p className="translation-text">
+                      {activeLesson.transcript_en || "No English translation yet."}
+                    </p>
+                  </section>
+
+                  {activeLesson.notes && (
+                    <section className="section">
+                      <h3 className="section-subtitle">Notes</h3>
+                      <p className="notes-text">{activeLesson.notes}</p>
+                    </section>
+                  )}
+
+                  <div style={{ marginTop: "2rem", minHeight: '60px' }}>
+                    {!activeLesson.audio_url || audioCompleted ? (
+                      <button
+                        className="btn-primary"
+                        onClick={() => setLessonPhase("vocab")}
+                      >
+                        Proceed →
+                      </button>
+                    ) : (
+                      /* Progress Bar when audio not complete */
+                      (activeLesson.audio_url && !audioCompleted) && (
+                        <div className="audio-progress-fixed">
+                          <div className="audio-progress-fill-fixed" style={{ width: `${audioProgress}%` }}></div>
+                        </div>
+                      )
+                    )}
+                  </div>
+                </>
               )}
             </div>
-            <p className="lesson-description">{activeLesson.description}</p>
+          )}
 
-            {/* PHASE 1: MAIN LESSON / STORY */}
-            {lessonPhase === "lesson" && (
-              <>
-                {activeLesson.audio_url && (
-                  <div
-                    style={{
-                      marginBottom: "1rem",
-                      display: "flex",
-                      gap: "0.5rem",
-                      alignItems: "center",
+          {/* PHASE 2: VOCAB CAROUSEL (Custom Fullscreen UI) */}
+          {lessonPhase === "vocab" && (
+            <div className="vocab-fullscreen">
+              {/* BUBBLY HEADER */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
+                {/* BACK BUTTON */}
+                <button
+                  className="btn-bubbly-icon"
+                  onClick={() => {
+                    if (vocabIndex > 0) {
+                      setVocabIndex(i => i - 1);
+                    } else {
+                      setLessonPhase("lesson");
+                    }
+                  }}
+                >
+                  ←
+                </button>
+
+                {/* CENTERED TITLE */}
+                <div className="header-bubbly-title">
+                  {activeLesson.title}
+                </div>
+
+                {/* HOME BUTTON */}
+                <button
+                  className="btn-bubbly-icon"
+                  onClick={() => setShowExitModal(true)}
+                >
+                  🏠
+                </button>
+              </div>
+
+              {vocabItems.length === 0 ? (
+                <div className="center-content">
+                  <p className="muted">No vocabulary added yet for this lesson.</p>
+                  <button className="btn-primary" onClick={() => setLessonPhase("explain")}>
+                    Continue
+                  </button>
+                </div>
+              ) : (
+                (() => {
+                  const item = vocabItems[vocabIndex];
+                  return (
+                    <>
+                      <div className="vocab-label">English:</div>
+                      <div className="vocab-card">
+                        <div className="vocab-text-main">{item.english}</div>
+                      </div>
+
+                      <div className="vocab-label" style={{ textAlign: "right" }}>
+                        :عربي
+                      </div>
+                      <div className="vocab-card" style={{ direction: "rtl" }}>
+                        <div className="vocab-text-main">
+                          {item.arabic}
+                          {item.note && <span style={{ display: 'block', fontSize: '0.9rem', marginTop: '0.5rem', color: 'var(--text-light)' }}>
+                            [{item.note}]
+                          </span>}
+                        </div>
+                      </div>
+
+                      <div className="vocab-footer">
+                        {/* LARGE NEXT BUTTON */}
+                        {vocabIndex === vocabItems.length - 1 ? (
+                          <button
+                            className="btn-main-action"
+                            onClick={() => setLessonPhase("explain")}
+                          >
+                            FINISH VOCAB →
+                          </button>
+                        ) : (
+                          <button
+                            className="btn-main-action"
+                            onClick={() => setVocabIndex((i) => i + 1)}
+                          >
+                            NEXT WORD →
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  );
+                })()
+              )}
+            </div>
+          )}
+
+          {/* PHASE 3: EXPLANATION */}
+          {lessonPhase === "explain" && (
+            <div className="page-card">
+              <button className="btn-link" onClick={() => setLessonPhase("vocab")}>
+                ← Back to vocab
+              </button>
+
+              <section className="section">
+                <h2 className="section-title">How do we use these words?</h2>
+
+                {explanations.length === 0 ? (
+                  <p className="muted">
+                    No explanation sentences yet for this lesson.
+                  </p>
+                ) : (
+                  <ul className="explanation-list">
+                    {explanations.map((ex) => (
+                      <li key={ex.id} className="explanation-item">
+                        <div className="arabic-sentence">
+                          {ex.arabic_sentence}
+                        </div>
+                        <div className="english-sentence">
+                          {ex.english_sentence}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+
+              <div className="quiz-actions" style={{ marginTop: "2rem" }}>
+                <button
+                  className="btn-primary"
+                  onClick={() => {
+                    setLessonPhase("relisten");
+                    setAudioCompleted(false);
+                    setAudioProgress(0);
+                  }}
+                >
+                  Let's Review →
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* PHASE 4: RELISTEN (Story Again) */}
+          {lessonPhase === "relisten" && (
+            <div className="page-card" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '60vh', textAlign: 'center' }}>
+              <h1 style={{ fontSize: '2rem', marginBottom: '1rem' }}>Let's have another listen</h1>
+              <p className="muted" style={{ marginBottom: '2rem' }}>Listen to the story one more time before the quiz.</p>
+
+              {activeLesson.audio_url && (
+                <>
+                  <audio
+                    ref={audioRef}
+                    src={activeLesson.audio_url}
+                    onTimeUpdate={(e) => {
+                      if (e.target.duration > 0) {
+                        setAudioProgress((e.target.currentTime / e.target.duration) * 100);
+                      }
                     }}
-                  >
+                    onEnded={() => {
+                      setTimeout(() => {
+                        setAudioPlaying(false);
+                        setAudioCompleted(true);
+                      }, 500);
+                    }}
+                    onPlay={() => setAudioPlaying(true)}
+                    onPause={(e) => {
+                      if (e.target.currentTime < e.target.duration) {
+                        setAudioPlaying(false);
+                      }
+                    }}
+                    style={{ display: "none" }}
+                  />
+
+                  <div style={{ marginBottom: '2rem' }}>
                     <button
-                      className="btn-primary"
+                      className="btn-circle btn-bubbly-icon"
+                      style={{ width: '80px', height: '80px', fontSize: '2rem', margin: '0 auto' }}
                       onClick={handleStartLessonAudio}
                       disabled={audioPlaying}
                     >
-                      {audioPlaying
-                        ? "Playing…"
-                        : audioCompleted
-                          ? "Replay audio"
-                          : "Start lesson audio"}
+                      {audioPlaying ? '🔊' : '▶️'}
                     </button>
-                    {audioCompleted && !audioPlaying && (
-                      <span className="muted" style={{ fontSize: "0.8rem" }}>
-                        Audio finished – move on when you’re ready.
-                      </span>
-                    )}
                   </div>
-                )}
 
-                <section className="section">
-                  <h2 className="section-title">النص العربي</h2>
-                  <div className="arabic-box">
-                    {activeLesson.transcript_ar || "لا يوجد نص عربي بعد"}
-                  </div>
-                </section>
-
-                <section className="section">
-                  <h3 className="section-subtitle">Translation</h3>
-                  <p className="translation-text">
-                    {activeLesson.transcript_en || "No English translation yet."}
-                  </p>
-                </section>
-
-                {activeLesson.notes && (
-                  <section className="section">
-                    <h3 className="section-subtitle">Notes</h3>
-                    <p className="notes-text">{activeLesson.notes}</p>
-                  </section>
-                )}
-
-                <div style={{ marginTop: "2rem" }}>
-                  <button
-                    className="btn-primary"
-                    onClick={() => setLessonPhase("vocab")}
-                  >
-                    Proceed →
-                  </button>
-                </div>
-              </>
-            )}
-
-            {/* PHASE 2: VOCAB CAROUSEL */}
-            {lessonPhase === "vocab" && (
-              <>
-                <section className="section">
-                  <h2 className="section-title">Let’s look at the new words!</h2>
-
-                  {vocabItems.length === 0 ? (
-                    <p className="muted">
-                      No vocabulary added yet for this lesson.
-                    </p>
-                  ) : (
-                    (() => {
-                      const item = vocabItems[vocabIndex];
-
-                      return (
-                        <div className="vocab-layout">
-                          <div className="vocab-top">
-                            <div className="vocab-arabic">{item.arabic}</div>
-                            {item.image_url && (
-                              <img
-                                src={item.image_url}
-                                alt={item.english}
-                                className="vocab-image"
-                              />
-                            )}
-                          </div>
-
-                          <div className="vocab-bottom">
-                            <div className="vocab-english">
-                              {item.english}
-                            </div>
-                            {item.note && (
-                              <p className="vocab-note">{item.note}</p>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })()
+                  {/* Progress Bar */}
+                  {(activeLesson.audio_url && !audioCompleted) && (
+                    <div className="audio-progress-fixed">
+                      <div className="audio-progress-fill-fixed" style={{ width: `${audioProgress}%` }}></div>
+                    </div>
                   )}
-                </section>
+                </>
+              )}
 
-                <div className="vocab-nav">
+              {audioCompleted && (
+                <button
+                  className="btn-primary"
+                  style={{ animation: 'slideDown 0.3s ease-out' }}
+                  onClick={() => setLessonPhase("pre_quiz")}
+                >
+                  Continue to Quiz →
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* PHASE 5: PRE-QUIZ (Start Screen) */}
+          {lessonPhase === "pre_quiz" && (
+            <div className="page-card" style={{ textAlign: 'center', padding: '3rem 1rem' }}>
+              <div style={{ fontSize: '4rem', marginBottom: '1rem' }}>📝</div>
+              <h1 className="page-title">Ready?</h1>
+              <p className="page-subtitle" style={{ marginBottom: '3rem', fontSize: '1.2rem' }}>
+                Take the quiz to complete this lesson!
+              </p>
+
+              <button
+                className="btn-primary"
+                style={{ fontSize: '1.5rem', padding: '1.5rem' }}
+                onClick={startQuiz}
+                disabled={questions.length === 0}
+              >
+                {questions.length === 0 ? "No questions loaded" : "START QUIZ"}
+              </button>
+            </div>
+          )}
+
+          {/* EXIT CONFIRMATION MODAL */}
+          {showExitModal && (
+            <div className="modal-overlay">
+              <div className="modal-content">
+                <div className="modal-title">Are you sure?</div>
+                <p className="text-muted">
+                  You're about to leave the lesson. All progress in this session will be lost.
+                </p>
+                <div className="modal-actions">
                   <button
                     className="btn-outline"
-                    onClick={() =>
-                      setVocabIndex((i) => Math.max(0, i - 1))
-                    }
-                    disabled={vocabIndex === 0}
+                    style={{ flex: 1 }}
+                    onClick={() => setShowExitModal(false)}
                   >
-                    ← Previous
+                    CANCEL
                   </button>
-
-                  {vocabIndex === vocabItems.length - 1 || vocabItems.length === 0 ? (
-                    <button
-                      className="btn-primary"
-                      onClick={() => setLessonPhase("explain")}
-                    >
-                      Continue →
-                    </button>
-                  ) : (
-                    <button
-                      className="btn-primary"
-                      onClick={() =>
-                        setVocabIndex((i) =>
-                          Math.min(vocabItems.length - 1, i + 1)
-                        )
-                      }
-                    >
-                      Next word →
-                    </button>
-                  )}
-                </div>
-              </>
-            )}
-
-            {/* PHASE 3: EXPLANATION */}
-            {lessonPhase === "explain" && (
-              <>
-                <section className="section">
-                  <h2 className="section-title">How do we use these words?</h2>
-
-                  {explanations.length === 0 ? (
-                    <p className="muted">
-                      No explanation sentences yet for this lesson.
-                    </p>
-                  ) : (
-                    <ul className="explanation-list">
-                      {explanations.map((ex) => (
-                        <li key={ex.id} className="explanation-item">
-                          <div className="arabic-sentence">
-                            {ex.arabic_sentence}
-                          </div>
-                          <div className="english-sentence">
-                            {ex.english_sentence}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </section>
-
-                <div className="quiz-actions" style={{ marginTop: "2rem" }}>
                   <button
-                    className="btn-secondary"
-                    onClick={startQuiz}
-                    disabled={questions.length === 0}
+                    className="btn-primary"
+                    style={{ flex: 1, backgroundColor: 'var(--red)', boxShadow: '0 4px 0 var(--red-dark)' }}
+                    onClick={() => {
+                      setShowExitModal(false);
+                      backToLessons();
+                    }}
                   >
-                    {questions.length === 0
-                      ? "No quiz yet for this lesson"
-                      : "Great job – start quiz →"}
+                    QUIT
                   </button>
                 </div>
-              </>
-            )}
-          </div>
+              </div>
+            </div>
+          )}
         </main>
       </div>
     );
@@ -928,9 +1139,8 @@ function App() {
   return (
     <div className="app-shell">
       <header className="app-header">
-        <div className="app-logo">العربيّة</div>
+        <div className="app-logo"><img src="/logo.png" alt="Logo" style={{ height: '50px' }} /></div>
         <div className="app-header-right">
-          <span className="app-user-email">{user?.email}</span>
           <button className="btn-outline" onClick={handleSignOut}>
             Sign out
           </button>
@@ -939,12 +1149,8 @@ function App() {
 
       <main className="app-main">
         <div className="page-layout">
-          <section className="page-card">
-            <h1 className="page-title">Your stages</h1>
-            <p className="page-subtitle">
-              Work through each stage at your own pace. Lessons build up from
-              simple phrases to full dialogue.
-            </p>
+          <section className="page-card" style={{ background: 'transparent', border: 'none', boxShadow: 'none', padding: 0 }}>
+            <h1 className="page-title" style={{ fontSize: '2rem', marginBottom: '2rem' }}>Your stages</h1>
 
             {loadingStages ? (
               <p className="muted">Loading…</p>
@@ -953,90 +1159,107 @@ function App() {
             ) : (
               <div className="stage-list">
                 {stages.map((stage) => {
-                  const { completed, total, percent } = getStageProgress(
-                    stage.id
-                  );
+                  const { completed, total, percent } = getStageProgress(stage.id);
+                  const isSelected = selectedStage === stage.id;
+
                   return (
-                    <button
-                      key={stage.id}
-                      onClick={() => loadLessons(stage.id)}
-                      className="stage-card"
-                    >
-                      <div className="stage-card-top">
-                        <div>
-                          <div className="stage-name">
-                            {stage.name || "Stage"}
+                    <div key={stage.id} style={{ marginBottom: '1.5rem' }}>
+                      <button
+                        onClick={() => loadLessons(stage.id)}
+                        className="stage-card"
+                        style={{
+                          width: '100%',
+                          marginBottom: 0,
+                          borderColor: isSelected ? 'var(--blue)' : 'var(--gray-200)',
+                          background: isSelected ? 'var(--white)' : 'var(--white)'
+                        }}
+                      >
+                        <div className="stage-card-top">
+                          <div>
+                            <div className="stage-name">
+                              {stage.name || "Stage"}
+                            </div>
+                            <div className="stage-description">
+                              {stage.description}
+                            </div>
                           </div>
-                          <div className="stage-description">
-                            {stage.description}
-                          </div>
+                          {total > 0 && (
+                            <span className="stage-progress-text">
+                              {completed}/{total} lessons • {percent}%
+                            </span>
+                          )}
                         </div>
                         {total > 0 && (
-                          <span className="stage-progress-text">
-                            {completed}/{total} lessons • {percent}%
-                          </span>
+                          <div className="stage-progress-bar">
+                            <div
+                              className="stage-progress-fill"
+                              style={{ width: `${percent}%` }}
+                            />
+                          </div>
                         )}
-                      </div>
-                      {total > 0 && (
-                        <div className="stage-progress-bar">
-                          <div
-                            className="stage-progress-fill"
-                            style={{ width: `${percent}%` }}
-                          />
+                      </button>
+
+                      {/* ACCORDION: Show lessons if this stage is selected */}
+                      {isSelected && (
+                        <div className="lesson-container-inline">
+                          {loadingLessons ? (
+                            <p className="muted" style={{ textAlign: 'center' }}>Loading lessons…</p>
+                          ) : lessons.length === 0 ? (
+                            <p className="muted" style={{ textAlign: 'center' }}>No lessons found.</p>
+                          ) : (
+                            <ul className="lesson-list">
+                              {lessons.map((lesson) => {
+                                const completed = isLessonCompleted(lesson.id);
+                                return (
+                                  <li key={lesson.id}>
+                                    <button
+                                      onClick={() => openLesson(lesson)}
+                                      className={`lesson-row ${completed ? "lesson-completed" : ""
+                                        }`}
+                                    >
+                                      <div
+                                        style={{
+                                          display: "flex",
+                                          alignItems: "center",
+                                          gap: "1rem",
+                                        }}
+                                      >
+                                        <span
+                                          style={{
+                                            fontSize: "1.5rem",
+                                            color: completed
+                                              ? "var(--yellow)"
+                                              : "var(--gray-300)",
+                                          }}
+                                        >
+                                          {completed ? "★" : "●"}
+                                        </span>
+                                        <div>
+                                          <div className="lesson-row-title">
+                                            {lesson.title}
+                                          </div>
+                                          <div className="lesson-row-desc">
+                                            {lesson.description}
+                                          </div>
+                                        </div>
+                                      </div>
+                                      {completed && (
+                                        <span className="pill pill-completed">
+                                          ✓ Done
+                                        </span>
+                                      )}
+                                    </button>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          )}
                         </div>
                       )}
-                    </button>
+                    </div>
                   );
                 })}
               </div>
-            )}
-          </section>
-
-          <section className="page-card">
-            <h2 className="page-title">Lessons</h2>
-            {selectedStage === null ? (
-              <p className="muted">Select a stage to view lessons.</p>
-            ) : loadingLessons ? (
-              <p className="muted">Loading lessons…</p>
-            ) : lessons.length === 0 ? (
-              <p className="muted">No lessons found.</p>
-            ) : (
-              <ul className="lesson-list">
-                {lessons.map((lesson) => {
-                  const completed = isLessonCompleted(lesson.id);
-                  return (
-                    <li key={lesson.id}>
-                      <button
-                        onClick={() => openLesson(lesson)}
-                        className={`lesson-row ${completed ? "lesson-completed" : ""
-                          }`}
-                      >
-                        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-                          <span style={{
-                            fontSize: "1.5rem",
-                            color: completed ? "var(--yellow)" : "var(--gray-300)"
-                          }}>
-                            {completed ? "★" : "●"}
-                          </span>
-                          <div>
-                            <div className="lesson-row-title">
-                              {lesson.title}
-                            </div>
-                            <div className="lesson-row-desc">
-                              {lesson.description}
-                            </div>
-                          </div>
-                        </div>
-                        {completed && (
-                          <span className="pill pill-completed">
-                            ✓ Done
-                          </span>
-                        )}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
             )}
           </section>
         </div>

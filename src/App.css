@@ -7,14 +7,21 @@
   --red-dark: #ea2b2b;
   --yellow: #ffc800;
   --yellow-dark: #e5b400;
-  --white: #ffffff;
-  --gray-100: #f7f7f7;
-  /* Background */
-  --gray-200: #e5e5e5;
-  /* Borders */
-  --gray-300: #afa3a3;
-  /* Disabled/Muted */
-  --text-main: #3c3c3c;
+
+  /* Cream/Beige Theme */
+  --white: #fffcf5;
+  /* Main card background (cream) */
+  --bg-app: #f7f2e8;
+  /* App background (darker beige) */
+  --gray-100: #efeadd;
+  /* Button hover / slight contrast */
+  --gray-200: #e5e0d0;
+  /* Borders / separators */
+  --gray-300: #cbbfa5;
+  /* Disabled / muted text */
+
+  --text-main: #4b4b4b;
+  /* Softer black */
   --text-light: #777777;
 
   --font-stack: 'Nunito', sans-serif;
@@ -30,10 +37,55 @@
 
 body {
   margin: 0;
-  background-color: var(--white);
+  background-color: var(--bg-app);
   color: var(--text-main);
   font-family: var(--font-stack);
   -webkit-font-smoothing: antialiased;
+}
+
+/* ... existing code ... */
+
+/* STAGES */
+.stage-card {
+  background: var(--white);
+  border: 2px solid var(--gray-200);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  margin-bottom: 1rem;
+  transition: all 0.2s;
+  box-shadow: 0 4px 0 var(--gray-200);
+  cursor: pointer;
+  min-height: auto;
+  /* Let content dictate height, but keep it substantial */
+  display: block;
+  /* Reset flex to block to allow normal flow */
+}
+
+/* Adjust layout to be single column for stages */
+.page-layout {
+  display: block;
+  /* Remove grid/flex column split if it existed */
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.lesson-container-inline {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 2px dashed var(--gray-200);
+  animation: slideDown 0.3s ease-out;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 h1,
@@ -155,6 +207,89 @@ button {
 .btn-link:hover {
   color: var(--blue);
   text-decoration: underline;
+}
+
+/* MODAL */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.modal-content {
+  background: var(--white);
+  padding: 2rem;
+  border-radius: 24px;
+  width: 90%;
+  max-width: 400px;
+  text-align: center;
+  border: 2px solid var(--gray-200);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+  animation: scaleUp 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.modal-title {
+  font-size: 1.5rem;
+  font-weight: 800;
+  margin-bottom: 1rem;
+  color: var(--text-main);
+}
+
+.modal-actions {
+  display: flex;
+  gap: 1rem;
+  margin-top: 2rem;
+}
+
+@keyframes scaleUp {
+  from {
+    opacity: 0;
+    transform: scale(0.9) translateY(20px);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes slideUpFade {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-slide-up {
+  opacity: 0;
+  animation: slideUpFade 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.delay-100 {
+  animation-delay: 0.1s;
+}
+
+.delay-200 {
+  animation-delay: 0.2s;
+}
+
+.delay-300 {
+  animation-delay: 0.3s;
+}
+
+.delay-400 {
+  animation-delay: 0.4s;
 }
 
 /* AUTH PAGE */
@@ -355,6 +490,11 @@ button {
   transition: all 0.2s;
   box-shadow: 0 4px 0 var(--gray-200);
   cursor: pointer;
+  min-height: 160px;
+  /* Enforce consistent height */
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .stage-card:hover {
@@ -413,6 +553,11 @@ button {
   justify-content: space-between;
   box-shadow: 0 4px 0 var(--gray-200);
   cursor: pointer;
+  color: var(--text-main);
+  /* Ensure text is visible */
+  text-align: left;
+  /* Ensure text aligns correctly in button */
+  width: 100%;
 }
 
 .lesson-row:hover {
@@ -429,6 +574,163 @@ button {
 .lesson-row-title {
   font-weight: 800;
   font-size: 1rem;
+  color: var(--text-main);
+}
+
+.lesson-row-desc {
+  color: var(--text-light);
+  font-size: 0.9rem;
+}
+
+/* VOCAB FULLSCREEN UI */
+.vocab-fullscreen {
+  position: fixed;
+  inset: 0;
+  background: var(--bg-app);
+  /* Cream/Beige theme */
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  padding: 1.5rem;
+  color: var(--text-main);
+}
+
+.vocab-header-card {
+  background: var(--white);
+  border: 2px solid var(--gray-200);
+  border-radius: 20px;
+  padding: 1.5rem;
+  margin-bottom: 2rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--text-main);
+  box-shadow: 0 4px 0 var(--gray-200);
+}
+
+.vocab-label {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text-light);
+  margin-bottom: 0.5rem;
+}
+
+.vocab-card {
+  background: var(--white);
+  /* Light card */
+  border: 2px solid var(--gray-200);
+  border-radius: 20px;
+  padding: 2.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 4px 0 var(--gray-200);
+  min-height: 150px;
+}
+
+.vocab-text-main {
+  font-size: 1.8rem;
+  font-weight: 800;
+  color: var(--text-main);
+  text-align: center;
+}
+
+.vocab-footer {
+  margin-top: auto;
+  display: flex;
+  padding: 1rem 0;
+  gap: 1rem;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.btn-circle {
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  cursor: pointer;
+  border: none;
+  transition: transform 0.1s;
+  background: var(--white);
+  border: 2px solid var(--gray-200);
+  color: var(--text-light);
+  box-shadow: 0 4px 0 var(--gray-200);
+}
+
+.btn-circle:active {
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 var(--gray-200);
+}
+
+
+.btn-main-action {
+  flex: 1;
+  background: var(--green);
+  color: white;
+  height: 60px;
+  border-radius: 30px;
+  font-weight: 800;
+  font-size: 1.2rem;
+  box-shadow: 0 4px 0 var(--green-dark);
+}
+
+
+/* BUBBLY HEADER ELEMENTS */
+.btn-bubbly-icon {
+  width: 50px;
+  height: 50px;
+  background: var(--white);
+  border: 2px solid var(--gray-200);
+  border-radius: 14px;
+  box-shadow: 0 4px 0 var(--gray-200);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.4rem;
+  cursor: pointer;
+  color: var(--gray-300);
+  transition: all 0.1s;
+}
+
+.btn-bubbly-icon:active {
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 var(--gray-200);
+}
+
+.header-bubbly-title {
+  font-size: 1.3rem;
+  font-weight: 800;
+  color: var(--text-main);
+  text-align: center;
+  background: var(--white);
+  padding: 0.5rem 1.5rem;
+  border-radius: 16px;
+  border: 2px solid var(--gray-200);
+  box-shadow: 0 4px 0 var(--gray-200);
+  display: inline-block;
+}
+
+/* AUDIO PROGRESS BAR FIXED BOTTOM */
+.audio-progress-fixed {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 8px;
+  background: var(--gray-200);
+  z-index: 900;
+}
+
+.audio-progress-fill-fixed {
+  height: 100%;
+  background: var(--green);
+  width: 0%;
+  transition: width 0.2s linear;
 }
 
 /* QUIZ */
