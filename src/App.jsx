@@ -46,6 +46,7 @@ function App() {
   const [vocabItems, setVocabItems] = useState([]);
   const [vocabIndex, setVocabIndex] = useState(0);
   const [explanations, setExplanations] = useState([]);
+  const [explanationIndex, setExplanationIndex] = useState(0);
   const [grammarNotes, setGrammarNotes] = useState([]);
   const [grammarIndex, setGrammarIndex] = useState(0);
 
@@ -75,6 +76,7 @@ function App() {
   // PROFILE MENU STATE
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [showSignOutConfirm, setShowSignOutConfirm] = useState(false);
+  const [showExitAppConfirm, setShowExitAppConfirm] = useState(false);
 
   // ---------- HELPERS FOR PROGRESS ----------
 
@@ -181,6 +183,30 @@ function App() {
       subscription.unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    // Handle the back button intercept
+    const handleBackButton = (e) => {
+      e.preventDefault();
+
+      if (activeLesson) {
+        // If in a lesson, ask to return to home
+        setShowExitModal(true);
+      } else {
+        // If on home screen, ask to exit app
+        setShowExitAppConfirm(true);
+      }
+
+      // Push state back so the next back button click also gets intercepted
+      window.history.pushState(null, null, window.location.pathname);
+    };
+
+    // Initial push to start intercepting
+    window.history.pushState(null, null, window.location.pathname);
+    window.addEventListener('popstate', handleBackButton);
+
+    return () => window.removeEventListener('popstate', handleBackButton);
+  }, [activeLesson]);
 
   async function handleSignUp(e) {
     e.preventDefault();
@@ -411,6 +437,7 @@ function App() {
     setGrammarNotes([]);
     setVocabIndex(0);
     setGrammarIndex(0);
+    setExplanationIndex(0);
 
     // ✅ reset blocks each open
     setLessonBlocks([]);
@@ -1010,15 +1037,18 @@ function App() {
                   <div className="confetti"></div>
                 </div>
 
-                <div className="celebration-trophy">🏆</div>
+                <div className="celebration-trophy">
+                  <img src="/images/trophy.png" alt="Trophy" style={{ width: '180px' }} />
+                </div>
                 <h1 className="celebration-title">Congratulations!</h1>
                 <p className="celebration-message">
                   You've successfully completed this lesson with {hearts} heart{hearts === 1 ? "" : "s"} remaining.
-                  Keep up the great work on your Arabic journey!
                 </p>
-                <button className="btn-primary btn-home" onClick={backToLessons}>
-                  Return Home
-                </button>
+                <footer className="sticky-footer">
+                  <button className="btn-primary btn-home" onClick={backToLessons}>
+                    Return Home
+                  </button>
+                </footer>
               </div>
             )}
 
@@ -1360,13 +1390,17 @@ function App() {
 
           {/* PHASE: TRANSITION TO GRAMMAR */}
           {lessonPhase === "intro_grammar" && (
-            <div className="page-card center-content transition-screen swipe-in">
-              <div className="icon-circle">💡</div>
+            <div className="no-scroll-container transition-screen">
+              <div className="icon-circle">
+                <img src="/images/explanation-icon.png" alt="Explanation" className="placeholder-img" />
+              </div>
               <h1 className="page-title">Story Explanation</h1>
               <p className="page-subtitle">Let's have a look at the story content in more detail!</p>
-              <button className="btn-primary" onClick={() => setLessonPhase("grammar")}>
-                Continue
-              </button>
+              <footer className="sticky-footer">
+                <button className="btn-primary" onClick={() => setLessonPhase("grammar")}>
+                  Continue
+                </button>
+              </footer>
             </div>
           )}
 
@@ -1407,13 +1441,17 @@ function App() {
 
           {/* PHASE: TRANSITION TO VOCAB */}
           {lessonPhase === "intro_vocab" && (
-            <div className="page-card center-content transition-screen swipe-in">
-              <div className="icon-circle">📖</div>
+            <div className="no-scroll-container transition-screen">
+              <div className="icon-circle">
+                <img src="/images/vocab-icon.png" alt="Vocabulary" className="placeholder-img" />
+              </div>
               <h1 className="page-title">New Words</h1>
               <p className="page-subtitle">Let's take a look at the new words we have learnt!</p>
-              <button className="btn-primary" onClick={() => setLessonPhase("vocab")}>
-                Continue
-              </button>
+              <footer className="sticky-footer">
+                <button className="btn-primary" onClick={() => setLessonPhase("vocab")}>
+                  Continue
+                </button>
+              </footer>
             </div>
           )}
 
@@ -1509,67 +1547,72 @@ function App() {
 
           {/* PHASE: TRANSITION TO DRILLS */}
           {lessonPhase === "intro_drills" && (
-            <div className="page-card center-content transition-screen swipe-in">
-              <div className="icon-circle">⚙️</div>
+            <div className="no-scroll-container transition-screen">
+              <div className="icon-circle">
+                <img src="/images/drills-icon.png" alt="Drills" className="placeholder-img" />
+              </div>
               <h1 className="page-title">Sentence Practice</h1>
               <p className="page-subtitle">Let's look at some ways of using these words in sentences!</p>
-              <button className="btn-primary" onClick={() => setLessonPhase("explain")}>
-                Continue
-              </button>
+              <footer className="sticky-footer">
+                <button className="btn-primary" onClick={() => setLessonPhase("explain")}>
+                  Continue
+                </button>
+              </footer>
             </div>
           )}
 
-          {/* PHASE 3: EXPLANATION */}
-          {lessonPhase === "explain" && (
-            <div className="page-card swipe-in">
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "flex-start",
-                  marginBottom: "1rem",
-                }}
-              >
-                <button
-                  className="btn-bubbly-icon"
-                  style={{ width: "45px", height: "45px" }}
-                  onClick={() => setLessonPhase("vocab")}
-                >
-                  ←
-                </button>
+          {/* PHASE 3: USAGE DRILLS (Carousel Mode) */}
+          {lessonPhase === "explain" && explanations.length > 0 && (
+            <div className="no-scroll-container">
+              {/* Header identifying the phase */}
+              <header className="fixed-header">
+                <button className="btn-bubbly-icon" onClick={() => {
+                  if (explanationIndex > 0) setExplanationIndex(i => i - 1);
+                  else setLessonPhase("intro_drills");
+                }}>←</button>
+                <div className="header-bubbly-title">Usage Drill {explanationIndex + 1}</div>
+                <div style={{ width: '50px' }} />
+              </header>
+
+              <div className="grammar-content-area">
+                <div className="vocab-label" style={{ textAlign: "right" }}>:عربي</div>
+                <div className="arabic-box spotlight-arabic" dir="rtl" style={{ fontSize: '2rem' }}>
+                  {explanations[explanationIndex].arabic_sentence}
+                </div>
+
+                <div className="vocab-label">English:</div>
+                <div className="explanation-bubble" style={{ borderLeft: '5px solid var(--green)', background: '#f0fff4' }}>
+                  {explanations[explanationIndex].english_sentence}
+                </div>
               </div>
 
-              <section className="section">
-                <h2 className="section-title">How do we use these words?</h2>
-
-                {explanations.length === 0 ? (
-                  <p className="muted">No explanation sentences yet for this lesson.</p>
-                ) : (
-                  <ul className="explanation-list">
-                    {explanations.map((ex) => (
-                      <li key={ex.id} className="explanation-item">
-                        <div className="arabic-sentence">{ex.arabic_sentence}</div>
-                        <div className="english-sentence">{ex.english_sentence}</div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </section>
-
-              <div className="quiz-actions" style={{ marginTop: "2rem" }}>
-                <button
-                  className="btn-primary"
-                  onClick={() => {
-                    setLessonPhase("relisten");
-                    setAudioCompleted(false);
-                    setAudioProgress(0);
-                  }}
-                >
-                  Let's Review →
-                </button>
-              </div>
+              <footer className="sticky-footer">
+                <div style={{ display: 'flex', gap: '1rem', width: '100%' }}>
+                  {explanationIndex < explanations.length - 1 ? (
+                    <button
+                      className="btn-primary"
+                      style={{ width: '100%' }}
+                      onClick={() => setExplanationIndex(i => i + 1)}
+                    >
+                      Next Sentence
+                    </button>
+                  ) : (
+                    <button
+                      className="btn-primary"
+                      style={{ width: '100%', background: 'var(--blue)', boxShadow: '0 4px 0 var(--blue-dark)' }}
+                      onClick={() => {
+                        setLessonPhase("relisten");
+                        setAudioCompleted(false);
+                        setAudioProgress(0);
+                      }}
+                    >
+                      Mastered! Review Audio →
+                    </button>
+                  )}
+                </div>
+              </footer>
             </div>
-          )
-          }
+          )}
 
           {/* PHASE 4: RELISTEN */}
           {
@@ -1730,6 +1773,27 @@ function App() {
               </div>
             )
           }
+
+          {showExitAppConfirm && (
+            <div className="modal-overlay">
+              <div className="modal-content">
+                <h3 className="modal-title">Exit App?</h3>
+                <p className="text-muted">Are you sure you want to close the app?</p>
+                <div className="modal-actions">
+                  <button className="btn-outline" style={{ flex: 1 }} onClick={() => setShowExitAppConfirm(false)}>
+                    Stay
+                  </button>
+                  <button
+                    className="btn-primary"
+                    style={{ flex: 1, backgroundColor: "var(--red)", boxShadow: "0 4px 0 var(--red-dark)" }}
+                    onClick={() => window.close()} /* Note: window.close() only works in some webview contexts */
+                  >
+                    Exit
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </main >
       </div >
     );
@@ -1761,11 +1825,11 @@ function App() {
               padding: 0,
             }}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "2rem" }}>
-              <p style={{ fontSize: "1rem", color: "var(--text-light)", margin: 0 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1rem" }}>
+              <p style={{ fontSize: "0.9rem", color: "var(--text-light)", margin: 0 }}>
                 Stages
               </p>
-              <h1 className="page-title" style={{ fontSize: "2.5rem", fontFamily: "'Amiri', serif", direction: "rtl", margin: 0 }}>
+              <h1 className="page-title" style={{ fontSize: "2rem", fontFamily: "'Amiri', serif", direction: "rtl", margin: 0 }}>
                 المراحل
               </h1>
             </div>
@@ -1781,7 +1845,7 @@ function App() {
                   const isSelected = selectedStage === stage.id;
 
                   return (
-                    <div key={stage.id} style={{ marginBottom: "1.5rem" }}>
+                    <div key={stage.id} style={{ marginBottom: "1rem" }}>
                       <button
                         onClick={() => loadLessons(stage.id)}
                         className="stage-card"
@@ -1828,31 +1892,13 @@ function App() {
                                   <li key={lesson.id}>
                                     <button
                                       onClick={() => openLesson(lesson)}
-                                      className={`lesson-row ${completed ? "lesson-completed" : ""}`}
+                                      className="lesson-row"
                                     >
-                                      <div
-                                        style={{
-                                          display: "flex",
-                                          alignItems: "center",
-                                          gap: "1rem",
-                                        }}
-                                      >
-                                        <span
-                                          style={{
-                                            fontSize: "1.5rem",
-                                            color: completed ? "var(--yellow)" : "var(--gray-300)",
-                                          }}
-                                        >
-                                          {completed ? "★" : "●"}
-                                        </span>
-                                        <div style={{ flex: 1 }}>
-                                          <div className="lesson-row-title" dir="rtl" style={{ textAlign: "right" }}>{lesson.title}</div>
-                                          <div className="lesson-row-desc">{lesson.description}</div>
-                                        </div>
+                                      <div className={`lesson-progress-donut ${completed ? "completed" : ""}`} />
+                                      <div className="lesson-row-content">
+                                        <div className="lesson-row-title">{lesson.title}</div>
+                                        <div className="lesson-row-desc">{lesson.description}</div>
                                       </div>
-                                      {completed && (
-                                        <span className="pill pill-completed">✓ Done</span>
-                                      )}
                                     </button>
                                   </li>
                                 );

@@ -7,6 +7,8 @@
   --red-dark: #ea2b2b;
   --yellow: #ffc800;
   --yellow-dark: #e5b400;
+  --purple: #8b5cf6;
+  --purple-dark: #7c3aed;
 
   /* Cream/Beige Theme */
   --white: #fffcf5;
@@ -466,26 +468,32 @@ button {
   background-color: var(--bg-app);
 }
 
+/* Extended App Header with Safe Area support */
 .app-header {
-  height: var(--header-height);
+  height: calc(var(--header-height) + 40px);
+  padding-top: env(safe-area-inset-top, 20px);
   border-bottom: 2px solid var(--gray-200);
   background: var(--white);
-  position: sticky;
+  position: fixed;
   top: 0;
+  left: 0;
+  right: 0;
   z-index: 1000;
-  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  /* Align items to bottom of header */
+  padding-bottom: 0.5rem;
 }
 
 .app-header-content {
   max-width: 600px;
   margin: 0 auto;
-  height: 100%;
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 1rem;
   position: relative;
-  /* For absolute centering of title */
 }
 
 .header-title-centered {
@@ -535,10 +543,16 @@ button {
 
 .app-main {
   flex: 1;
-  width: 100%;
+  background-color: var(--bg-app);
+  padding: 1rem;
+  /* Account for fixed header */
+  margin-top: calc(var(--header-height) + 30px);
+}
+
+.page-layout {
   max-width: 600px;
   margin: 0 auto;
-  padding: 1rem 0.5rem;
+  padding: 1.5rem 0.5rem;
   display: flex;
   flex-direction: column;
 }
@@ -561,13 +575,12 @@ button {
   background: var(--white);
   border: 2px solid var(--gray-200);
   border-radius: var(--radius);
-  padding: 1.5rem;
-  margin-bottom: 1rem;
-  transition: all 0.2s;
-  box-shadow: 0 4px 0 var(--gray-200);
+  padding: 1rem 1.25rem;
+  margin-bottom: 0.5rem;
+  transition: all 0.2s ease;
+  box-shadow: 0 3px 0 var(--gray-200);
   cursor: pointer;
-  min-height: 160px;
-  /* Enforce consistent height */
+  min-height: 100px;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -575,31 +588,72 @@ button {
 
 .stage-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 6px 0 var(--gray-200);
+  box-shadow: 0 5px 0 var(--gray-200);
   background-color: var(--gray-100);
 }
 
 .stage-card:active {
   transform: translateY(2px);
-  box-shadow: 0 2px 0 var(--gray-200);
+  box-shadow: 0 1px 0 var(--gray-200);
+}
+
+/* Lesson container with smooth slide animation */
+.lesson-container-inline {
+  display: grid;
+  grid-template-rows: 1fr;
+  animation: slideOpen 0.4s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  padding: 0.5rem 0;
+}
+
+.lesson-container-inline.closing {
+  animation: slideClose 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes slideOpen {
+  0% {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+
+  100% {
+    grid-template-rows: 1fr;
+    opacity: 1;
+  }
+}
+
+@keyframes slideClose {
+  0% {
+    grid-template-rows: 1fr;
+    opacity: 1;
+  }
+
+  100% {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+}
+
+.lesson-container-inline>* {
+  overflow: hidden;
 }
 
 .stage-name {
-  font-size: 1.2rem;
-  font-weight: 800;
+  font-size: 1.1rem;
+  font-weight: 700;
   color: var(--text-main);
 }
 
 .stage-description {
   color: var(--text-light);
-  margin-top: 0.5rem;
+  margin-top: 0.25rem;
+  font-size: 0.85rem;
 }
 
 .stage-progress-bar {
-  height: 12px;
+  height: 8px;
   background: var(--gray-200);
-  border-radius: 10px;
-  margin-top: 1rem;
+  border-radius: 8px;
+  margin-top: 0.75rem;
   overflow: hidden;
 }
 
@@ -607,16 +661,17 @@ button {
   height: 100%;
   background: var(--yellow);
   width: 0%;
-  border-radius: 10px;
+  border-radius: 8px;
   box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.1);
+  transition: width 0.3s ease;
 }
 
 /* LESSON LIST */
 .lesson-list {
   display: flex;
   flex-direction: column;
-  gap: 0.8rem;
-  margin-top: 1rem;
+  gap: 0.6rem;
+  margin-top: 0.5rem;
   list-style: none;
   padding: 0;
 }
@@ -624,40 +679,87 @@ button {
 .lesson-row {
   background: var(--white);
   border: 2px solid var(--gray-200);
-  padding: 1rem;
+  padding: 0.85rem 1rem;
   border-radius: var(--radius);
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  box-shadow: 0 4px 0 var(--gray-200);
+  gap: 0.75rem;
+  box-shadow: 0 3px 0 var(--gray-200);
   cursor: pointer;
   color: var(--text-main);
-  /* Ensure text is visible */
-  text-align: left;
-  /* Ensure text aligns correctly in button */
   width: 100%;
+  transition: all 0.15s ease;
 }
 
 .lesson-row:hover {
   background: var(--gray-100);
-  transform: translateY(-2px);
-  box-shadow: 0 6px 0 var(--gray-200);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 0 var(--gray-200);
 }
 
 .lesson-row:active {
-  transform: translateY(2px);
-  box-shadow: 0 2px 0 var(--gray-200);
+  transform: translateY(1px);
+  box-shadow: 0 1px 0 var(--gray-200);
+}
+
+/* Lesson progress donut */
+/* Register custom property for animation */
+@property --donut-fill {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.lesson-progress-donut {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--gray-200);
+  position: relative;
+  flex-shrink: 0;
+}
+
+.lesson-progress-donut::before {
+  content: '';
+  position: absolute;
+  inset: 5px;
+  background: var(--white);
+  border-radius: 50%;
+  z-index: 1;
+}
+
+.lesson-progress-donut.completed {
+  --donut-fill: 360deg;
+  background: conic-gradient(from -90deg, var(--purple) var(--donut-fill), var(--gray-200) 0deg);
+  animation: fillDonut 1.2s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+}
+
+@keyframes fillDonut {
+  from {
+    --donut-fill: 0deg;
+  }
+
+  to {
+    --donut-fill: 360deg;
+  }
+}
+
+.lesson-row-content {
+  flex: 1;
+  text-align: right;
+  direction: rtl;
 }
 
 .lesson-row-title {
-  font-weight: 800;
-  font-size: 1rem;
+  font-weight: 700;
+  font-size: 0.95rem;
   color: var(--text-main);
 }
 
 .lesson-row-desc {
   color: var(--text-light);
-  font-size: 0.9rem;
+  font-size: 0.8rem;
+  margin-top: 0.15rem;
 }
 
 /* VOCAB FULLSCREEN UI */
@@ -1596,13 +1698,18 @@ button {
 
 /* ===== NO-SCROLL LAYOUTS ===== */
 
+/* Core Layout discipline - Increased bottom padding */
 .no-scroll-container {
-  height: calc(100vh - var(--header-height, 70px));
+  height: 100vh;
+  height: 100svh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: 1.5rem;
-  justify-content: space-between;
+  /* Top: 100px for larger header, Bottom: 120px for nav buttons */
+  padding: 100px 1.5rem 120px 1.5rem;
+  position: relative;
+  background-color: var(--bg-app);
+  box-sizing: border-box;
 }
 
 .grammar-content-area {
@@ -1623,10 +1730,16 @@ button {
 
 .spotlight-arabic {
   font-size: 2rem !important;
-  padding: 2rem !important;
+  padding: 1.5rem !important;
   margin: 0 !important;
   background: white;
   border-radius: 20px;
+  min-height: 180px;
+  /* Gives more breathing room for long sentences */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.8;
 }
 
 .explanation-bubble {
@@ -1645,8 +1758,13 @@ button {
   margin-bottom: 1rem;
 }
 
+/* Ensure footer is well above system buttons */
 .sticky-footer {
+  width: 100%;
   padding-top: 1rem;
+  padding-bottom: env(safe-area-inset-bottom, 30px);
+  margin-bottom: 20px;
+  /* Extra safety gap */
   display: flex;
   justify-content: center;
 }
@@ -1667,18 +1785,26 @@ button {
   padding: 2rem 1rem;
 }
 
+/* Transition Icons - Placeholder styling for your upcoming images */
 .icon-circle {
-  font-size: 4rem;
   background: var(--white);
-  width: 100px;
-  height: 100px;
+  width: 120px;
+  height: 120px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 50%;
+  border-radius: 24px;
+  /* Squircle look */
   margin-bottom: 2rem;
   box-shadow: 0 4px 0 var(--gray-200);
   border: 2px solid var(--gray-200);
+  overflow: hidden;
+}
+
+.placeholder-img {
+  width: 80%;
+  height: 80%;
+  object-fit: contain;
 }
 
 /* Swipe-in for all phase transitions */
