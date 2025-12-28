@@ -1,5 +1,8 @@
 import { useEffect, useState, useRef } from "react";
 import { supabase } from "./supabaseClient";
+import { Leapfrog } from 'ldrs/react';
+import 'ldrs/react/Leapfrog.css';
+import { App as CapacitorApp } from '@capacitor/app';
 import "./App.css";
 
 function App() {
@@ -12,6 +15,7 @@ function App() {
   const [loadingLessons, setLoadingLessons] = useState(false);
 
   const [activeLesson, setActiveLesson] = useState(null);
+  const activeLessonRef = useRef(null);
 
   const [questions, setQuestions] = useState([]);
   const [loadingQuestions, setLoadingQuestions] = useState(false);
@@ -60,6 +64,7 @@ function App() {
   const [playingParagraphEnd, setPlayingParagraphEnd] = useState(null);
   const [clickedParagraphs, setClickedParagraphs] = useState(new Set());
   const [hideInstruction, setHideInstruction] = useState(false);
+  const [isSlowSpeed, setIsSlowSpeed] = useState(false);
 
   // AUTH STATE
   const [user, setUser] = useState(null);
@@ -76,7 +81,30 @@ function App() {
   // PROFILE MENU STATE
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [showSignOutConfirm, setShowSignOutConfirm] = useState(false);
-  const [showExitAppConfirm, setShowExitAppConfirm] = useState(false);
+  const lastBackPressRef = useRef(0); // For double-tap to exit
+
+  // TRANSITION OVERLAY STATE
+  const [transitioning, setTransitioning] = useState(false);
+  const [transitionDirection, setTransitionDirection] = useState("forward"); // "forward" | "back"
+  const transitionTimerRef = useRef(null);
+
+  // ---------- TRANSITION HELPER ----------
+
+  function beginTransition(minMs = 250) {
+    setTransitioning(true);
+    if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+
+    let doneCalled = false;
+
+    return () => {
+      if (doneCalled) return;
+      doneCalled = true;
+
+      transitionTimerRef.current = setTimeout(() => {
+        setTransitioning(false);
+      }, minMs);
+    };
+  }
 
   // ---------- HELPERS FOR PROGRESS ----------
 
@@ -184,29 +212,39 @@ function App() {
     };
   }, []);
 
+  // Keep ref in sync with activeLesson state
   useEffect(() => {
-    // Handle the back button intercept
-    const handleBackButton = (e) => {
-      e.preventDefault();
+    activeLessonRef.current = activeLesson;
+  }, [activeLesson]);
 
-      if (activeLesson) {
-        // If in a lesson, ask to return to home
+  // Native Android hardware back button handling via Capacitor
+  // Register ONCE to avoid stale closures - use ref to get current value
+  useEffect(() => {
+    const backListener = CapacitorApp.addListener('backButton', (event) => {
+      // 🔴 IMPORTANT: stop default behaviour (closing app)
+      event.preventDefault?.();
+
+      // Use ref to get current value (avoids stale closure)
+      if (activeLessonRef.current) {
+        // Inside a lesson → show exit lesson modal
         setShowExitModal(true);
       } else {
-        // If on home screen, ask to exit app
-        setShowExitAppConfirm(true);
+        // On homepage → double-tap to exit
+        const now = Date.now();
+        if (now - lastBackPressRef.current < 2000) {
+          // Second tap within 2 seconds → exit app
+          CapacitorApp.exitApp();
+        } else {
+          // First tap → record time (user can tap again to exit)
+          lastBackPressRef.current = now;
+        }
       }
+    });
 
-      // Push state back so the next back button click also gets intercepted
-      window.history.pushState(null, null, window.location.pathname);
+    return () => {
+      backListener.remove();
     };
-
-    // Initial push to start intercepting
-    window.history.pushState(null, null, window.location.pathname);
-    window.addEventListener('popstate', handleBackButton);
-
-    return () => window.removeEventListener('popstate', handleBackButton);
-  }, [activeLesson]);
+  }, []); // Register only ONCE
 
   async function handleSignUp(e) {
     e.preventDefault();
@@ -426,6 +464,9 @@ function App() {
   // ---------- OPEN LESSON: QUESTIONS + VOCAB + EXPLANATIONS + BLOCKS ----------
 
   async function openLesson(lesson) {
+    const endTransition = beginTransition(350);
+    setTransitionDirection("forward");
+
     setActiveLesson(lesson);
     setLessonPhase("lesson");
     resetQuiz();
@@ -577,15 +618,21 @@ function App() {
       setLessonBlocks([]);
     } finally {
       setLoadingQuestions(false);
+      endTransition(); // ✅ end overlay once data work is done
     }
   }
 
   function backToLessons() {
+    const endTransition = beginTransition(200);
+    setTransitionDirection("back");
+
     setActiveLesson(null);
     resetQuiz();
     resetAudio();
     resetLessonFlow();
     setQuestions([]);
+
+    endTransition();
   }
 
   // ---------- SAVE LESSON PROGRESS ----------
@@ -652,12 +699,22 @@ function App() {
     if (!activeLesson?.audio_url || !audioRef.current) return;
     if (block.start_time_seconds == null) return;
 
+    // If clicking the same block that's currently playing, toggle speed
+    if (playingParagraphId === block.id && audioPlaying) {
+      const newSpeed = isSlowSpeed ? 1.0 : 0.8;
+      audioRef.current.playbackRate = newSpeed;
+      setIsSlowSpeed(!isSlowSpeed);
+      return;
+    }
+
     const startTime = block.start_time_seconds || 0;
     const endTime = block.end_time_seconds || audioRef.current.duration;
 
     setPlayingParagraphId(block.id);
     setPlayingParagraphEnd(endTime);
+    setIsSlowSpeed(false); // Reset to normal speed for new playback
 
+    audioRef.current.playbackRate = 1.0; // Reset speed
     audioRef.current.currentTime = startTime;
     audioRef.current.play()
       .then(() => {
@@ -933,17 +990,8 @@ function App() {
     const currentQuestion = questions[currentQuestionIndex];
 
     return (
-      <div className="app-shell">
-        <header className="app-header">
-          <div className="app-logo">
-            <img src="/logo.png" alt="Logo" style={{ height: "50px" }} />
-          </div>
-          <div className="app-header-right">
-            <ProfileMenu />
-          </div>
-        </header>
-
-        <main className="app-main quiz-screen">
+      <div className={`app-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <main className="app-main quiz-screen" style={{ marginTop: 0 }}>
           <div className="page-card quiz-card">
             <div className="quiz-header-row">
               <button className="btn-link" onClick={backToLessons}>
@@ -1082,31 +1130,8 @@ function App() {
     const completed = isLessonCompleted(activeLesson.id);
 
     return (
-      <div className="app-shell">
-        <header className="app-header">
-          <div className="app-header-content">
-            <div
-              className="app-logo home-link"
-              style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: "8px" }}
-              onClick={() => {
-                if (audioRef.current) {
-                  audioRef.current.pause();
-                  setAudioPlaying(false);
-                }
-                setShowExitModal(true);
-              }}
-            >
-              <img src="/logo.png" alt="Logo" style={{ height: "50px" }} />
-              <span className="home-text">Home</span>
-            </div>
-
-            <div className="app-header-right">
-              <ProfileMenu />
-            </div>
-          </div>
-        </header>
-
-        <main className="app-main">
+      <div className={`app-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <main className="app-main" style={{ marginTop: 0 }}>
           {lessonPhase === "lesson" && (
             <div className="page-card">
               {activeLesson.audio_url && (
@@ -1212,7 +1237,8 @@ function App() {
                             {/* Instruction Box - fades after first click */}
                             {!hideInstruction && (
                               <div className="instruction-box">
-                                Tap any paragraph to hear it read aloud
+                                <div>Tap any paragraph to hear it read aloud</div>
+                                <div style={{ fontSize: '0.85rem', opacity: 0.8, marginTop: '0.25rem' }}>Tap again to slow down or speed up!</div>
                               </div>
                             )}
 
@@ -1221,6 +1247,7 @@ function App() {
                               {paragraphBlocks.map((b) => {
                                 const isPlaying = playingParagraphId === b.id;
                                 const wasClicked = clickedParagraphs.has(b.id);
+                                const isThisBlockSlow = isPlaying && isSlowSpeed;
                                 return (
                                   <div
                                     key={b.id}
@@ -1249,7 +1276,9 @@ function App() {
                                     {/* Audio indicator on the left */}
                                     <div className="paragraph-audio-indicator">
                                       {isPlaying ? (
-                                        <span className="audio-playing-icon">🔊</span>
+                                        <span className="audio-playing-icon">
+                                          {isThisBlockSlow ? "🐢" : "🔊"}
+                                        </span>
                                       ) : (
                                         <span className="audio-play-icon">▶</span>
                                       )}
@@ -1390,11 +1419,11 @@ function App() {
 
           {/* PHASE: TRANSITION TO GRAMMAR */}
           {lessonPhase === "intro_grammar" && (
-            <div className="no-scroll-container transition-screen">
-              <div className="icon-circle">
-                <img src="/images/explanation-icon.png" alt="Explanation" className="placeholder-img" />
+            <div className="no-scroll-container transition-screen" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+              <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
+                <img src="/images/explanation-icon.jpg" alt="Story" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               </div>
-              <h1 className="page-title">Story Explanation</h1>
+              <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Story Explanation</h1>
               <p className="page-subtitle">Let's have a look at the story content in more detail!</p>
               <footer className="sticky-footer">
                 <button className="btn-primary" onClick={() => setLessonPhase("grammar")}>
@@ -1407,20 +1436,30 @@ function App() {
           {/* PHASE: GRAMMAR SPOTLIGHT CAROUSEL (No Scrolling) */}
           {lessonPhase === "grammar" && grammarNotes.length > 0 && (
             <div className="vocab-fullscreen no-scroll-container swipe-in">
-              <header className="fixed-header">
-                <button className="btn-bubbly-icon" onClick={() => setGrammarIndex(prev => Math.max(0, prev - 1))}>←</button>
+              <header className="fixed-header" style={{ justifyContent: 'space-between' }}>
+                <button
+                  className="btn-bubbly-icon"
+                  onClick={() => {
+                    if (grammarIndex === 0) {
+                      setLessonPhase("lesson");
+                    } else {
+                      setGrammarIndex(prev => Math.max(0, prev - 1));
+                    }
+                  }}
+                >
+                  {grammarIndex === 0 ? "✕" : "←"}
+                </button>
                 <div className="header-bubbly-title">Grammar Point {grammarIndex + 1}</div>
-                <div style={{ width: '50px' }} />
               </header>
 
-              <div key={grammarIndex} className="grammar-content-area swipe-in">
+              <div key={grammarIndex} className="grammar-content-area swipe-in" style={{ gap: '1.5rem', marginTop: '-1rem' }}>
                 <h2 className="grammar-title-text">{grammarNotes[grammarIndex].title}</h2>
 
-                <div className="explanation-bubble">
+                <div className="explanation-bubble" style={{ fontSize: '1.1rem', padding: '1.25rem', lineHeight: '1.7' }}>
                   {grammarNotes[grammarIndex].content_en}
                 </div>
 
-                <div className="arabic-box spotlight-arabic">
+                <div className="arabic-box spotlight-arabic" style={{ borderLeft: '5px solid var(--blue)', padding: '1.5rem' }}>
                   {grammarNotes[grammarIndex].content_ar}
                 </div>
               </div>
@@ -1708,24 +1747,22 @@ function App() {
           {/* PHASE 5: PRE-QUIZ */}
           {
             lessonPhase === "pre_quiz" && (
-              <div className="page-card swipe-in" style={{ textAlign: "center", padding: "3rem 1rem" }}>
-                <div style={{ fontSize: "4rem", marginBottom: "1rem" }}>📝</div>
-                <h1 className="page-title">Ready?</h1>
-                <p
-                  className="page-subtitle"
-                  style={{ marginBottom: "3rem", fontSize: "1.2rem" }}
-                >
-                  Take the quiz to complete this lesson!
-                </p>
-
-                <button
-                  className="btn-primary"
-                  style={{ fontSize: "1.5rem", padding: "1.5rem" }}
-                  onClick={startQuiz}
-                  disabled={questions.length === 0}
-                >
-                  {questions.length === 0 ? "No questions loaded" : "START QUIZ"}
-                </button>
+              <div className="no-scroll-container transition-screen" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+                <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
+                  <img src="/images/quiz-icon.jpg" alt="Quiz" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                </div>
+                <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Ready?</h1>
+                <p className="page-subtitle">Take the quiz to complete this lesson!</p>
+                <footer className="sticky-footer">
+                  <button
+                    className="btn-primary"
+                    style={{ fontSize: "1.2rem", padding: "1rem 2rem" }}
+                    onClick={startQuiz}
+                    disabled={questions.length === 0}
+                  >
+                    {questions.length === 0 ? "No questions loaded" : "START QUIZ"}
+                  </button>
+                </footer>
               </div>
             )
           }
@@ -1774,23 +1811,11 @@ function App() {
             )
           }
 
-          {showExitAppConfirm && (
-            <div className="modal-overlay">
-              <div className="modal-content">
-                <h3 className="modal-title">Exit App?</h3>
-                <p className="text-muted">Are you sure you want to close the app?</p>
-                <div className="modal-actions">
-                  <button className="btn-outline" style={{ flex: 1 }} onClick={() => setShowExitAppConfirm(false)}>
-                    Stay
-                  </button>
-                  <button
-                    className="btn-primary"
-                    style={{ flex: 1, backgroundColor: "var(--red)", boxShadow: "0 4px 0 var(--red-dark)" }}
-                    onClick={() => window.close()} /* Note: window.close() only works in some webview contexts */
-                  >
-                    Exit
-                  </button>
-                </div>
+          {/* Global Transition Overlay */}
+          {transitioning && (
+            <div className="transition-overlay">
+              <div className="transition-card">
+                <Leapfrog size="40" speed="2.5" color="#8b5cf6" />
               </div>
             </div>
           )}
@@ -1814,7 +1839,7 @@ function App() {
         </div>
       </header>
 
-      <main className="app-main">
+      <main className={`app-main ${transitionDirection === 'back' ? 'page-transition-back' : ''}`}>
         <div className="page-layout">
           <section
             className="page-card"
@@ -1915,6 +1940,15 @@ function App() {
           </section>
         </div>
       </main>
+
+      {/* Global Transition Overlay */}
+      {transitioning && (
+        <div className="transition-overlay">
+          <div className="transition-card">
+            <Leapfrog size="40" speed="2.5" color="#8b5cf6" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
