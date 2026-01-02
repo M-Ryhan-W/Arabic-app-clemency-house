@@ -3,7 +3,27 @@ import { supabase } from "./supabaseClient";
 import { Leapfrog } from 'ldrs/react';
 import 'ldrs/react/Leapfrog.css';
 import { App as CapacitorApp } from '@capacitor/app';
+import { Haptics, ImpactStyle } from '@capacitor/haptics';
+import { DotLottieReact } from '@lottiefiles/dotlottie-react';
 import "./App.css";
+
+// Utility function for haptic feedback
+const triggerHaptic = async () => {
+  try {
+    await Haptics.impact({ style: ImpactStyle.Light });
+  } catch (e) {
+    // Haptics not available (e.g., on web)
+  }
+};
+
+// Utility function for heavy haptic feedback (quiz finish screens)
+const triggerHeavyHaptic = async () => {
+  try {
+    await Haptics.impact({ style: ImpactStyle.Heavy });
+  } catch (e) {
+    // Haptics not available (e.g., on web)
+  }
+};
 
 function App() {
   const [stages, setStages] = useState([]);
@@ -41,6 +61,13 @@ function App() {
   const [selectedOptionId, setSelectedOptionId] = useState(null);
   const [answerResult, setAnswerResult] = useState(null); // "correct" | "wrong" | null
   const [quizFinished, setQuizFinished] = useState(false);
+
+  // Trigger heavy haptic when quiz finishes (success or failure)
+  useEffect(() => {
+    if (quizFinished) {
+      triggerHeavyHaptic();
+    }
+  }, [quizFinished]);
 
   // LESSON FLOW STATE
   const [lessonPhase, setLessonPhase] = useState("lesson");
@@ -81,6 +108,7 @@ function App() {
   // PROFILE MENU STATE
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [showSignOutConfirm, setShowSignOutConfirm] = useState(false);
+  const [showQuitQuizConfirm, setShowQuitQuizConfirm] = useState(false);
   const lastBackPressRef = useRef(0); // For double-tap to exit
 
   // TRANSITION OVERLAY STATE
@@ -464,6 +492,15 @@ function App() {
   // ---------- OPEN LESSON: QUESTIONS + VOCAB + EXPLANATIONS + BLOCKS ----------
 
   async function openLesson(lesson) {
+    triggerHaptic();
+
+    // Play lesson enter sound
+    try {
+      const enterSound = new Audio('/whoosh-velocity-383019.mp3');
+      enterSound.volume = 0.3;
+      enterSound.play();
+    } catch (e) { /* sound not available */ }
+
     const endTransition = beginTransition(350);
     setTransitionDirection("forward");
 
@@ -701,7 +738,7 @@ function App() {
 
     // If clicking the same block that's currently playing, toggle speed
     if (playingParagraphId === block.id && audioPlaying) {
-      const newSpeed = isSlowSpeed ? 1.0 : 0.8;
+      const newSpeed = isSlowSpeed ? 1.0 : 0.85;
       audioRef.current.playbackRate = newSpeed;
       setIsSlowSpeed(!isSlowSpeed);
       return;
@@ -892,8 +929,8 @@ function App() {
           <div className="auth-left">
             <div className="auth-logo animate-slide-up">
               <img
-                src="/logo.png"
-                alt="Clemency House Logo"
+                src="/clemency-icon.png"
+                alt="Ihya Institute Logo"
                 style={{ width: "120px", height: "auto" }}
               />
             </div>
@@ -989,16 +1026,86 @@ function App() {
   if (activeLesson && quizActive) {
     const currentQuestion = questions[currentQuestionIndex];
 
+    // FULL PAGE CELEBRATION - Early return when quiz passed
+    if (quizFinished && hearts > 0) {
+      return (
+        <div className="celebration-fullpage">
+          {/* Quiz Pass Sound */}
+          <audio autoPlay>
+            <source src="/Quiz pass123.mp3" type="audio/mpeg" />
+          </audio>
+
+          <div className="celebration-lottie">
+            <DotLottieReact
+              src="/animations/done.lottie"
+              loop
+              autoplay
+              style={{ width: '260px', height: '260px' }}
+            />
+          </div>
+
+          <h1 className="celebration-title-grand">Well Done!</h1>
+          <p className="celebration-subtitle-grand">
+            You've mastered this lesson
+          </p>
+
+          <div className="celebration-stats">
+            <div className="stat-item">
+              <span className="stat-value">{hearts}</span>
+              <span className="stat-label">Hearts Left</span>
+            </div>
+            <div className="stat-divider"></div>
+            <div className="stat-item">
+              <span className="stat-value">100%</span>
+              <span className="stat-label">Complete</span>
+            </div>
+          </div>
+
+          <button className="btn-celebration" onClick={backToLessons}>
+            Continue Learning →
+          </button>
+        </div>
+      );
+    }
+
     return (
       <div className={`app-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
         <main className="app-main quiz-screen" style={{ marginTop: 0 }}>
-          <div className="page-card quiz-card">
+          <div className="quiz-content">
             <div className="quiz-header-row">
-              <button className="btn-link" onClick={backToLessons}>
-                ← Back to lesson
-              </button>
+              <span
+                style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+                onClick={() => setShowQuitQuizConfirm(true)}
+              >
+                ✕
+              </span>
               <HeartsBar />
             </div>
+
+            {/* Quit Quiz Confirmation Modal */}
+            {showQuitQuizConfirm && (
+              <div className="modal-overlay">
+                <div className="modal-content">
+                  <h3 className="modal-title">Leave Quiz?</h3>
+                  <p className="text-muted">Are you sure you want to return to the home page? All progress will be lost.</p>
+                  <div className="modal-actions">
+                    <button className="btn-outline" style={{ flex: 1 }} onClick={() => setShowQuitQuizConfirm(false)}>
+                      Stay
+                    </button>
+                    <button
+                      className="btn-primary"
+                      style={{ flex: 1, backgroundColor: "var(--red)", boxShadow: "0 4px 0 var(--red-dark)" }}
+                      onClick={() => {
+                        setShowQuitQuizConfirm(false);
+                        backToLessons();
+                      }}
+                    >
+                      Leave
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="quiz-progress-bar">
               <div
@@ -1014,7 +1121,7 @@ function App() {
               <div key={currentQuestion.id} className="quiz-question-container swipe-in">
                 <h2 className="quiz-question">{currentQuestion.prompt_text}</h2>
 
-                <div className="quiz-options">
+                <div className={`quiz-options ${currentQuestion.options.length === 3 ? 'quiz-options-three' : ''}`}>
                   {currentQuestion.options.map((opt) => {
                     const isSelected = selectedOptionId === opt.id;
                     const isCorrect = opt.is_correct;
@@ -1069,50 +1176,34 @@ function App() {
               </div>
             )}
 
-            {/* CELEBRATION SCREEN - SUCCESS */}
-            {quizFinished && hearts > 0 && (
-              <div className="celebration-screen swipe-in">
-                <div className="confetti-container">
-                  <div className="confetti"></div>
-                  <div className="confetti"></div>
-                  <div className="confetti"></div>
-                  <div className="confetti"></div>
-                  <div className="confetti"></div>
-                  <div className="confetti"></div>
-                  <div className="confetti"></div>
-                  <div className="confetti"></div>
-                  <div className="confetti"></div>
-                  <div className="confetti"></div>
-                </div>
-
-                <div className="celebration-trophy">
-                  <img src="/images/trophy.png" alt="Trophy" style={{ width: '180px' }} />
-                </div>
-                <h1 className="celebration-title">Congratulations!</h1>
-                <p className="celebration-message">
-                  You've successfully completed this lesson with {hearts} heart{hearts === 1 ? "" : "s"} remaining.
-                </p>
-                <footer className="sticky-footer">
-                  <button className="btn-primary btn-home" onClick={backToLessons}>
-                    Return Home
-                  </button>
-                </footer>
-              </div>
-            )}
-
-            {/* FAILURE SCREEN */}
+            {/* FAILURE SCREEN - Full page sad design */}
             {quizFinished && hearts <= 0 && (
-              <div className="page-card center-content swipe-in">
-                <div className="icon-circle" style={{ background: '#fee2e2', borderColor: '#fca5a5' }}>😢</div>
-                <h1 className="page-title" style={{ color: 'var(--red)' }}>Out of Hearts</h1>
-                <p className="page-subtitle">
+              <div className="failure-fullpage swipe-in">
+                {/* Broken Heart SVG Icon */}
+                <div className="failure-icon-container">
+                  <svg width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="60" cy="60" r="55" fill="#1e293b" stroke="#334155" strokeWidth="2" />
+                    <path d="M60 90C60 90 30 70 30 50C30 40 38 32 48 32C54 32 58 36 60 40C62 36 66 32 72 32C82 32 90 40 90 50C90 70 60 90 60 90Z" fill="#475569" />
+                    <path d="M55 45L65 55L55 65L60 75L65 65L60 55L70 45" stroke="#94a3b8" strokeWidth="3" strokeLinecap="round" />
+                  </svg>
+                </div>
+
+                <h1 className="failure-title">Out of Hearts</h1>
+                <p className="failure-subtitle">
                   Don't give up! Review the lesson and try again.
                 </p>
-                <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
-                  <button className="btn-outline" onClick={startQuiz}>
+
+                <div className="failure-buttons">
+                  <button
+                    className="btn-failure-retry"
+                    onClick={() => { triggerHaptic(); startQuiz(); }}
+                  >
                     Try Again
                   </button>
-                  <button className="btn-primary" onClick={backToLessons}>
+                  <button
+                    className="btn-failure-home"
+                    onClick={backToLessons}
+                  >
                     Return Home
                   </button>
                 </div>
@@ -1133,7 +1224,7 @@ function App() {
       <div className={`app-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
         <main className="app-main" style={{ marginTop: 0 }}>
           {lessonPhase === "lesson" && (
-            <div className="page-card">
+            <div className="lesson-content">
               {activeLesson.audio_url && (
                 <audio
                   ref={audioRef}
@@ -1379,7 +1470,7 @@ function App() {
                 )
               }
 
-              <div style={{ marginTop: "2rem", minHeight: "60px" }}>
+              <div style={{ marginTop: "0.5rem", paddingBottom: "2rem", minHeight: "60px" }}>
                 {(() => {
                   // Check if this is a paragraph-based lesson (they have their own proceed button)
                   const hasParagraphs = lessonBlocks.some(b => b.block_type === "paragraph");
@@ -1436,25 +1527,17 @@ function App() {
           {/* PHASE: GRAMMAR SPOTLIGHT CAROUSEL (No Scrolling) */}
           {lessonPhase === "grammar" && grammarNotes.length > 0 && (
             <div className="vocab-fullscreen no-scroll-container swipe-in">
-              <header className="fixed-header" style={{ justifyContent: 'space-between' }}>
-                <button
-                  className="btn-bubbly-icon"
-                  onClick={() => {
-                    if (grammarIndex === 0) {
-                      setLessonPhase("lesson");
-                    } else {
-                      setGrammarIndex(prev => Math.max(0, prev - 1));
-                    }
-                  }}
+              <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
+                <span
+                  style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+                  onClick={() => setLessonPhase("lesson")}
                 >
-                  {grammarIndex === 0 ? "✕" : "←"}
-                </button>
-                <div className="header-bubbly-title">Grammar Point {grammarIndex + 1}</div>
+                  ←
+                </span>
+                <h2 className="grammar-title-text" style={{ margin: 0, fontSize: '1.25rem' }}>{grammarNotes[grammarIndex].title}</h2>
               </header>
 
-              <div key={grammarIndex} className="grammar-content-area swipe-in" style={{ gap: '1.5rem', marginTop: '-1rem' }}>
-                <h2 className="grammar-title-text">{grammarNotes[grammarIndex].title}</h2>
-
+              <div key={grammarIndex} className="carousel-content-area swipe-in">
                 <div className="explanation-bubble" style={{ fontSize: '1.1rem', padding: '1.25rem', lineHeight: '1.7' }}>
                   {grammarNotes[grammarIndex].content_en}
                 </div>
@@ -1465,26 +1548,48 @@ function App() {
               </div>
 
               <footer className="sticky-footer">
-                {grammarIndex < grammarNotes.length - 1 ? (
-                  <button className="btn-primary" onClick={() => setGrammarIndex(i => i + 1)}>
-                    Next Note
+                <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+                  <button
+                    className="btn-nav-arrow"
+                    onClick={() => grammarIndex > 0 && setGrammarIndex(i => i - 1)}
+                    disabled={grammarIndex === 0}
+                    style={{ opacity: grammarIndex === 0 ? 0.3 : 1 }}
+                  >
+                    ←
                   </button>
-                ) : (
-                  <button className="btn-primary" onClick={() => setLessonPhase("intro_vocab")}>
-                    Proceed to Vocab →
+                  <button
+                    className="btn-primary"
+                    style={{ flex: 1 }}
+                    onClick={() => {
+                      if (grammarIndex === grammarNotes.length - 1) {
+                        setLessonPhase("intro_vocab");
+                      } else {
+                        setGrammarIndex(i => i + 1);
+                      }
+                    }}
+                  >
+                    CONTINUE
                   </button>
-                )}
+                  <button
+                    className="btn-nav-arrow"
+                    onClick={() => grammarIndex < grammarNotes.length - 1 && setGrammarIndex(i => i + 1)}
+                    disabled={grammarIndex === grammarNotes.length - 1}
+                    style={{ opacity: grammarIndex === grammarNotes.length - 1 ? 0.3 : 1 }}
+                  >
+                    →
+                  </button>
+                </div>
               </footer>
             </div>
           )}
 
           {/* PHASE: TRANSITION TO VOCAB */}
           {lessonPhase === "intro_vocab" && (
-            <div className="no-scroll-container transition-screen">
-              <div className="icon-circle">
-                <img src="/images/vocab-icon.png" alt="Vocabulary" className="placeholder-img" />
+            <div className="no-scroll-container transition-screen" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+              <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
+                <img src="/images/vocab-book.jpg" alt="Vocabulary" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               </div>
-              <h1 className="page-title">New Words</h1>
+              <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>New Words</h1>
               <p className="page-subtitle">Let's take a look at the new words we have learnt!</p>
               <footer className="sticky-footer">
                 <button className="btn-primary" onClick={() => setLessonPhase("vocab")}>
@@ -1496,27 +1601,17 @@ function App() {
 
           {/* PHASE 2: VOCAB CAROUSEL */}
           {lessonPhase === "vocab" && (
-            <div className="vocab-fullscreen swipe-in" style={{ paddingTop: "1rem" }}>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  marginBottom: "2rem",
-                }}
-              >
-                <button
-                  className="btn-bubbly-icon"
-                  style={{ width: "45px", height: "45px" }}
-                  onClick={() => {
-                    if (vocabIndex > 0) setVocabIndex((i) => i - 1);
-                    else setLessonPhase("lesson");
-                  }}
+            <div className="vocab-fullscreen no-scroll-container swipe-in">
+              {/* Header with back arrow and lesson title */}
+              <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
+                <span
+                  style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+                  onClick={() => setLessonPhase("lesson")}
                 >
                   ←
-                </button>
-                <div style={{ flex: 1 }} />
-              </div>
+                </span>
+                <div className="lesson-title-badge">{activeLesson.title}</div>
+              </header>
 
               {vocabItems.length === 0 ? (
                 <div className="center-content">
@@ -1532,8 +1627,8 @@ function App() {
                 (() => {
                   const item = vocabItems[vocabIndex];
                   return (
-                    <div key={vocabIndex} className="swipe-in">
-                      <div className="vocab-label" style={{ textAlign: "right" }}>
+                    <div key={vocabIndex} className="carousel-content-area swipe-in">
+                      <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>
                         :عربي
                       </div>
                       <div className="vocab-card" style={{ direction: "rtl" }}>
@@ -1554,31 +1649,50 @@ function App() {
                         </div>
                       </div>
 
-                      <div className="vocab-label">English:</div>
+                      <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
                       <div className="vocab-card">
                         <div className="vocab-text-main">{item.english}</div>
-                      </div>
-
-                      <div className="vocab-footer">
-                        {vocabIndex === vocabItems.length - 1 ? (
-                          <button
-                            className="btn-main-action"
-                            onClick={() => setLessonPhase("intro_drills")}
-                          >
-                            FINISH VOCAB →
-                          </button>
-                        ) : (
-                          <button
-                            className="btn-main-action"
-                            onClick={() => setVocabIndex((i) => i + 1)}
-                          >
-                            NEXT WORD →
-                          </button>
-                        )}
                       </div>
                     </div>
                   );
                 })()
+              )}
+
+              {/* Footer with left/right arrows and continue button */}
+              {vocabItems.length > 0 && (
+                <footer className="sticky-footer">
+                  <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+                    <button
+                      className="btn-nav-arrow"
+                      onClick={() => vocabIndex > 0 && setVocabIndex(i => i - 1)}
+                      disabled={vocabIndex === 0}
+                      style={{ opacity: vocabIndex === 0 ? 0.3 : 1 }}
+                    >
+                      ←
+                    </button>
+                    <button
+                      className="btn-primary"
+                      style={{ flex: 1 }}
+                      onClick={() => {
+                        if (vocabIndex === vocabItems.length - 1) {
+                          setLessonPhase("intro_drills");
+                        } else {
+                          setVocabIndex(i => i + 1);
+                        }
+                      }}
+                    >
+                      CONTINUE
+                    </button>
+                    <button
+                      className="btn-nav-arrow"
+                      onClick={() => vocabIndex < vocabItems.length - 1 && setVocabIndex(i => i + 1)}
+                      disabled={vocabIndex === vocabItems.length - 1}
+                      style={{ opacity: vocabIndex === vocabItems.length - 1 ? 0.3 : 1 }}
+                    >
+                      →
+                    </button>
+                  </div>
+                </footer>
               )}
             </div>
           )
@@ -1586,11 +1700,11 @@ function App() {
 
           {/* PHASE: TRANSITION TO DRILLS */}
           {lessonPhase === "intro_drills" && (
-            <div className="no-scroll-container transition-screen">
-              <div className="icon-circle">
-                <img src="/images/drills-icon.png" alt="Drills" className="placeholder-img" />
+            <div className="no-scroll-container transition-screen" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+              <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
+                <img src="/images/sentence-practice.png" alt="Sentence Practice" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               </div>
-              <h1 className="page-title">Sentence Practice</h1>
+              <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Sentence Practice</h1>
               <p className="page-subtitle">Let's look at some ways of using these words in sentences!</p>
               <footer className="sticky-footer">
                 <button className="btn-primary" onClick={() => setLessonPhase("explain")}>
@@ -1603,51 +1717,62 @@ function App() {
           {/* PHASE 3: USAGE DRILLS (Carousel Mode) */}
           {lessonPhase === "explain" && explanations.length > 0 && (
             <div className="no-scroll-container">
-              {/* Header identifying the phase */}
-              <header className="fixed-header">
-                <button className="btn-bubbly-icon" onClick={() => {
-                  if (explanationIndex > 0) setExplanationIndex(i => i - 1);
-                  else setLessonPhase("intro_drills");
-                }}>←</button>
-                <div className="header-bubbly-title">Usage Drill {explanationIndex + 1}</div>
-                <div style={{ width: '50px' }} />
+              {/* Header with back arrow and lesson title */}
+              <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
+                <span
+                  style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+                  onClick={() => setLessonPhase("lesson")}
+                >
+                  ←
+                </span>
+                <div className="lesson-title-badge">{activeLesson.title}</div>
               </header>
 
-              <div className="grammar-content-area">
-                <div className="vocab-label" style={{ textAlign: "right" }}>:عربي</div>
+              <div className="carousel-content-area">
+                <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>:عربي</div>
                 <div className="arabic-box spotlight-arabic" dir="rtl" style={{ fontSize: '2rem' }}>
                   {explanations[explanationIndex].arabic_sentence}
                 </div>
 
-                <div className="vocab-label">English:</div>
+                <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
                 <div className="explanation-bubble" style={{ borderLeft: '5px solid var(--green)', background: '#f0fff4' }}>
                   {explanations[explanationIndex].english_sentence}
                 </div>
               </div>
 
               <footer className="sticky-footer">
-                <div style={{ display: 'flex', gap: '1rem', width: '100%' }}>
-                  {explanationIndex < explanations.length - 1 ? (
-                    <button
-                      className="btn-primary"
-                      style={{ width: '100%' }}
-                      onClick={() => setExplanationIndex(i => i + 1)}
-                    >
-                      Next Sentence
-                    </button>
-                  ) : (
-                    <button
-                      className="btn-primary"
-                      style={{ width: '100%', background: 'var(--blue)', boxShadow: '0 4px 0 var(--blue-dark)' }}
-                      onClick={() => {
+                <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+                  <button
+                    className="btn-nav-arrow"
+                    onClick={() => explanationIndex > 0 && setExplanationIndex(i => i - 1)}
+                    disabled={explanationIndex === 0}
+                    style={{ opacity: explanationIndex === 0 ? 0.3 : 1 }}
+                  >
+                    ←
+                  </button>
+                  <button
+                    className="btn-primary"
+                    style={{ flex: 1 }}
+                    onClick={() => {
+                      if (explanationIndex === explanations.length - 1) {
                         setLessonPhase("relisten");
                         setAudioCompleted(false);
                         setAudioProgress(0);
-                      }}
-                    >
-                      Mastered! Review Audio →
-                    </button>
-                  )}
+                      } else {
+                        setExplanationIndex(i => i + 1);
+                      }
+                    }}
+                  >
+                    CONTINUE
+                  </button>
+                  <button
+                    className="btn-nav-arrow"
+                    onClick={() => explanationIndex < explanations.length - 1 && setExplanationIndex(i => i + 1)}
+                    disabled={explanationIndex === explanations.length - 1}
+                    style={{ opacity: explanationIndex === explanations.length - 1 ? 0.3 : 1 }}
+                  >
+                    →
+                  </button>
                 </div>
               </footer>
             </div>
@@ -1656,21 +1781,16 @@ function App() {
           {/* PHASE 4: RELISTEN */}
           {
             lessonPhase === "relisten" && (
-              <div
-                className="page-card swipe-in"
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  minHeight: "60vh",
-                  textAlign: "center",
-                }}
-              >
-                <h1 style={{ fontSize: "2rem", marginBottom: "1rem" }}>
+              <div className="relisten-screen swipe-in">
+                {/* Icon */}
+                <div className="relisten-icon-container">
+                  <img src="/clemency-icon.png" alt="Ihya Institute" className="relisten-icon" />
+                </div>
+
+                <h1 className="relisten-title">
                   Let's have another listen
                 </h1>
-                <p className="muted" style={{ marginBottom: "2rem" }}>
+                <p className="relisten-subtitle">
                   Listen again one more time without the text!
                 </p>
 
@@ -1694,15 +1814,9 @@ function App() {
                       style={{ display: "none" }}
                     />
 
-                    <div style={{ marginBottom: "2rem" }}>
+                    <div className="relisten-play-container">
                       <button
-                        className="btn-circle btn-bubbly-icon"
-                        style={{
-                          width: "80px",
-                          height: "80px",
-                          fontSize: "2rem",
-                          margin: "0 auto",
-                        }}
+                        className="btn-play-large"
                         onClick={handleStartLessonAudio}
                         disabled={audioPlaying}
                       >
@@ -1711,7 +1825,7 @@ function App() {
                     </div>
 
                     {activeLesson.audio_url && !audioCompleted && (
-                      <div className="audio-progress-fixed">
+                      <div className="audio-progress-fixed" style={{ marginBottom: '1rem' }}>
                         <div
                           className="audio-progress-fill-fixed"
                           style={{ width: `${audioProgress}%` }}
@@ -1724,7 +1838,7 @@ function App() {
                 {audioCompleted && (
                   <button
                     className="btn-primary"
-                    style={{ animation: "slideDown 0.3s ease-out" }}
+                    style={{ animation: "slideDown 0.3s ease-out", marginBottom: "1rem" }}
                     onClick={() => setLessonPhase("pre_quiz")}
                   >
                     Continue to Quiz →
@@ -1734,11 +1848,10 @@ function App() {
                 <div style={{ flex: 1 }} />
 
                 <button
-                  className="btn-link"
-                  style={{ marginTop: "2rem" }}
+                  className="btn-skip-bubble"
                   onClick={() => setLessonPhase("pre_quiz")}
                 >
-                  Skip to quiz →
+                  Skip to Quiz
                 </button>
               </div>
             )
@@ -1748,19 +1861,19 @@ function App() {
           {
             lessonPhase === "pre_quiz" && (
               <div className="no-scroll-container transition-screen" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
-                <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
-                  <img src="/images/quiz-icon.jpg" alt="Quiz" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                <div style={{ width: '70vw', maxWidth: '280px', marginBottom: '1.5rem' }}>
+                  <img src="/clemency-icon.png" alt="Ihya Institute" style={{ width: '100%', height: 'auto' }} />
                 </div>
-                <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Ready?</h1>
+                <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>مُستَعِد؟</h1>
                 <p className="page-subtitle">Take the quiz to complete this lesson!</p>
                 <footer className="sticky-footer">
                   <button
                     className="btn-primary"
                     style={{ fontSize: "1.2rem", padding: "1rem 2rem" }}
-                    onClick={startQuiz}
+                    onClick={() => { triggerHaptic(); startQuiz(); }}
                     disabled={questions.length === 0}
                   >
-                    {questions.length === 0 ? "No questions loaded" : "START QUIZ"}
+                    {questions.length === 0 ? "No questions loaded" : "ابدأ"}
                   </button>
                 </footer>
               </div>
@@ -1831,7 +1944,7 @@ function App() {
       <header className="app-header">
         <div className="app-header-content">
           <div className="app-logo">
-            <img src="/logo.png" alt="Logo" style={{ height: "50px" }} />
+            <img src="/clemency-icon.png" alt="Ihya Institute Logo" style={{ height: "50px" }} />
           </div>
           <div className="app-header-right">
             <ProfileMenu />
@@ -1872,7 +1985,7 @@ function App() {
                   return (
                     <div key={stage.id} style={{ marginBottom: "1rem" }}>
                       <button
-                        onClick={() => loadLessons(stage.id)}
+                        onClick={() => { triggerHaptic(); loadLessons(stage.id); }}
                         className="stage-card"
                         style={{
                           width: "100%",

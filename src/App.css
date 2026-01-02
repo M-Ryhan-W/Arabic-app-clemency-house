@@ -181,6 +181,32 @@ button {
   margin-top: 4px;
 }
 
+/* Navigation arrow buttons for carousels */
+.btn-nav-arrow {
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  border: 2px solid var(--green);
+  background: transparent;
+  color: var(--green);
+  font-size: 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.btn-nav-arrow:hover:not(:disabled) {
+  background: var(--green);
+  color: white;
+}
+
+.btn-nav-arrow:disabled {
+  cursor: not-allowed;
+}
+
 .btn-secondary {
   background-color: var(--blue);
   color: var(--white);
@@ -593,6 +619,18 @@ button {
   flex-direction: column;
 }
 
+/* Lesson content - no outer box, just layout */
+.lesson-content {
+  padding: 1rem;
+  padding-top: 4rem;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  max-width: 600px;
+  margin: 0 auto;
+  width: 100%;
+}
+
 /* STAGES */
 .stage-card {
   background: var(--white);
@@ -965,9 +1003,21 @@ button {
 .quiz-options {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.6rem;
+  gap: 0.5rem;
   max-width: 600px;
   margin: 0 auto;
+  padding: 0 0.25rem;
+}
+
+/* When there are 3 options, center the third one */
+.quiz-options-three {
+  grid-template-columns: 1fr 1fr;
+}
+
+.quiz-options-three .option-button:nth-child(3) {
+  grid-column: 1 / -1;
+  justify-self: center;
+  max-width: calc(50% - 0.25rem);
 }
 
 .option-button {
@@ -1728,8 +1778,8 @@ button {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  /* Top: 100px for larger header, Bottom: 120px for nav buttons */
-  padding: 100px 1.5rem 120px 1.5rem;
+  /* Top: 60px for smaller header, Bottom: 120px for nav buttons */
+  padding: 60px 1.5rem 120px 1.5rem;
   position: relative;
   background-color: var(--bg-app);
   box-sizing: border-box;
@@ -1772,13 +1822,64 @@ button {
   border-radius: 12px;
   font-size: 1.05rem;
   line-height: 1.6;
+  text-align: center;
 }
 
 .fixed-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  margin-bottom: 0.5rem;
+  padding-top: 0;
+  position: relative;
+}
+
+/* Lesson title badge in header - modern sleek design */
+.lesson-title-badge {
+  background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+  color: white;
+  padding: 0.6rem 1.25rem;
+  border-radius: 20px;
+  font-weight: 600;
+  font-size: 0.9rem;
+  box-shadow: 0 4px 12px rgba(34, 197, 94, 0.3);
+  letter-spacing: 0.02em;
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+/* Standardized carousel content area */
+.carousel-content-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 0 0.5rem;
+}
+
+/* Quiz content without outer box */
+.quiz-content {
+  padding: 2.5rem 0.75rem 1.5rem 0.75rem;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  max-width: 600px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.quiz-content .quiz-header-row {
   margin-bottom: 1rem;
+}
+
+.quiz-content .quiz-progress-bar {
+  margin-bottom: 1.5rem;
+}
+
+.quiz-content .quiz-question-container {
+  margin-top: 0.5rem;
 }
 
 /* Ensure footer is well above system buttons */
@@ -1795,7 +1896,10 @@ button {
 /* ===== TRANSITION SCREENS ===== */
 
 .transition-screen {
-  min-height: 60vh;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .center-content {
@@ -1806,6 +1910,89 @@ button {
   text-align: center;
   height: 100%;
   padding: 2rem 1rem;
+}
+
+/* ===== RELISTEN SCREEN ===== */
+.relisten-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 3rem 1.5rem 2rem;
+  min-height: 100vh;
+  background: var(--bg-app);
+}
+
+.relisten-icon-container {
+  width: 120px;
+  height: 120px;
+  margin-bottom: 1.5rem;
+  margin-top: 2rem;
+}
+
+.relisten-icon {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 24px;
+}
+
+.relisten-title {
+  font-size: 1.75rem;
+  font-weight: 800;
+  color: var(--text-main);
+  margin: 0 0 0.5rem 0;
+}
+
+.relisten-subtitle {
+  font-size: 1rem;
+  color: var(--text-light);
+  margin: 0 0 2rem 0;
+}
+
+.relisten-play-container {
+  margin-bottom: 1.5rem;
+}
+
+.btn-play-large {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+  border: none;
+  font-size: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(34, 197, 94, 0.4);
+  transition: all 0.2s ease;
+}
+
+.btn-play-large:hover {
+  transform: scale(1.05);
+}
+
+.btn-play-large:disabled {
+  opacity: 0.7;
+}
+
+/* Skip to Quiz bubble button */
+.btn-skip-bubble {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-light);
+  padding: 0.75rem 1.5rem;
+  border-radius: 50px;
+  border: 1px solid var(--gray-200);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-bottom: env(safe-area-inset-bottom, 30px);
+}
+
+.btn-skip-bubble:hover {
+  background: rgba(0, 0, 0, 0.1);
 }
 
 /* Transition Icons - Placeholder styling for your upcoming images */
@@ -1913,6 +2100,247 @@ button {
   padding: 2rem;
   overflow: hidden;
   background: linear-gradient(135deg, #fff9e6 0%, #fef3c7 100%);
+}
+
+/* Grand Celebration Screen */
+/* Full page celebration - no quiz elements visible */
+.celebration-fullpage {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 2rem 1.5rem;
+  padding-bottom: calc(env(safe-area-inset-bottom, 30px) + 2rem);
+  background: linear-gradient(180deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  animation: fadeInGrand 0.5s ease-out;
+  z-index: 9999;
+  overflow: hidden;
+}
+
+/* Full page failure screen */
+.failure-fullpage {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 2rem 1.5rem;
+  padding-bottom: calc(env(safe-area-inset-bottom, 30px) + 2rem);
+  background: linear-gradient(180deg, #1a1a2e 0%, #16213e 50%, #0f0f23 100%);
+  animation: fadeInGrand 0.5s ease-out;
+  z-index: 9999;
+  overflow: hidden;
+}
+
+.failure-icon-container {
+  margin-bottom: 1.5rem;
+  animation: popIn 0.6s cubic-bezier(0.68, -0.55, 0.27, 1.55);
+}
+
+.failure-title {
+  font-size: 2rem;
+  font-weight: 800;
+  color: #ef4444;
+  margin: 0 0 0.5rem 0;
+  text-shadow: 0 0 30px rgba(239, 68, 68, 0.3);
+  animation: slideUp 0.5s ease-out 0.2s backwards;
+}
+
+.failure-subtitle {
+  font-size: 1rem;
+  color: #64748b;
+  margin: 0 0 2.5rem 0;
+  animation: slideUp 0.5s ease-out 0.3s backwards;
+}
+
+.failure-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  width: 100%;
+  max-width: 280px;
+  animation: slideUp 0.5s ease-out 0.4s backwards;
+}
+
+.btn-failure-retry {
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  color: white;
+  padding: 1rem 2rem;
+  border-radius: 50px;
+  font-size: 1rem;
+  font-weight: 700;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4);
+  transition: all 0.3s ease;
+}
+
+.btn-failure-retry:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(59, 130, 246, 0.5);
+}
+
+.btn-failure-home {
+  background: transparent;
+  color: #64748b;
+  padding: 0.75rem 2rem;
+  border-radius: 50px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border: 1px solid #334155;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.btn-failure-home:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #94a3b8;
+}
+
+.celebration-screen-grand {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 2rem 1.5rem;
+  overflow: hidden;
+  background: linear-gradient(180deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  animation: fadeInGrand 0.5s ease-out;
+}
+
+@keyframes fadeInGrand {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.celebration-lottie {
+  margin-bottom: 0.5rem;
+  animation: popIn 0.6s cubic-bezier(0.68, -0.55, 0.27, 1.55);
+}
+
+@keyframes popIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.celebration-title-grand {
+  font-size: 2.5rem;
+  font-weight: 800;
+  color: #fbbf24;
+  margin: 0 0 0.5rem 0;
+  text-shadow: 0 0 30px rgba(251, 191, 36, 0.5);
+  animation: slideUp 0.5s ease-out 0.2s backwards;
+}
+
+.celebration-subtitle-grand {
+  font-size: 1.1rem;
+  color: #94a3b8;
+  margin: 0 0 2rem 0;
+  animation: slideUp 0.5s ease-out 0.3s backwards;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.celebration-stats {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2rem;
+  padding: 1.5rem 2.5rem;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  margin-bottom: 2rem;
+  animation: slideUp 0.5s ease-out 0.4s backwards;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.stat-value {
+  font-size: 2rem;
+  font-weight: 800;
+  color: #22c55e;
+  line-height: 1;
+}
+
+.stat-label {
+  font-size: 0.75rem;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-top: 0.25rem;
+}
+
+.stat-divider {
+  width: 1px;
+  height: 40px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.btn-celebration {
+  background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+  color: white;
+  padding: 1rem 2.5rem;
+  border-radius: 50px;
+  font-size: 1.1rem;
+  font-weight: 700;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 8px 25px rgba(34, 197, 94, 0.4);
+  transition: all 0.3s ease;
+  animation: slideUp 0.5s ease-out 0.5s backwards;
+}
+
+.btn-celebration:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 35px rgba(34, 197, 94, 0.5);
+}
+
+.btn-celebration:active {
+  transform: translateY(0);
 }
 
 .celebration-trophy {
