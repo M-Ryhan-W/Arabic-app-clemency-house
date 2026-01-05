@@ -531,7 +531,7 @@ button {
   display: flex;
   align-items: flex-end;
   /* Align items to bottom of header */
-  padding-bottom: 0.5rem;
+  padding-bottom: 0.15rem;
 }
 
 .app-header-content {

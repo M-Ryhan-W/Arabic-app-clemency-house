@@ -25,6 +25,12 @@ const triggerHeavyHaptic = async () => {
   }
 };
 
+// Convert number to Arabic numerals (٠١٢٣٤٥)
+const toArabicNum = (n) => {
+  const arabicDigits = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+  return String(n).split('').map(d => arabicDigits[+d] || d).join('');
+};
+
 function App() {
   const [stages, setStages] = useState([]);
   const [loadingStages, setLoadingStages] = useState(true);
@@ -850,7 +856,7 @@ function App() {
         <span className={`heart-single ${heartState.className}`}>
           {heartState.emoji}
         </span>
-        <span className="heart-count">{hearts}</span>
+        <span className="heart-count">{toArabicNum(hearts)}</span>
       </div>
     );
   }
@@ -1051,17 +1057,17 @@ function App() {
 
           <div className="celebration-stats">
             <div className="stat-item">
-              <span className="stat-value">{hearts}</span>
+              <span className="stat-value">{toArabicNum(hearts)}</span>
               <span className="stat-label">Hearts Left</span>
             </div>
             <div className="stat-divider"></div>
             <div className="stat-item">
-              <span className="stat-value">100%</span>
+              <span className="stat-value">١٠٠%</span>
               <span className="stat-label">Complete</span>
             </div>
           </div>
 
-          <button className="btn-celebration" onClick={backToLessons}>
+          <button className="btn-celebration" onClick={() => { triggerHaptic(); backToLessons(); }}>
             Continue Learning →
           </button>
         </div>
@@ -1202,7 +1208,7 @@ function App() {
                   </button>
                   <button
                     className="btn-failure-home"
-                    onClick={backToLessons}
+                    onClick={() => { triggerHaptic(); backToLessons(); }}
                   >
                     Return Home
                   </button>
@@ -1393,7 +1399,7 @@ function App() {
                             <div style={{ marginTop: "1.5rem" }}>
                               <button
                                 className={`btn-primary ${!hasClickedLast ? "btn-disabled" : ""}`}
-                                onClick={() => setLessonPhase(grammarNotes.length > 0 ? "intro_grammar" : "intro_vocab")}
+                                onClick={() => { triggerHaptic(); setLessonPhase(grammarNotes.length > 0 ? "intro_grammar" : "intro_vocab"); }}
                                 disabled={!hasClickedLast}
                               >
                                 Proceed →
@@ -1482,7 +1488,7 @@ function App() {
                     return (
                       <button
                         className="btn-primary"
-                        onClick={() => setLessonPhase(grammarNotes.length > 0 ? "intro_grammar" : "intro_vocab")}
+                        onClick={() => { triggerHaptic(); setLessonPhase(grammarNotes.length > 0 ? "intro_grammar" : "intro_vocab"); }}
                       >
                         Proceed →
                       </button>
@@ -1510,14 +1516,14 @@ function App() {
 
           {/* PHASE: TRANSITION TO GRAMMAR */}
           {lessonPhase === "intro_grammar" && (
-            <div className="no-scroll-container transition-screen" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+            <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
               <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
                 <img src="/images/explanation-icon.jpg" alt="Story" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               </div>
               <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Story Explanation</h1>
               <p className="page-subtitle">Let's have a look at the story content in more detail!</p>
               <footer className="sticky-footer">
-                <button className="btn-primary" onClick={() => setLessonPhase("grammar")}>
+                <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("grammar"); }}>
                   Continue
                 </button>
               </footer>
@@ -1561,6 +1567,7 @@ function App() {
                     className="btn-primary"
                     style={{ flex: 1 }}
                     onClick={() => {
+                      triggerHaptic();
                       if (grammarIndex === grammarNotes.length - 1) {
                         setLessonPhase("intro_vocab");
                       } else {
@@ -1585,14 +1592,14 @@ function App() {
 
           {/* PHASE: TRANSITION TO VOCAB */}
           {lessonPhase === "intro_vocab" && (
-            <div className="no-scroll-container transition-screen" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+            <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
               <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
                 <img src="/images/vocab-book.jpg" alt="Vocabulary" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               </div>
               <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>New Words</h1>
               <p className="page-subtitle">Let's take a look at the new words we have learnt!</p>
               <footer className="sticky-footer">
-                <button className="btn-primary" onClick={() => setLessonPhase("vocab")}>
+                <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("vocab"); }}>
                   Continue
                 </button>
               </footer>
@@ -1674,6 +1681,7 @@ function App() {
                       className="btn-primary"
                       style={{ flex: 1 }}
                       onClick={() => {
+                        triggerHaptic();
                         if (vocabIndex === vocabItems.length - 1) {
                           setLessonPhase("intro_drills");
                         } else {
@@ -1700,14 +1708,14 @@ function App() {
 
           {/* PHASE: TRANSITION TO DRILLS */}
           {lessonPhase === "intro_drills" && (
-            <div className="no-scroll-container transition-screen" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+            <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
               <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
                 <img src="/images/sentence-practice.png" alt="Sentence Practice" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               </div>
               <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Sentence Practice</h1>
               <p className="page-subtitle">Let's look at some ways of using these words in sentences!</p>
               <footer className="sticky-footer">
-                <button className="btn-primary" onClick={() => setLessonPhase("explain")}>
+                <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("explain"); }}>
                   Continue
                 </button>
               </footer>
@@ -1754,6 +1762,7 @@ function App() {
                     className="btn-primary"
                     style={{ flex: 1 }}
                     onClick={() => {
+                      triggerHaptic();
                       if (explanationIndex === explanations.length - 1) {
                         setLessonPhase("relisten");
                         setAudioCompleted(false);
@@ -1839,7 +1848,7 @@ function App() {
                   <button
                     className="btn-primary"
                     style={{ animation: "slideDown 0.3s ease-out", marginBottom: "1rem" }}
-                    onClick={() => setLessonPhase("pre_quiz")}
+                    onClick={() => { triggerHaptic(); setLessonPhase("pre_quiz"); }}
                   >
                     Continue to Quiz →
                   </button>
@@ -1849,7 +1858,7 @@ function App() {
 
                 <button
                   className="btn-skip-bubble"
-                  onClick={() => setLessonPhase("pre_quiz")}
+                  onClick={() => { triggerHaptic(); setLessonPhase("pre_quiz"); }}
                 >
                   Skip to Quiz
                 </button>
@@ -1860,7 +1869,7 @@ function App() {
           {/* PHASE 5: PRE-QUIZ */}
           {
             lessonPhase === "pre_quiz" && (
-              <div className="no-scroll-container transition-screen" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+              <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
                 <div style={{ width: '70vw', maxWidth: '280px', marginBottom: '1.5rem' }}>
                   <img src="/clemency-icon.png" alt="Ihya Institute" style={{ width: '100%', height: 'auto' }} />
                 </div>
