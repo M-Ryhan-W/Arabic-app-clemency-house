@@ -1,6 +1,35 @@
 import { useEffect, useState, useRef } from "react";
 import { supabase } from "./supabaseClient";
+import { Leapfrog } from 'ldrs/react';
+import 'ldrs/react/Leapfrog.css';
+import { App as CapacitorApp } from '@capacitor/app';
+import { Haptics, ImpactStyle } from '@capacitor/haptics';
+import { DotLottieReact } from '@lottiefiles/dotlottie-react';
 import "./App.css";
+
+// Utility function for haptic feedback
+const triggerHaptic = async () => {
+  try {
+    await Haptics.impact({ style: ImpactStyle.Light });
+  } catch (e) {
+    // Haptics not available (e.g., on web)
+  }
+};
+
+// Utility function for heavy haptic feedback (quiz finish screens)
+const triggerHeavyHaptic = async () => {
+  try {
+    await Haptics.impact({ style: ImpactStyle.Heavy });
+  } catch (e) {
+    // Haptics not available (e.g., on web)
+  }
+};
+
+// Convert number to Arabic numerals (٠١٢٣٤٥)
+const toArabicNum = (n) => {
+  const arabicDigits = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+  return String(n).split('').map(d => arabicDigits[+d] || d).join('');
+};
 
 function App() {
   const [stages, setStages] = useState([]);
@@ -12,9 +41,23 @@ function App() {
   const [loadingLessons, setLoadingLessons] = useState(false);
 
   const [activeLesson, setActiveLesson] = useState(null);
+  const activeLessonRef = useRef(null);
 
   const [questions, setQuestions] = useState([]);
   const [loadingQuestions, setLoadingQuestions] = useState(false);
+
+  // ✅ NEW: BLOCKS STATE
+  const [lessonBlocks, setLessonBlocks] = useState([]);
+  const [loadingBlocks, setLoadingBlocks] = useState(false);
+
+  // ✅ NEW: SCROLL/REVEAL STATE
+  const [currentAudioTime, setCurrentAudioTime] = useState(0);
+  const [revealedCount, setRevealedCount] = useState(0);
+  const [dialogueFinished, setDialogueFinished] = useState(false);
+  const blockRefs = useRef({});
+  const convoScrollRef = useRef(null);
+  const [autoFollow, setAutoFollow] = useState(true);
+  const [showJumpToCurrent, setShowJumpToCurrent] = useState(false);
 
   // QUIZ STATE
   const [quizActive, setQuizActive] = useState(false);
@@ -25,19 +68,36 @@ function App() {
   const [answerResult, setAnswerResult] = useState(null); // "correct" | "wrong" | null
   const [quizFinished, setQuizFinished] = useState(false);
 
-  // LESSON FLOW STATE
-  const [lessonPhase, setLessonPhase] = useState("lesson"); 
-  // "lesson" | "vocab" | "explain"
+  // Trigger heavy haptic when quiz finishes (success or failure)
+  useEffect(() => {
+    if (quizFinished) {
+      triggerHeavyHaptic();
+    }
+  }, [quizFinished]);
 
-  // VOCAB / EXPLANATION STATE
+  // LESSON FLOW STATE
+  const [lessonPhase, setLessonPhase] = useState("lesson");
+  // "lesson" -> "intro_grammar" -> "grammar" -> "intro_vocab" -> "vocab" -> "intro_drills" -> "explain" -> "relisten" -> "pre_quiz"
+
+  // VOCAB / EXPLANATION / GRAMMAR STATE
   const [vocabItems, setVocabItems] = useState([]);
   const [vocabIndex, setVocabIndex] = useState(0);
   const [explanations, setExplanations] = useState([]);
+  const [explanationIndex, setExplanationIndex] = useState(0);
+  const [grammarNotes, setGrammarNotes] = useState([]);
+  const [grammarIndex, setGrammarIndex] = useState(0);
 
   // AUDIO STATE
   const audioRef = useRef(null);
   const [audioPlaying, setAudioPlaying] = useState(false);
   const [audioCompleted, setAudioCompleted] = useState(false);
+
+  // PARAGRAPH PLAYBACK STATE
+  const [playingParagraphId, setPlayingParagraphId] = useState(null);
+  const [playingParagraphEnd, setPlayingParagraphEnd] = useState(null);
+  const [clickedParagraphs, setClickedParagraphs] = useState(new Set());
+  const [hideInstruction, setHideInstruction] = useState(false);
+  const [isSlowSpeed, setIsSlowSpeed] = useState(false);
 
   // AUTH STATE
   const [user, setUser] = useState(null);
@@ -48,6 +108,37 @@ function App() {
 
   // LESSON PROGRESS STATE
   const [lessonProgress, setLessonProgress] = useState([]); // [{lesson_id, hearts_left}, ...]
+  const [showExitModal, setShowExitModal] = useState(false);
+  const [audioProgress, setAudioProgress] = useState(0);
+
+  // PROFILE MENU STATE
+  const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [showSignOutConfirm, setShowSignOutConfirm] = useState(false);
+  const [showQuitQuizConfirm, setShowQuitQuizConfirm] = useState(false);
+  const lastBackPressRef = useRef(0); // For double-tap to exit
+
+  // TRANSITION OVERLAY STATE
+  const [transitioning, setTransitioning] = useState(false);
+  const [transitionDirection, setTransitionDirection] = useState("forward"); // "forward" | "back"
+  const transitionTimerRef = useRef(null);
+
+  // ---------- TRANSITION HELPER ----------
+
+  function beginTransition(minMs = 250) {
+    setTransitioning(true);
+    if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+
+    let doneCalled = false;
+
+    return () => {
+      if (doneCalled) return;
+      doneCalled = true;
+
+      transitionTimerRef.current = setTimeout(() => {
+        setTransitioning(false);
+      }, minMs);
+    };
+  }
 
   // ---------- HELPERS FOR PROGRESS ----------
 
@@ -70,6 +161,65 @@ function App() {
 
   function shuffleArray(arr) {
     return [...arr].sort(() => Math.random() - 0.5);
+  }
+
+  // ---------- SOUND EFFECTS ----------
+
+  function playCorrectSound() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+      oscillator.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      oscillator.frequency.setValueAtTime(523.25, ctx.currentTime); // C5
+      oscillator.frequency.setValueAtTime(659.25, ctx.currentTime + 0.1); // E5
+      oscillator.frequency.setValueAtTime(783.99, ctx.currentTime + 0.2); // G5
+      gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
+      oscillator.start(ctx.currentTime);
+      oscillator.stop(ctx.currentTime + 0.4);
+    } catch (e) {
+      console.log("Sound not supported");
+    }
+  }
+
+  function playWrongSound() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+      oscillator.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      oscillator.frequency.setValueAtTime(200, ctx.currentTime);
+      oscillator.frequency.setValueAtTime(150, ctx.currentTime + 0.15);
+      gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+      oscillator.start(ctx.currentTime);
+      oscillator.stop(ctx.currentTime + 0.3);
+    } catch (e) {
+      console.log("Sound not supported");
+    }
+  }
+
+  function playCelebrationSound() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
+      notes.forEach((freq, i) => {
+        const oscillator = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        oscillator.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        oscillator.frequency.setValueAtTime(freq, ctx.currentTime + i * 0.15);
+        gainNode.gain.setValueAtTime(0.2, ctx.currentTime + i * 0.15);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + i * 0.15 + 0.3);
+        oscillator.start(ctx.currentTime + i * 0.15);
+        oscillator.stop(ctx.currentTime + i * 0.15 + 0.3);
+      });
+    } catch (e) {
+      console.log("Sound not supported");
+    }
   }
 
   // ---------- AUTH LOGIC ----------
@@ -95,6 +245,40 @@ function App() {
       subscription.unsubscribe();
     };
   }, []);
+
+  // Keep ref in sync with activeLesson state
+  useEffect(() => {
+    activeLessonRef.current = activeLesson;
+  }, [activeLesson]);
+
+  // Native Android hardware back button handling via Capacitor
+  // Register ONCE to avoid stale closures - use ref to get current value
+  useEffect(() => {
+    const backListener = CapacitorApp.addListener('backButton', (event) => {
+      // 🔴 IMPORTANT: stop default behaviour (closing app)
+      event.preventDefault?.();
+
+      // Use ref to get current value (avoids stale closure)
+      if (activeLessonRef.current) {
+        // Inside a lesson → show exit lesson modal
+        setShowExitModal(true);
+      } else {
+        // On homepage → double-tap to exit
+        const now = Date.now();
+        if (now - lastBackPressRef.current < 2000) {
+          // Second tap within 2 seconds → exit app
+          CapacitorApp.exitApp();
+        } else {
+          // First tap → record time (user can tap again to exit)
+          lastBackPressRef.current = now;
+        }
+      }
+    });
+
+    return () => {
+      backListener.remove();
+    };
+  }, []); // Register only ONCE
 
   async function handleSignUp(e) {
     e.preventDefault();
@@ -136,6 +320,64 @@ function App() {
     setLessonProgress([]);
   }
 
+
+
+  // ✅ SYNC REVEALED COUNT from timestamps
+  useEffect(() => {
+    if (!activeLesson || activeLesson.lesson_format !== "blocks") return;
+    if (!lessonBlocks?.length) return;
+
+    const dialogue = lessonBlocks
+      .filter((b) => b.block_type === "dialogue")
+      .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+
+    if (dialogue.length === 0) return;
+
+    const offset = activeLesson.dialogue_time_offset_seconds || 0;
+    const effectiveTime = currentAudioTime + offset;
+
+    // How many should be visible at this time?
+    const shouldShow = dialogue.filter(
+      (b) => (b.start_time_seconds ?? 0) <= effectiveTime
+    ).length;
+
+    // Never go backwards (prevents flicker if timeupdate jitters)
+    setRevealedCount((prev) => Math.max(prev, shouldShow));
+  }, [currentAudioTime, lessonBlocks, activeLesson]);
+
+  // ✅ NEW: requestAnimationFrame polling for smooth progress
+  useEffect(() => {
+    if (!audioRef.current) return;
+    if (!activeLesson || activeLesson.lesson_format !== "blocks") return;
+
+    let rafId;
+
+    const tick = () => {
+      if (audioRef.current) {
+        const t = audioRef.current.currentTime;
+        setCurrentAudioTime(t);
+
+        // Optional: also update audioProgress bar for smoothness
+        if (audioRef.current.duration > 0) {
+          setAudioProgress(
+            (audioRef.current.currentTime / audioRef.current.duration) * 100
+          );
+        }
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+
+    if (audioPlaying) {
+      rafId = requestAnimationFrame(tick);
+    }
+
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [audioPlaying, activeLesson]);
+
+  // Global click sounds removed - only keeping correct/wrong/celebration sounds
+
   // ---------- LOAD STAGES + ALL LESSONS ----------
 
   useEffect(() => {
@@ -153,6 +395,7 @@ function App() {
         setStages(stagesData || []);
       }
 
+      // ✅ your table is lessons
       const { data: lessonsData, error: lessonsError } = await supabase
         .from("lessons")
         .select("*");
@@ -175,6 +418,7 @@ function App() {
   function resetAudio() {
     setAudioPlaying(false);
     setAudioCompleted(false);
+    setAudioProgress(0);
   }
 
   function resetLessonFlow() {
@@ -182,9 +426,25 @@ function App() {
     setVocabItems([]);
     setVocabIndex(0);
     setExplanations([]);
+    setGrammarNotes([]);
+    setGrammarIndex(0);
+    // ✅ reset blocks too
+    setLessonBlocks([]);
+    setLoadingBlocks(false);
+    setCurrentAudioTime(0);
+    setRevealedCount(0);
+    setDialogueFinished(false);
+    blockRefs.current = {};
   }
 
   function loadLessons(stageId) {
+    // Toggle: if clicking the same stage, close it
+    if (selectedStage === stageId) {
+      setSelectedStage(null);
+      setLessons([]);
+      return;
+    }
+
     setSelectedStage(stageId);
     setLoadingLessons(true);
 
@@ -235,17 +495,47 @@ function App() {
     setHasAnswered(false);
   }
 
-  // ---------- OPEN LESSON: QUESTIONS + VOCAB + EXPLANATIONS ----------
+  // ---------- OPEN LESSON: QUESTIONS + VOCAB + EXPLANATIONS + BLOCKS ----------
 
   async function openLesson(lesson) {
+    triggerHaptic();
+
+    // Play lesson enter sound
+    try {
+      const enterSound = new Audio('/whoosh-velocity-383019.mp3');
+      enterSound.volume = 0.3;
+      enterSound.play();
+    } catch (e) { /* sound not available */ }
+
+    const endTransition = beginTransition(350);
+    setTransitionDirection("forward");
+
     setActiveLesson(lesson);
     setLessonPhase("lesson");
     resetQuiz();
     resetAudio();
+
     setQuestions([]);
     setVocabItems([]);
     setExplanations([]);
+    setGrammarNotes([]);
     setVocabIndex(0);
+    setGrammarIndex(0);
+    setExplanationIndex(0);
+
+    // ✅ reset blocks each open
+    setLessonBlocks([]);
+    setLoadingBlocks(false);
+    setCurrentAudioTime(0);
+    setRevealedCount(0);
+    setDialogueFinished(false);
+    blockRefs.current = {};
+    setClickedParagraphs(new Set());
+    setHideInstruction(false);
+
+    // Scroll to top when opening a lesson
+    window.scrollTo(0, 0);
+
     setLoadingQuestions(true);
 
     try {
@@ -256,9 +546,7 @@ function App() {
         .eq("lesson_id", lesson.id)
         .order("order", { ascending: true });
 
-      if (qError) {
-        throw qError;
-      }
+      if (qError) throw qError;
 
       const questionsWithOptions = [];
 
@@ -312,22 +600,82 @@ function App() {
       } else {
         setExplanations(expl || []);
       }
+
+      // Load grammar notes (Grammar Spotlight)
+      const { data: notes, error: notesErr } = await supabase
+        .from("lesson_notes")
+        .select("*")
+        .eq("lesson_id", lesson.id)
+        .order("order_index", { ascending: true });
+
+      if (!notesErr) {
+        setGrammarNotes(notes || []);
+      } else {
+        console.error("Error loading grammar notes:", notesErr);
+        setGrammarNotes([]);
+      }
+
+      // ✅ Load blocks (One query join!)
+      if (lesson.lesson_format === "blocks") {
+        setLoadingBlocks(true);
+        // Instant placeholder to avoid blank screen
+        setLessonBlocks([{ id: "loading", block_type: "loading" }]);
+
+        const { data: blocks, error: blocksErr } = await supabase
+          .from("lesson_blocks")
+          .select(`
+            id,
+            lesson_id,
+            block_type,
+            order_index,
+            text_ar,
+            text_en,
+            speaker_id,
+            audio_url,
+            start_time_seconds,
+            end_time_seconds,
+            speakers (
+              id,
+              display_name_ar,
+              avatar_url,
+              bubble_side
+            )
+          `)
+          .eq("lesson_id", lesson.id)
+          .order("order_index", { ascending: true });
+
+        if (blocksErr) {
+          console.error("Error loading lesson blocks:", blocksErr);
+          setLessonBlocks([]);
+        } else {
+          setLessonBlocks(blocks || []);
+        }
+
+        setLoadingBlocks(false);
+      }
     } catch (err) {
       console.error("Error opening lesson:", err);
       setQuestions([]);
       setVocabItems([]);
       setExplanations([]);
+      setLessonBlocks([]);
     } finally {
       setLoadingQuestions(false);
+      endTransition(); // ✅ end overlay once data work is done
     }
   }
 
   function backToLessons() {
+    const endTransition = beginTransition(200);
+    setTransitionDirection("back");
+
     setActiveLesson(null);
     resetQuiz();
     resetAudio();
     resetLessonFlow();
     setQuestions([]);
+
+    endTransition();
   }
 
   // ---------- SAVE LESSON PROGRESS ----------
@@ -356,9 +704,7 @@ function App() {
         );
         const newEntry = { lesson_id: activeLesson.id, hearts_left: heartsLeft };
 
-        if (existingIndex === -1) {
-          return [...prev, newEntry];
-        }
+        if (existingIndex === -1) return [...prev, newEntry];
         const copy = [...prev];
         copy[existingIndex] = newEntry;
         return copy;
@@ -371,20 +717,55 @@ function App() {
   function handleStartLessonAudio() {
     if (!activeLesson?.audio_url || !audioRef.current) return;
 
-    try {
-      audioRef.current.currentTime = 0;
-      audioRef.current
-        .play()
-        .then(() => {
-          setAudioPlaying(true);
-          setAudioCompleted(false);
-        })
-        .catch((err) => {
-          console.error("Audio play failed:", err);
-        });
-    } catch (err) {
-      console.error("Audio error:", err);
+    // Reset dialogue UI immediately
+    if (activeLesson.lesson_format === "blocks") {
+      setDialogueFinished(false);
+      setRevealedCount(1); // show first line instantly
+      setAutoFollow(true);
+      setShowJumpToCurrent(false);
     }
+
+    // Instant playback - no delays
+    audioRef.current.currentTime = 0;
+    audioRef.current.play()
+      .then(() => {
+        setAudioPlaying(true);
+        setAudioCompleted(false);
+      })
+      .catch((err) => {
+        console.error("Audio play failed:", err);
+      });
+  }
+
+  // Paragraph tap-to-play handler
+  function handleParagraphClick(block) {
+    if (!activeLesson?.audio_url || !audioRef.current) return;
+    if (block.start_time_seconds == null) return;
+
+    // If clicking the same block that's currently playing, toggle speed
+    if (playingParagraphId === block.id && audioPlaying) {
+      const newSpeed = isSlowSpeed ? 1.0 : 0.85;
+      audioRef.current.playbackRate = newSpeed;
+      setIsSlowSpeed(!isSlowSpeed);
+      return;
+    }
+
+    const startTime = block.start_time_seconds || 0;
+    const endTime = block.end_time_seconds || audioRef.current.duration;
+
+    setPlayingParagraphId(block.id);
+    setPlayingParagraphEnd(endTime);
+    setIsSlowSpeed(false); // Reset to normal speed for new playback
+
+    audioRef.current.playbackRate = 1.0; // Reset speed
+    audioRef.current.currentTime = startTime;
+    audioRef.current.play()
+      .then(() => {
+        setAudioPlaying(true);
+      })
+      .catch((err) => {
+        console.error("Paragraph audio play failed:", err);
+      });
   }
 
   // ---------- QUIZ CONTROL ----------
@@ -403,7 +784,7 @@ function App() {
   function handleOptionClick(option) {
     if (!quizActive) return;
     if (quizFinished) return;
-    if (hasAnswered) return; // already confirmed this question
+    if (hasAnswered) return;
 
     setSelectedOptionId(option.id);
     setAnswerResult(null);
@@ -424,13 +805,13 @@ function App() {
 
     if (chosen.is_correct) {
       setAnswerResult("correct");
+      playCorrectSound();
     } else {
       setAnswerResult("wrong");
+      playWrongSound();
       setHearts((prev) => {
         const newHearts = prev - 1;
-        if (newHearts <= 0) {
-          setQuizFinished(true);
-        }
+        if (newHearts <= 0) setQuizFinished(true);
         return newHearts;
       });
     }
@@ -445,6 +826,7 @@ function App() {
       setQuizFinished(true);
       if (lastQuestion && hearts > 0) {
         await saveLessonProgress(hearts);
+        playCelebrationSound();
       }
       return;
     }
@@ -456,19 +838,89 @@ function App() {
   }
 
   function HeartsBar() {
-    const total = 5;
-    const arr = Array.from({ length: total });
+    // Single heart that degrades as lives are lost (5 lives total)
+    // hearts: 5 = full, 4 = small crack, 3 = cracked, 2 = breaking, 1 = almost broken, 0 = broken
+    const getHeartState = () => {
+      if (hearts >= 5) return { emoji: "❤️", className: "heart-full" };
+      if (hearts === 4) return { emoji: "💔", className: "heart-cracked-1" };
+      if (hearts === 3) return { emoji: "💔", className: "heart-cracked-2" };
+      if (hearts === 2) return { emoji: "💔", className: "heart-cracked-3" };
+      if (hearts === 1) return { emoji: "💔", className: "heart-cracked-4" };
+      return { emoji: "🖤", className: "heart-broken" };
+    };
+
+    const heartState = getHeartState();
 
     return (
-      <div className="hearts-bar">
-        {arr.map((_, i) => (
-          <span
-            key={i}
-            className={`heart ${i < hearts ? "heart-full" : "heart-empty"}`}
-          >
-            ❤️
-          </span>
-        ))}
+      <div className="heart-indicator">
+        <span className={`heart-single ${heartState.className}`}>
+          {heartState.emoji}
+        </span>
+        <span className="heart-count">{toArabicNum(hearts)}</span>
+      </div>
+    );
+  }
+
+  function ProfileMenu() {
+    return (
+      <div className="profile-menu-container">
+        <button
+          className="profile-icon-btn"
+          onClick={() => setShowProfileMenu(!showProfileMenu)}
+          aria-label="Profile menu"
+        >
+          <span className="profile-icon">👤</span>
+        </button>
+
+        {showProfileMenu && (
+          <>
+            <div
+              className="profile-menu-backdrop"
+              onClick={() => setShowProfileMenu(false)}
+            />
+            <div className="profile-menu-dropdown">
+              <button
+                className="profile-menu-item"
+                onClick={() => {
+                  setShowProfileMenu(false);
+                  setShowSignOutConfirm(true);
+                }}
+              >
+                Sign out
+              </button>
+            </div>
+          </>
+        )}
+
+        {showSignOutConfirm && (
+          <div className="modal-overlay" onClick={() => setShowSignOutConfirm(false)}>
+            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+              <h3 className="modal-title">Sign out?</h3>
+              <p style={{ color: "var(--text-light)", marginBottom: "1.5rem" }}>
+                Are you sure you want to sign out?
+              </p>
+              <div className="modal-actions">
+                <button
+                  className="btn-outline"
+                  onClick={() => setShowSignOutConfirm(false)}
+                  style={{ flex: 1 }}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="btn-primary"
+                  onClick={() => {
+                    setShowSignOutConfirm(false);
+                    handleSignOut();
+                  }}
+                  style={{ flex: 1, background: "var(--red)", boxShadow: "0 4px 0 var(--red-dark)" }}
+                >
+                  Sign out
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -479,26 +931,22 @@ function App() {
     return (
       <div className="auth-page">
         <div className="auth-overlay" />
-        <div className="auth-content fade-in">
+        <div className="auth-content">
           <div className="auth-left">
-            <div className="auth-logo">العربيّة</div>
-            <h1>Learn Modern Standard Arabic.</h1>
-            <p>
-              Short, focused lessons. Real conversations. A clean path from
-              zero to fluent reading and listening.
-            </p>
-            <div className="auth-badge-row">
-              <span className="auth-badge">9 stages</span>
-              <span className="auth-badge">Dialogue based</span>
-              <span className="auth-badge">Progress saved</span>
+            <div className="auth-logo animate-slide-up">
+              <img
+                src="/clemency-icon.png"
+                alt="Ihya Institute Logo"
+                style={{ width: "120px", height: "auto" }}
+              />
             </div>
-          </div>
+            <h1 className="text-display animate-slide-up delay-100">
+              Welcome to the Clemency House Arabic App!
+            </h1>
 
-          <div className="auth-right">
-            <div className="auth-card">
-              <h2>
-                {authMode === "signin" ? "Welcome back" : "Create account"}
-              </h2>
+            {/* Auth Card - Moved here between title and description */}
+            <div className="auth-card-inline animate-slide-up delay-150">
+              <h2>{authMode === "signin" ? "Welcome back" : "Create account"}</h2>
               <p className="auth-subtitle">
                 {authMode === "signin"
                   ? "Sign in to continue your Arabic journey."
@@ -551,7 +999,29 @@ function App() {
                   : "Already have an account? Sign in"}
               </button>
             </div>
+
+            <p
+              className="animate-slide-up delay-200"
+              style={{
+                fontSize: "1.2rem",
+                lineHeight: "1.6",
+                maxWidth: "500px",
+                marginTop: "1.5rem",
+              }}
+            >
+              Designed by students for students, to aid your journey towards
+              mastering Arabic.
+            </p>
+            <div className="auth-badge-row animate-slide-up delay-300">
+              <span className="auth-badge">Using العربية للناشئين books</span>
+              <span className="auth-badge">
+                Dialogue based to aid listening skills
+              </span>
+              <span className="auth-badge">Progress saved with quizzes</span>
+            </div>
           </div>
+
+
         </div>
       </div>
     );
@@ -562,62 +1032,102 @@ function App() {
   if (activeLesson && quizActive) {
     const currentQuestion = questions[currentQuestionIndex];
 
-    return (
-      <div className="app-shell">
-        <header className="app-header">
-          <div className="app-logo">العربيّة</div>
-          <div className="app-header-right">
-            <span className="app-user-email">{user?.email}</span>
-            <button className="btn-outline" onClick={handleSignOut}>
-              Sign out
-            </button>
+    // FULL PAGE CELEBRATION - Early return when quiz passed
+    if (quizFinished && hearts > 0) {
+      return (
+        <div className="celebration-fullpage">
+          {/* Quiz Pass Sound */}
+          <audio autoPlay>
+            <source src="/Quiz pass123.mp3" type="audio/mpeg" />
+          </audio>
+
+          <div className="celebration-lottie">
+            <DotLottieReact
+              src="/animations/done.lottie"
+              loop
+              autoplay
+              style={{ width: '260px', height: '260px' }}
+            />
           </div>
-        </header>
 
-        <main className="app-main">
-          <div className="page-card">
-            <button className="btn-link" onClick={backToLessons}>
-              ← Back to lesson
-            </button>
+          <h1 className="celebration-title-grand">Well Done!</h1>
+          <p className="celebration-subtitle-grand">
+            You've mastered this lesson
+          </p>
 
-            <HeartsBar />
+          <div className="celebration-stats">
+            <div className="stat-item">
+              <span className="stat-value">{toArabicNum(hearts)}</span>
+              <span className="stat-label">Hearts Left</span>
+            </div>
+            <div className="stat-divider"></div>
+            <div className="stat-item">
+              <span className="stat-value">١٠٠%</span>
+              <span className="stat-label">Complete</span>
+            </div>
+          </div>
 
-            <div className="quiz-progress-row">
-              <span className="quiz-progress-text">
-                Question {currentQuestionIndex + 1} of {questions.length}
+          <button className="btn-celebration" onClick={() => { triggerHaptic(); backToLessons(); }}>
+            Continue Learning →
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className={`app-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <main className="app-main quiz-screen" style={{ marginTop: 0 }}>
+          <div className="quiz-content">
+            <div className="quiz-header-row">
+              <span
+                style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+                onClick={() => setShowQuitQuizConfirm(true)}
+              >
+                ✕
               </span>
-              <div className="quiz-progress-bar">
-                <div
-                  className="quiz-progress-fill"
-                  style={{
-                    width: `${
-                      ((currentQuestionIndex + 1) /
-                        Math.max(questions.length, 1)) *
-                      100
-                    }%`,
-                  }}
-                />
-              </div>
+              <HeartsBar />
             </div>
 
-            {quizFinished && hearts <= 0 && (
-              <div className="banner banner-danger">
-                You ran out of hearts. Lesson failed.
+            {/* Quit Quiz Confirmation Modal */}
+            {showQuitQuizConfirm && (
+              <div className="modal-overlay">
+                <div className="modal-content">
+                  <h3 className="modal-title">Leave Quiz?</h3>
+                  <p className="text-muted">Are you sure you want to return to the home page? All progress will be lost.</p>
+                  <div className="modal-actions">
+                    <button className="btn-outline" style={{ flex: 1 }} onClick={() => setShowQuitQuizConfirm(false)}>
+                      Stay
+                    </button>
+                    <button
+                      className="btn-primary"
+                      style={{ flex: 1, backgroundColor: "var(--red)", boxShadow: "0 4px 0 var(--red-dark)" }}
+                      onClick={() => {
+                        setShowQuitQuizConfirm(false);
+                        backToLessons();
+                      }}
+                    >
+                      Leave
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
 
-            {quizFinished && hearts > 0 && (
-              <div className="banner banner-success">
-                Nice! You finished the quiz with {hearts} heart
-                {hearts === 1 ? "" : "s"} left.
-              </div>
-            )}
+            <div className="quiz-progress-bar">
+              <div
+                className="quiz-progress-fill"
+                style={{
+                  width: `${(currentQuestionIndex / Math.max(questions.length, 1)) * 100}%`,
+                }}
+              />
+            </div>
 
+            {/* QUIZ QUESTIONS */}
             {!quizFinished && currentQuestion && (
-              <>
+              <div key={currentQuestion.id} className="quiz-question-container swipe-in">
                 <h2 className="quiz-question">{currentQuestion.prompt_text}</h2>
 
-                <div className="quiz-options">
+                <div className={`quiz-options ${currentQuestion.options.length === 3 ? 'quiz-options-three' : ''}`}>
                   {currentQuestion.options.map((opt) => {
                     const isSelected = selectedOptionId === opt.id;
                     const isCorrect = opt.is_correct;
@@ -655,10 +1165,7 @@ function App() {
                 {selectedOptionId !== null && !quizFinished && (
                   <div className="quiz-actions">
                     {!hasAnswered && (
-                      <button
-                        className="btn-primary"
-                        onClick={handleConfirmAnswer}
-                      >
+                      <button className="btn-primary" onClick={handleConfirmAnswer}>
                         Confirm
                       </button>
                     )}
@@ -672,17 +1179,40 @@ function App() {
                     )}
                   </div>
                 )}
-              </>
+              </div>
             )}
 
-            {quizFinished && (
-              <div className="quiz-actions">
-                <button className="btn-outline" onClick={startQuiz}>
-                  Retry quiz
-                </button>
-                <button className="btn-secondary" onClick={backToLessons}>
-                  Back to lesson
-                </button>
+            {/* FAILURE SCREEN - Full page sad design */}
+            {quizFinished && hearts <= 0 && (
+              <div className="failure-fullpage swipe-in">
+                {/* Broken Heart SVG Icon */}
+                <div className="failure-icon-container">
+                  <svg width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="60" cy="60" r="55" fill="#1e293b" stroke="#334155" strokeWidth="2" />
+                    <path d="M60 90C60 90 30 70 30 50C30 40 38 32 48 32C54 32 58 36 60 40C62 36 66 32 72 32C82 32 90 40 90 50C90 70 60 90 60 90Z" fill="#475569" />
+                    <path d="M55 45L65 55L55 65L60 75L65 65L60 55L70 45" stroke="#94a3b8" strokeWidth="3" strokeLinecap="round" />
+                  </svg>
+                </div>
+
+                <h1 className="failure-title">Out of Hearts</h1>
+                <p className="failure-subtitle">
+                  Don't give up! Review the lesson and try again.
+                </p>
+
+                <div className="failure-buttons">
+                  <button
+                    className="btn-failure-retry"
+                    onClick={() => { triggerHaptic(); startQuiz(); }}
+                  >
+                    Try Again
+                  </button>
+                  <button
+                    className="btn-failure-home"
+                    onClick={() => { triggerHaptic(); backToLessons(); }}
+                  >
+                    Return Home
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -691,236 +1221,728 @@ function App() {
     );
   }
 
-  // ---------- LESSON SCREEN (3 PHASES) ----------
+  // ---------- LESSON SCREEN (3+ PHASES) ----------
 
   if (activeLesson && !quizActive) {
     const completed = isLessonCompleted(activeLesson.id);
 
     return (
-      <div className="app-shell">
-        <header className="app-header">
-          <div className="app-logo">العربيّة</div>
-          <div className="app-header-right">
-            <span className="app-user-email">{user?.email}</span>
-            <button className="btn-outline" onClick={handleSignOut}>
-              Sign out
-            </button>
-          </div>
-        </header>
-
-        <main className="app-main">
-          <div className="page-card">
-            <button className="btn-link" onClick={backToLessons}>
-              ← Back to lessons
-            </button>
-
-            {/* Hidden audio element (used by Start lesson button) */}
-            {activeLesson.audio_url && (
-              <audio
-                ref={audioRef}
-                src={activeLesson.audio_url}
-                onEnded={() => {
-                  setAudioPlaying(false);
-                  setAudioCompleted(true);
-                }}
-                onPlay={() => setAudioPlaying(true)}
-                onPause={(e) => {
-                  if (e.target.currentTime < e.target.duration) {
+      <div className={`app-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <main className="app-main" style={{ marginTop: 0 }}>
+          {lessonPhase === "lesson" && (
+            <div className="lesson-content">
+              {activeLesson.audio_url && (
+                <audio
+                  ref={audioRef}
+                  src={activeLesson.audio_url}
+                  onTimeUpdate={(e) => {
+                    // Handle paragraph playback - pause at end_time_seconds
+                    if (playingParagraphId && playingParagraphEnd != null) {
+                      if (e.target.currentTime >= playingParagraphEnd) {
+                        e.target.pause();
+                        setAudioPlaying(false);
+                        setPlayingParagraphId(null);
+                        setPlayingParagraphEnd(null);
+                        return;
+                      }
+                    }
+                    // redundant now with RAF polling, but kept for non-blocks if needed
+                    if (
+                      activeLesson.lesson_format !== "blocks" &&
+                      e.target.duration > 0
+                    ) {
+                      setAudioProgress(
+                        (e.target.currentTime / e.target.duration) * 100
+                      );
+                    }
+                  }}
+                  onEnded={() => {
+                    setDialogueFinished(true);
                     setAudioPlaying(false);
-                  }
-                }}
-                style={{ display: "none" }}
-              />
-            )}
-
-            <div className="lesson-header-row">
-              <h1 className="lesson-title">{activeLesson.title}</h1>
-              {completed && (
-                <span className="pill pill-completed">✓ Completed</span>
+                    setAudioCompleted(true);
+                    setPlayingParagraphId(null);
+                    setPlayingParagraphEnd(null);
+                  }}
+                  style={{ display: "none" }}
+                />
               )}
-            </div>
-            <p className="lesson-description">{activeLesson.description}</p>
 
-            {/* PHASE 1: MAIN LESSON / STORY */}
-            {lessonPhase === "lesson" && (
-              <>
-                {activeLesson.audio_url && (
-                  <div
-                    style={{
-                      marginBottom: "1rem",
-                      display: "flex",
-                      gap: "0.5rem",
-                      alignItems: "center",
-                    }}
-                  >
-                    <button
-                      className="btn-primary"
-                      onClick={handleStartLessonAudio}
-                      disabled={audioPlaying}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                {audioPlaying ? <div className="recording-dot" title="Audio playing" /> : <div />}
+                <div className="header-bubbly-title">{activeLesson.title}</div>
+              </div>
+
+              <p className="lesson-description">{activeLesson.description}</p>
+
+              {activeLesson.audio_url && (
+                (() => {
+                  // Check if this lesson has paragraph or dialogue blocks
+                  const hasParagraphs = lessonBlocks.some(b => b.block_type === "paragraph");
+                  const hasDialogue = lessonBlocks.some(b => b.block_type === "dialogue");
+
+                  // Hide master audio button for paragraph-based lessons (they use tap-to-play)
+                  if (hasParagraphs) return null;
+
+                  // Hide audio button for legacy lessons (non-blocks format) - only show for dialogue lessons
+                  if (activeLesson.lesson_format !== "blocks" || !hasDialogue) return null;
+
+                  return (
+                    <div
+                      style={{
+                        marginBottom: "1rem",
+                        display: "flex",
+                        justifyContent: "center",
+                      }}
                     >
-                      {audioPlaying
-                        ? "Playing…"
-                        : audioCompleted
-                        ? "Replay audio"
-                        : "Start lesson audio"}
-                    </button>
-                    {audioCompleted && !audioPlaying && (
-                      <span className="muted" style={{ fontSize: "0.8rem" }}>
-                        Audio finished – move on when you’re ready.
-                      </span>
-                    )}
-                  </div>
-                )}
+                      {!audioPlaying && (
+                        <button
+                          className="btn-primary"
+                          onClick={handleStartLessonAudio}
+                          style={{ maxWidth: "300px" }}
+                        >
+                          {audioCompleted ? "Replay audio" : "Start lesson audio"}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()
+              )}
 
-                <section className="section">
-                  <h2 className="section-title">النص العربي</h2>
+              <section className="section">
+                {activeLesson.lesson_format === "blocks" ? (
+                  loadingBlocks ? (
+                    <p className="muted">Loading dialogue…</p>
+                  ) : (
+                    (() => {
+                      const paragraphBlocks = lessonBlocks
+                        .filter((b) => b.block_type === "paragraph")
+                        .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+
+                      const dialogueBlocks = lessonBlocks
+                        .filter((b) => b.block_type === "dialogue")
+                        .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+
+                      const hasParagraphs = paragraphBlocks.length > 0;
+
+                      // PARAGRAPH MODE: Interactive story reader
+                      if (hasParagraphs) {
+                        const lastParagraphId = paragraphBlocks[paragraphBlocks.length - 1]?.id;
+                        const hasClickedLast = clickedParagraphs.has(lastParagraphId);
+
+                        return (
+                          <div className="paragraph-reader">
+                            {/* Instruction Box - fades after first click */}
+                            {!hideInstruction && (
+                              <div className="instruction-box">
+                                <div>Tap any paragraph to hear it read aloud</div>
+                                <div style={{ fontSize: '0.85rem', opacity: 0.8, marginTop: '0.25rem' }}>Tap again to slow down or speed up!</div>
+                              </div>
+                            )}
+
+                            {/* Render paragraph blocks */}
+                            <div className="paragraph-list">
+                              {paragraphBlocks.map((b) => {
+                                const isPlaying = playingParagraphId === b.id;
+                                const wasClicked = clickedParagraphs.has(b.id);
+                                const isThisBlockSlow = isPlaying && isSlowSpeed;
+                                return (
+                                  <div
+                                    key={b.id}
+                                    className={`paragraph-bubble ${isPlaying ? "paragraph-active" : ""} ${wasClicked ? "paragraph-clicked" : ""}`}
+                                    onClick={() => {
+                                      // Hide instruction on first click
+                                      if (!hideInstruction) {
+                                        setHideInstruction(true);
+                                      }
+                                      // Track this paragraph as clicked
+                                      setClickedParagraphs(prev => new Set([...prev, b.id]));
+                                      handleParagraphClick(b);
+                                    }}
+                                    role="button"
+                                    tabIndex={0}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" || e.key === " ") {
+                                        if (!hideInstruction) {
+                                          setHideInstruction(true);
+                                        }
+                                        setClickedParagraphs(prev => new Set([...prev, b.id]));
+                                        handleParagraphClick(b);
+                                      }
+                                    }}
+                                  >
+                                    {/* Audio indicator on the left */}
+                                    <div className="paragraph-audio-indicator">
+                                      {isPlaying ? (
+                                        <span className="audio-playing-icon">
+                                          {isThisBlockSlow ? "🐢" : "🔊"}
+                                        </span>
+                                      ) : (
+                                        <span className="audio-play-icon">▶</span>
+                                      )}
+                                    </div>
+                                    <div className="paragraph-content">
+                                      <div className="paragraph-text" dir="rtl">
+                                        {b.text_ar}
+                                      </div>
+                                      {b.text_en && (
+                                        <div className="paragraph-translation">
+                                          {b.text_en}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {/* Proceed button - enabled after last paragraph clicked */}
+                            <div style={{ marginTop: "1.5rem" }}>
+                              <button
+                                className={`btn-primary ${!hasClickedLast ? "btn-disabled" : ""}`}
+                                onClick={() => { triggerHaptic(); setLessonPhase(grammarNotes.length > 0 ? "intro_grammar" : "intro_vocab"); }}
+                                disabled={!hasClickedLast}
+                              >
+                                Proceed →
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      // DIALOGUE MODE: Chat bubbles with avatars
+                      const visibleDialogue = dialogueBlocks.slice(0, revealedCount);
+                      const visibleLines = (audioPlaying && !dialogueFinished)
+                        ? visibleDialogue.slice(-1)
+                        : visibleDialogue;
+
+                      return (
+                        <div
+                          ref={convoScrollRef}
+                          className={`convo-area ${!dialogueFinished && audioPlaying ? "playback-mode" : "list-mode"}`}
+                        >
+                          {visibleLines.map((b) => {
+                            const speaker = b.speakers;
+                            const sideClass =
+                              speaker?.bubble_side === "right"
+                                ? "bubble-right"
+                                : "bubble-left";
+
+                            return (
+                              <div
+                                key={b.id}
+                                className={`bubble-row ${sideClass}`}
+                              >
+                                <div className="avatar">
+                                  {speaker?.avatar_url ? (
+                                    <img
+                                      src={speaker.avatar_url}
+                                      alt={speaker?.display_name_ar || "Speaker"}
+                                      className="avatar-img"
+                                    />
+                                  ) : (
+                                    <span className="avatar-fallback">
+                                      {speaker?.display_name_ar?.[0] || "؟"}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="bubble">
+                                  <div className="bubble-text" dir="rtl">
+                                    {b.text_ar}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()
+                  )
+                ) : (
                   <div className="arabic-box">
                     {activeLesson.transcript_ar || "لا يوجد نص عربي بعد"}
                   </div>
-                </section>
+                )}
+              </section>
 
-                <section className="section">
-                  <h3 className="section-subtitle">Translation</h3>
-                  <p className="translation-text">
-                    {activeLesson.transcript_en || "No English translation yet."}
-                  </p>
-                </section>
 
-                {activeLesson.notes && (
+
+              {
+                activeLesson.notes && (
                   <section className="section">
                     <h3 className="section-subtitle">Notes</h3>
                     <p className="notes-text">{activeLesson.notes}</p>
                   </section>
-                )}
+                )
+              }
 
-                <div style={{ marginTop: "2rem" }}>
+              <div style={{ marginTop: "0.5rem", paddingBottom: "2rem", minHeight: "60px" }}>
+                {(() => {
+                  // Check if this is a paragraph-based lesson (they have their own proceed button)
+                  const hasParagraphs = lessonBlocks.some(b => b.block_type === "paragraph");
+
+                  // Don't show this bottom proceed button for paragraph lessons
+                  if (hasParagraphs) return null;
+
+                  if (!activeLesson.audio_url || audioCompleted) {
+                    return (
+                      <button
+                        className="btn-primary"
+                        onClick={() => { triggerHaptic(); setLessonPhase(grammarNotes.length > 0 ? "intro_grammar" : "intro_vocab"); }}
+                      >
+                        Proceed →
+                      </button>
+                    );
+                  }
+
+                  // Show audio progress bar if audio is playing
+                  if (activeLesson.audio_url && !audioCompleted) {
+                    return (
+                      <div className="audio-progress-fixed">
+                        <div
+                          className="audio-progress-fill-fixed"
+                          style={{ width: `${audioProgress}%` }}
+                        />
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })()}
+              </div>
+            </div >
+          )
+          }
+
+          {/* PHASE: TRANSITION TO GRAMMAR */}
+          {lessonPhase === "intro_grammar" && (
+            <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+              <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
+                <img src="/images/explanation-icon.jpg" alt="Story" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              </div>
+              <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Story Explanation</h1>
+              <p className="page-subtitle">Let's have a look at the story content in more detail!</p>
+              <footer className="sticky-footer">
+                <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("grammar"); }}>
+                  Continue
+                </button>
+              </footer>
+            </div>
+          )}
+
+          {/* PHASE: GRAMMAR SPOTLIGHT CAROUSEL (No Scrolling) */}
+          {lessonPhase === "grammar" && grammarNotes.length > 0 && (
+            <div className="vocab-fullscreen no-scroll-container swipe-in">
+              <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
+                <span
+                  style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+                  onClick={() => setLessonPhase("lesson")}
+                >
+                  ←
+                </span>
+                <h2 className="grammar-title-text" style={{ margin: 0, fontSize: '1.25rem' }}>{grammarNotes[grammarIndex].title}</h2>
+              </header>
+
+              <div key={grammarIndex} className="carousel-content-area swipe-in">
+                <div className="explanation-bubble" style={{ fontSize: '1.1rem', padding: '1.25rem', lineHeight: '1.7' }}>
+                  {grammarNotes[grammarIndex].content_en}
+                </div>
+
+                <div className="arabic-box spotlight-arabic" style={{ borderLeft: '5px solid var(--blue)', padding: '1.5rem' }}>
+                  {grammarNotes[grammarIndex].content_ar}
+                </div>
+              </div>
+
+              <footer className="sticky-footer">
+                <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+                  <button
+                    className="btn-nav-arrow"
+                    onClick={() => grammarIndex > 0 && setGrammarIndex(i => i - 1)}
+                    disabled={grammarIndex === 0}
+                    style={{ opacity: grammarIndex === 0 ? 0.3 : 1 }}
+                  >
+                    ←
+                  </button>
                   <button
                     className="btn-primary"
-                    onClick={() => setLessonPhase("vocab")}
-                  >
-                    Proceed →
-                  </button>
-                </div>
-              </>
-            )}
-
-            {/* PHASE 2: VOCAB CAROUSEL */}
-            {lessonPhase === "vocab" && (
-              <>
-                <section className="section">
-                  <h2 className="section-title">Let’s look at the new words!</h2>
-
-                  {vocabItems.length === 0 ? (
-                    <p className="muted">
-                      No vocabulary added yet for this lesson.
-                    </p>
-                  ) : (
-                    (() => {
-                      const item = vocabItems[vocabIndex];
-
-                      return (
-                        <div className="vocab-layout">
-                          <div className="vocab-top">
-                            <div className="vocab-arabic">{item.arabic}</div>
-                            {item.image_url && (
-                              <img
-                                src={item.image_url}
-                                alt={item.english}
-                                className="vocab-image"
-                              />
-                            )}
-                          </div>
-
-                          <div className="vocab-bottom">
-                            <div className="vocab-english">
-                              {item.english}
-                            </div>
-                            {item.note && (
-                              <p className="vocab-note">{item.note}</p>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })()
-                  )}
-                </section>
-
-                <div className="vocab-nav">
-                  <button
-                    className="btn-outline"
-                    onClick={() =>
-                      setVocabIndex((i) => Math.max(0, i - 1))
-                    }
-                    disabled={vocabIndex === 0}
-                  >
-                    ← Previous
-                  </button>
-
-                  {vocabIndex === vocabItems.length - 1 || vocabItems.length === 0 ? (
-                    <button
-                      className="btn-primary"
-                      onClick={() => setLessonPhase("explain")}
-                    >
-                      Continue →
-                    </button>
-                  ) : (
-                    <button
-                      className="btn-primary"
-                      onClick={() =>
-                        setVocabIndex((i) =>
-                          Math.min(vocabItems.length - 1, i + 1)
-                        )
+                    style={{ flex: 1 }}
+                    onClick={() => {
+                      triggerHaptic();
+                      if (grammarIndex === grammarNotes.length - 1) {
+                        setLessonPhase("intro_vocab");
+                      } else {
+                        setGrammarIndex(i => i + 1);
                       }
-                    >
-                      Next word →
-                    </button>
-                  )}
-                </div>
-              </>
-            )}
-
-            {/* PHASE 3: EXPLANATION */}
-            {lessonPhase === "explain" && (
-              <>
-                <section className="section">
-                  <h2 className="section-title">How do we use these words?</h2>
-
-                  {explanations.length === 0 ? (
-                    <p className="muted">
-                      No explanation sentences yet for this lesson.
-                    </p>
-                  ) : (
-                    <ul className="explanation-list">
-                      {explanations.map((ex) => (
-                        <li key={ex.id} className="explanation-item">
-                          <div className="arabic-sentence">
-                            {ex.arabic_sentence}
-                          </div>
-                          <div className="english-sentence">
-                            {ex.english_sentence}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </section>
-
-                <div className="quiz-actions" style={{ marginTop: "2rem" }}>
+                    }}
+                  >
+                    CONTINUE
+                  </button>
                   <button
-                    className="btn-secondary"
-                    onClick={startQuiz}
+                    className="btn-nav-arrow"
+                    onClick={() => grammarIndex < grammarNotes.length - 1 && setGrammarIndex(i => i + 1)}
+                    disabled={grammarIndex === grammarNotes.length - 1}
+                    style={{ opacity: grammarIndex === grammarNotes.length - 1 ? 0.3 : 1 }}
+                  >
+                    →
+                  </button>
+                </div>
+              </footer>
+            </div>
+          )}
+
+          {/* PHASE: TRANSITION TO VOCAB */}
+          {lessonPhase === "intro_vocab" && (
+            <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+              <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
+                <img src="/images/vocab-book.jpg" alt="Vocabulary" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              </div>
+              <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>New Words</h1>
+              <p className="page-subtitle">Let's take a look at the new words we have learnt!</p>
+              <footer className="sticky-footer">
+                <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("vocab"); }}>
+                  Continue
+                </button>
+              </footer>
+            </div>
+          )}
+
+          {/* PHASE 2: VOCAB CAROUSEL */}
+          {lessonPhase === "vocab" && (
+            <div className="vocab-fullscreen no-scroll-container swipe-in">
+              {/* Header with back arrow and lesson title */}
+              <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
+                <span
+                  style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+                  onClick={() => setLessonPhase("lesson")}
+                >
+                  ←
+                </span>
+                <div className="lesson-title-badge">{activeLesson.title}</div>
+              </header>
+
+              {vocabItems.length === 0 ? (
+                <div className="center-content">
+                  <p className="muted">No vocabulary added yet for this lesson.</p>
+                  <button
+                    className="btn-primary"
+                    onClick={() => setLessonPhase("intro_drills")}
+                  >
+                    Continue
+                  </button>
+                </div>
+              ) : (
+                (() => {
+                  const item = vocabItems[vocabIndex];
+                  return (
+                    <div key={vocabIndex} className="carousel-content-area swipe-in">
+                      <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>
+                        :عربي
+                      </div>
+                      <div className="vocab-card" style={{ direction: "rtl" }}>
+                        <div className="vocab-text-main">
+                          {item.arabic}
+                          {item.note && (
+                            <span
+                              style={{
+                                display: "block",
+                                fontSize: "0.9rem",
+                                marginTop: "0.5rem",
+                                color: "var(--text-light)",
+                              }}
+                            >
+                              [{item.note}]
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
+                      <div className="vocab-card">
+                        <div className="vocab-text-main">{item.english}</div>
+                      </div>
+                    </div>
+                  );
+                })()
+              )}
+
+              {/* Footer with left/right arrows and continue button */}
+              {vocabItems.length > 0 && (
+                <footer className="sticky-footer">
+                  <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+                    <button
+                      className="btn-nav-arrow"
+                      onClick={() => vocabIndex > 0 && setVocabIndex(i => i - 1)}
+                      disabled={vocabIndex === 0}
+                      style={{ opacity: vocabIndex === 0 ? 0.3 : 1 }}
+                    >
+                      ←
+                    </button>
+                    <button
+                      className="btn-primary"
+                      style={{ flex: 1 }}
+                      onClick={() => {
+                        triggerHaptic();
+                        if (vocabIndex === vocabItems.length - 1) {
+                          setLessonPhase("intro_drills");
+                        } else {
+                          setVocabIndex(i => i + 1);
+                        }
+                      }}
+                    >
+                      CONTINUE
+                    </button>
+                    <button
+                      className="btn-nav-arrow"
+                      onClick={() => vocabIndex < vocabItems.length - 1 && setVocabIndex(i => i + 1)}
+                      disabled={vocabIndex === vocabItems.length - 1}
+                      style={{ opacity: vocabIndex === vocabItems.length - 1 ? 0.3 : 1 }}
+                    >
+                      →
+                    </button>
+                  </div>
+                </footer>
+              )}
+            </div>
+          )
+          }
+
+          {/* PHASE: TRANSITION TO DRILLS */}
+          {lessonPhase === "intro_drills" && (
+            <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+              <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
+                <img src="/images/sentence-practice.png" alt="Sentence Practice" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              </div>
+              <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Sentence Practice</h1>
+              <p className="page-subtitle">Let's look at some ways of using these words in sentences!</p>
+              <footer className="sticky-footer">
+                <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("explain"); }}>
+                  Continue
+                </button>
+              </footer>
+            </div>
+          )}
+
+          {/* PHASE 3: USAGE DRILLS (Carousel Mode) */}
+          {lessonPhase === "explain" && explanations.length > 0 && (
+            <div className="no-scroll-container">
+              {/* Header with back arrow and lesson title */}
+              <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
+                <span
+                  style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+                  onClick={() => setLessonPhase("lesson")}
+                >
+                  ←
+                </span>
+                <div className="lesson-title-badge">{activeLesson.title}</div>
+              </header>
+
+              <div className="carousel-content-area">
+                <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>:عربي</div>
+                <div className="arabic-box spotlight-arabic" dir="rtl" style={{ fontSize: '2rem' }}>
+                  {explanations[explanationIndex].arabic_sentence}
+                </div>
+
+                <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
+                <div className="explanation-bubble" style={{ borderLeft: '5px solid var(--green)', background: '#f0fff4' }}>
+                  {explanations[explanationIndex].english_sentence}
+                </div>
+              </div>
+
+              <footer className="sticky-footer">
+                <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+                  <button
+                    className="btn-nav-arrow"
+                    onClick={() => explanationIndex > 0 && setExplanationIndex(i => i - 1)}
+                    disabled={explanationIndex === 0}
+                    style={{ opacity: explanationIndex === 0 ? 0.3 : 1 }}
+                  >
+                    ←
+                  </button>
+                  <button
+                    className="btn-primary"
+                    style={{ flex: 1 }}
+                    onClick={() => {
+                      triggerHaptic();
+                      if (explanationIndex === explanations.length - 1) {
+                        setLessonPhase("relisten");
+                        setAudioCompleted(false);
+                        setAudioProgress(0);
+                      } else {
+                        setExplanationIndex(i => i + 1);
+                      }
+                    }}
+                  >
+                    CONTINUE
+                  </button>
+                  <button
+                    className="btn-nav-arrow"
+                    onClick={() => explanationIndex < explanations.length - 1 && setExplanationIndex(i => i + 1)}
+                    disabled={explanationIndex === explanations.length - 1}
+                    style={{ opacity: explanationIndex === explanations.length - 1 ? 0.3 : 1 }}
+                  >
+                    →
+                  </button>
+                </div>
+              </footer>
+            </div>
+          )}
+
+          {/* PHASE 4: RELISTEN */}
+          {
+            lessonPhase === "relisten" && (
+              <div className="relisten-screen swipe-in">
+                {/* Icon */}
+                <div className="relisten-icon-container">
+                  <img src="/clemency-icon.png" alt="Ihya Institute" className="relisten-icon" />
+                </div>
+
+                <h1 className="relisten-title">
+                  Let's have another listen
+                </h1>
+                <p className="relisten-subtitle">
+                  Listen again one more time without the text!
+                </p>
+
+                {activeLesson.audio_url && (
+                  <>
+                    <audio
+                      ref={audioRef}
+                      src={activeLesson.audio_url}
+                      onTimeUpdate={(e) => {
+                        if (activeLesson.lesson_format !== "blocks" && e.target.duration > 0) {
+                          setAudioProgress(
+                            (e.target.currentTime / e.target.duration) * 100
+                          );
+                        }
+                      }}
+                      onEnded={() => {
+                        setDialogueFinished(true);
+                        setAudioPlaying(false);
+                        setAudioCompleted(true);
+                      }}
+                      style={{ display: "none" }}
+                    />
+
+                    <div className="relisten-play-container">
+                      <button
+                        className="btn-play-large"
+                        onClick={handleStartLessonAudio}
+                        disabled={audioPlaying}
+                      >
+                        {audioPlaying ? "🔊" : "▶️"}
+                      </button>
+                    </div>
+
+                    {activeLesson.audio_url && !audioCompleted && (
+                      <div className="audio-progress-fixed" style={{ marginBottom: '1rem' }}>
+                        <div
+                          className="audio-progress-fill-fixed"
+                          style={{ width: `${audioProgress}%` }}
+                        />
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {audioCompleted && (
+                  <button
+                    className="btn-primary"
+                    style={{ animation: "slideDown 0.3s ease-out", marginBottom: "1rem" }}
+                    onClick={() => { triggerHaptic(); setLessonPhase("pre_quiz"); }}
+                  >
+                    Continue to Quiz →
+                  </button>
+                )}
+
+                <div style={{ flex: 1 }} />
+
+                <button
+                  className="btn-skip-bubble"
+                  onClick={() => { triggerHaptic(); setLessonPhase("pre_quiz"); }}
+                >
+                  Skip to Quiz
+                </button>
+              </div>
+            )
+          }
+
+          {/* PHASE 5: PRE-QUIZ */}
+          {
+            lessonPhase === "pre_quiz" && (
+              <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+                <div style={{ width: '70vw', maxWidth: '280px', marginBottom: '1.5rem' }}>
+                  <img src="/clemency-icon.png" alt="Ihya Institute" style={{ width: '100%', height: 'auto' }} />
+                </div>
+                <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>مُستَعِد؟</h1>
+                <p className="page-subtitle">Take the quiz to complete this lesson!</p>
+                <footer className="sticky-footer">
+                  <button
+                    className="btn-primary"
+                    style={{ fontSize: "1.2rem", padding: "1rem 2rem" }}
+                    onClick={() => { triggerHaptic(); startQuiz(); }}
                     disabled={questions.length === 0}
                   >
-                    {questions.length === 0
-                      ? "No quiz yet for this lesson"
-                      : "Great job – start quiz →"}
+                    {questions.length === 0 ? "No questions loaded" : "ابدأ"}
                   </button>
+                </footer>
+              </div>
+            )
+          }
+
+          {/* EXIT CONFIRMATION MODAL */}
+          {
+            showExitModal && (
+              <div className="modal-overlay">
+                <div className="modal-content">
+                  <div className="modal-title">Return to the home screen?</div>
+                  <p className="text-muted">
+                    (Choose YES to leave or NO to resume the lesson)
+                  </p>
+                  <div className="modal-actions">
+                    <button
+                      className="btn-outline"
+                      style={{ flex: 1 }}
+                      onClick={() => {
+                        setShowExitModal(false);
+                        if (audioRef.current && !audioCompleted) {
+                          audioRef.current.play().then(() => {
+                            setAudioPlaying(true);
+                          }).catch(e => console.error("Resume failed", e));
+                        }
+                      }}
+                    >
+                      NO
+                    </button>
+                    <button
+                      className="btn-primary"
+                      style={{
+                        flex: 1,
+                        backgroundColor: "var(--red)",
+                        boxShadow: "0 4px 0 var(--red-dark)",
+                      }}
+                      onClick={() => {
+                        setShowExitModal(false);
+                        backToLessons();
+                      }}
+                    >
+                      YES
+                    </button>
+                  </div>
                 </div>
-              </>
-            )}
-          </div>
-        </main>
-      </div>
+              </div>
+            )
+          }
+
+          {/* Global Transition Overlay */}
+          {transitioning && (
+            <div className="transition-overlay">
+              <div className="transition-card">
+                <Leapfrog size="40" speed="2.5" color="#8b5cf6" />
+              </div>
+            </div>
+          )}
+        </main >
+      </div >
     );
   }
 
@@ -929,23 +1951,35 @@ function App() {
   return (
     <div className="app-shell">
       <header className="app-header">
-        <div className="app-logo">العربيّة</div>
-        <div className="app-header-right">
-          <span className="app-user-email">{user?.email}</span>
-          <button className="btn-outline" onClick={handleSignOut}>
-            Sign out
-          </button>
+        <div className="app-header-content">
+          <div className="app-logo">
+            <img src="/clemency-icon.png" alt="Ihya Institute Logo" style={{ height: "50px" }} />
+          </div>
+          <div className="app-header-right">
+            <ProfileMenu />
+          </div>
         </div>
       </header>
 
-      <main className="app-main">
+      <main className={`app-main ${transitionDirection === 'back' ? 'page-transition-back' : ''}`}>
         <div className="page-layout">
-          <section className="page-card">
-            <h1 className="page-title">Your stages</h1>
-            <p className="page-subtitle">
-              Work through each stage at your own pace. Lessons build up from
-              simple phrases to full dialogue.
-            </p>
+          <section
+            className="page-card"
+            style={{
+              background: "transparent",
+              border: "none",
+              boxShadow: "none",
+              padding: 0,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1rem" }}>
+              <p style={{ fontSize: "0.9rem", color: "var(--text-light)", margin: 0 }}>
+                Stages
+              </p>
+              <h1 className="page-title" style={{ fontSize: "2rem", fontFamily: "'Amiri', serif", direction: "rtl", margin: 0 }}>
+                المراحل
+              </h1>
+            </div>
 
             {loadingStages ? (
               <p className="muted">Loading…</p>
@@ -954,87 +1988,89 @@ function App() {
             ) : (
               <div className="stage-list">
                 {stages.map((stage) => {
-                  const { completed, total, percent } = getStageProgress(
-                    stage.id
-                  );
+                  const { completed, total, percent } = getStageProgress(stage.id);
+                  const isSelected = selectedStage === stage.id;
+
                   return (
-                    <button
-                      key={stage.id}
-                      onClick={() => loadLessons(stage.id)}
-                      className="stage-card"
-                    >
-                      <div className="stage-card-top">
-                        <div>
-                          <div className="stage-name">
-                            {stage.name || "Stage"}
+                    <div key={stage.id} style={{ marginBottom: "1rem" }}>
+                      <button
+                        onClick={() => { triggerHaptic(); loadLessons(stage.id); }}
+                        className="stage-card"
+                        style={{
+                          width: "100%",
+                          marginBottom: 0,
+                          borderColor: isSelected ? "var(--blue)" : "var(--gray-200)",
+                          background: "var(--white)",
+                        }}
+                      >
+                        <div className="stage-card-top">
+                          <div>
+                            <div className="stage-name">{stage.name || "Stage"}</div>
+                            <div className="stage-description">{stage.description}</div>
                           </div>
-                          <div className="stage-description">
-                            {stage.description}
-                          </div>
+                          {total > 0 && (
+                            <span className="stage-progress-text">
+                              {completed}/{total} lessons • {percent}%
+                            </span>
+                          )}
                         </div>
                         {total > 0 && (
-                          <span className="stage-progress-text">
-                            {completed}/{total} lessons • {percent}%
-                          </span>
+                          <div className="stage-progress-bar">
+                            <div className="stage-progress-fill" style={{ width: `${percent}%` }} />
+                          </div>
                         )}
-                      </div>
-                      {total > 0 && (
-                        <div className="stage-progress-bar">
-                          <div
-                            className="stage-progress-fill"
-                            style={{ width: `${percent}%` }}
-                          />
+                      </button>
+
+                      {isSelected && (
+                        <div className="lesson-container-inline">
+                          {loadingLessons ? (
+                            <p className="muted" style={{ textAlign: "center" }}>
+                              Loading lessons…
+                            </p>
+                          ) : lessons.length === 0 ? (
+                            <p className="muted" style={{ textAlign: "center" }}>
+                              No lessons found.
+                            </p>
+                          ) : (
+                            <ul className="lesson-list">
+                              {lessons.map((lesson) => {
+                                const completed = isLessonCompleted(lesson.id);
+                                return (
+                                  <li key={lesson.id}>
+                                    <button
+                                      onClick={() => openLesson(lesson)}
+                                      className="lesson-row"
+                                    >
+                                      <div className={`lesson-progress-donut ${completed ? "completed" : ""}`} />
+                                      <div className="lesson-row-content">
+                                        <div className="lesson-row-title">{lesson.title}</div>
+                                        <div className="lesson-row-desc">{lesson.description}</div>
+                                      </div>
+                                    </button>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          )}
                         </div>
                       )}
-                    </button>
+                    </div>
                   );
                 })}
               </div>
             )}
           </section>
-
-          <section className="page-card">
-            <h2 className="page-title">Lessons</h2>
-            {selectedStage === null ? (
-              <p className="muted">Select a stage to view lessons.</p>
-            ) : loadingLessons ? (
-              <p className="muted">Loading lessons…</p>
-            ) : lessons.length === 0 ? (
-              <p className="muted">No lessons found.</p>
-            ) : (
-              <ul className="lesson-list">
-                {lessons.map((lesson) => {
-                  const completed = isLessonCompleted(lesson.id);
-                  return (
-                    <li key={lesson.id}>
-                      <button
-                        onClick={() => openLesson(lesson)}
-                        className={`lesson-row ${
-                          completed ? "lesson-completed" : ""
-                        }`}
-                      >
-                        <div>
-                          <div className="lesson-row-title">
-                            {lesson.title}
-                          </div>
-                          <div className="lesson-row-desc">
-                            {lesson.description}
-                          </div>
-                        </div>
-                        {completed && (
-                          <span className="pill pill-completed">
-                            ✓ Completed
-                          </span>
-                        )}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </section>
         </div>
       </main>
+
+      {/* Global Transition Overlay */}
+      {transitioning && (
+        <div className="transition-overlay">
+          <div className="transition-card">
+            <Leapfrog size="40" speed="2.5" color="#8b5cf6" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
