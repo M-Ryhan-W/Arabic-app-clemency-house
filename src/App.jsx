@@ -3,8 +3,10 @@ import { supabase } from "./supabaseClient";
 import { Leapfrog } from 'ldrs/react';
 import 'ldrs/react/Leapfrog.css';
 import { App as CapacitorApp } from '@capacitor/app';
+import { Capacitor } from '@capacitor/core';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { DotLottieReact } from '@lottiefiles/dotlottie-react';
+// Web MediaRecorder API used instead of Capacitor plugins (outputs WEBM_OPUS for Google STT)
 import "./App.css";
 
 // Utility function for haptic feedback
@@ -77,7 +79,7 @@ function App() {
 
   // LESSON FLOW STATE
   const [lessonPhase, setLessonPhase] = useState("lesson");
-  // "lesson" -> "intro_grammar" -> "grammar" -> "intro_vocab" -> "vocab" -> "intro_drills" -> "explain" -> "relisten" -> "pre_quiz"
+  // "lesson" -> "intro_grammar" -> "grammar" -> "intro_vocab" -> "vocab" -> "speaking" -> "intro_drills" -> "explain" -> "relisten" -> "pre_quiz"
 
   // VOCAB / EXPLANATION / GRAMMAR STATE
   const [vocabItems, setVocabItems] = useState([]);
@@ -86,6 +88,18 @@ function App() {
   const [explanationIndex, setExplanationIndex] = useState(0);
   const [grammarNotes, setGrammarNotes] = useState([]);
   const [grammarIndex, setGrammarIndex] = useState(0);
+  const [speakingExercises, setSpeakingExercises] = useState([]);
+
+  // SPEECH RECOGNITION STATE
+  const [spokenText, setSpokenText] = useState("");
+  const [isListening, setIsListening] = useState(false);
+  const [speechError, setSpeechError] = useState("");
+
+  // VOICE RECORDING STATE
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordedAudio, setRecordedAudio] = useState(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
 
   // AUDIO STATE
   const audioRef = useRef(null);
@@ -495,6 +509,135 @@ function App() {
     setHasAnswered(false);
   }
 
+  // Browser Speech Recognition helper
+  const startBrowserSpeech = () => {
+    setSpeechError("");
+
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setSpeechError("Speech recognition not supported on this device/browser.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "ar-SA"; // Arabic
+    recognition.interimResults = true;
+    recognition.continuous = false;
+
+    setSpokenText("");
+    setIsListening(true);
+
+    recognition.onresult = (event) => {
+      let transcript = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        transcript += event.results[i][0].transcript;
+      }
+      setSpokenText(transcript.trim());
+    };
+
+    recognition.onerror = (event) => {
+      setSpeechError(event.error || "Speech recognition error");
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    recognition.start();
+  };
+
+  // Voice Recording using Web MediaRecorder API (outputs WEBM_OPUS for Google STT)
+  const startRecording = async () => {
+    try {
+      setSpeechError("");
+      audioChunksRef.current = [];
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'audio/webm;codecs=opus',
+      });
+
+      mediaRecorderRef.current = mediaRecorder;
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        // Stop all tracks to release the microphone
+        stream.getTracks().forEach(track => track.stop());
+
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm;codecs=opus' });
+
+        // Convert blob to base64
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64String = reader.result;
+          // Strip the data URL prefix (e.g., "data:audio/webm;codecs=opus;base64,")
+          const base64Audio = base64String.split(',')[1];
+          setRecordedAudio(base64Audio);
+          console.log('Audio recorded (WEBM_OPUS base64), length:', base64Audio.length);
+          sendAudioToBackend(base64Audio);
+        };
+        reader.readAsDataURL(audioBlob);
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      console.log('Recording started (WEBM_OPUS)');
+    } catch (err) {
+      console.error("Start recording error:", err);
+      setSpeechError("Failed to start recording: " + (err.message || err));
+    }
+  };
+
+  const stopRecording = async () => {
+    try {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+        setIsRecording(false);
+        console.log('Recording stopped');
+      }
+    } catch (e) {
+      console.error('Failed to stop recording:', e);
+      setSpeechError('Failed to stop recording: ' + (e.message || e));
+      setIsRecording(false);
+    }
+  };
+
+  // Send recorded audio to Supabase Edge Function
+  const sendAudioToBackend = async (audioBase64) => {
+    if (!audioBase64) return;
+
+    try {
+      const { data, error } = await supabase.functions.invoke(
+        "speech-check",
+        {
+          body: {
+            audioBase64: audioBase64,
+            expectedText: speakingExercises[0]?.prompt_ar
+          }
+        }
+      );
+
+      if (error) {
+        console.error("Speech check error:", error);
+        setSpeechError("Failed to send audio: " + error.message);
+      } else {
+        console.log("Speech check response:", JSON.stringify(data, null, 2));
+      }
+    } catch (e) {
+      console.error("Speech check exception:", e);
+      setSpeechError("Failed to send audio: " + (e.message || e));
+    }
+  };
+
   // ---------- OPEN LESSON: QUESTIONS + VOCAB + EXPLANATIONS + BLOCKS ----------
 
   async function openLesson(lesson) {
@@ -519,6 +662,7 @@ function App() {
     setVocabItems([]);
     setExplanations([]);
     setGrammarNotes([]);
+    setSpeakingExercises([]);
     setVocabIndex(0);
     setGrammarIndex(0);
     setExplanationIndex(0);
@@ -613,6 +757,21 @@ function App() {
       } else {
         console.error("Error loading grammar notes:", notesErr);
         setGrammarNotes([]);
+      }
+
+      // Load speaking exercises
+      const { data: speakingData, error: speakingError } = await supabase
+        .from('lesson_speaking_exercises')
+        .select('*')
+        .eq('lesson_id', lesson.id)
+        .order('order_index', { ascending: true });
+
+      if (!speakingError) {
+        setSpeakingExercises(speakingData || []);
+        console.log('Speaking exercises:', speakingData);
+      } else {
+        console.error("Error loading speaking exercises:", speakingError);
+        setSpeakingExercises([]);
       }
 
       // ✅ Load blocks (One query join!)
@@ -1683,7 +1842,12 @@ function App() {
                       onClick={() => {
                         triggerHaptic();
                         if (vocabIndex === vocabItems.length - 1) {
-                          setLessonPhase("intro_drills");
+                          // After vocab, go to speaking if exercises exist, otherwise intro_drills
+                          if (speakingExercises.length > 0) {
+                            setLessonPhase("speaking");
+                          } else {
+                            setLessonPhase("intro_drills");
+                          }
                         } else {
                           setVocabIndex(i => i + 1);
                         }
@@ -1705,6 +1869,45 @@ function App() {
             </div>
           )
           }
+
+          {/* PHASE: SPEAKING PRACTICE */}
+          {lessonPhase === "speaking" && (
+            <div className="speaking-practice no-scroll-container swipe-in" style={{ padding: '2rem', textAlign: 'center' }}>
+              <h2 style={{ marginBottom: '2rem' }}>Speaking Practice</h2>
+
+              <p dir="rtl" style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '2rem', lineHeight: 1.8 }}>
+                {speakingExercises[0]?.prompt_ar}
+              </p>
+
+              <button
+                className="btn-primary"
+                onClick={isRecording ? stopRecording : startRecording}
+                style={{ maxWidth: 320 }}
+              >
+                {isRecording ? "⏹ Stop recording" : "🎤 Start recording"}
+              </button>
+
+              {speechError && (
+                <p style={{ color: 'red', marginTop: 12 }}>
+                  {speechError}
+                </p>
+              )}
+
+              {recordedAudio && (
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ fontWeight: 700, color: 'green' }}>✓ Audio recorded!</div>
+                </div>
+              )}
+
+              <button
+                className="btn-outline"
+                style={{ marginTop: 20 }}
+                onClick={() => { triggerHaptic(); setLessonPhase('intro_drills'); }}
+              >
+                Continue
+              </button>
+            </div>
+          )}
 
           {/* PHASE: TRANSITION TO DRILLS */}
           {lessonPhase === "intro_drills" && (
