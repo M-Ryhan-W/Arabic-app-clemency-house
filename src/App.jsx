@@ -33,6 +33,24 @@ const toArabicNum = (n) => {
   return String(n).split('').map(d => arabicDigits[+d] || d).join('');
 };
 
+// Normalize Arabic text (remove tashkeel, normalize alef/ya/ta-marbuta)
+const normalizeArabic = (s = "") =>
+  s
+    .replace(/[ًٌٍَُِّْ]/g, "") // remove tashkeel
+    .replace(/[أإآ]/g, "ا")
+    .replace(/ى/g, "ي")
+    .replace(/ة/g, "ه")
+    .replace(/\s+/g, " ")
+    .trim();
+
+// Compute word overlap similarity score (0-1)
+const scoreSimilarity = (a, b) => {
+  const A = new Set(a.split(" "));
+  const B = new Set(b.split(" "));
+  const common = [...A].filter(x => B.has(x)).length;
+  return common / Math.max(A.size, B.size);
+};
+
 function App() {
   const [stages, setStages] = useState([]);
   const [loadingStages, setLoadingStages] = useState(true);
@@ -98,6 +116,7 @@ function App() {
   // VOICE RECORDING STATE
   const [isRecording, setIsRecording] = useState(false);
   const [recordedAudio, setRecordedAudio] = useState(null);
+  const [speechFeedback, setSpeechFeedback] = useState(null); // "Good ✅" | "Almost 👍" | "Try again 🔁"
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
 
@@ -135,6 +154,9 @@ function App() {
   const [transitioning, setTransitioning] = useState(false);
   const [transitionDirection, setTransitionDirection] = useState("forward"); // "forward" | "back"
   const transitionTimerRef = useRef(null);
+
+  // LESSON CONTENT CACHE (for preloading)
+  const lessonContentCache = useRef(new Map()); // Map<lessonId, { questions, vocab, explanations, grammarNotes, speakingExercises, blocks }>
 
   // ---------- TRANSITION HELPER ----------
 
@@ -392,6 +414,63 @@ function App() {
 
   // Global click sounds removed - only keeping correct/wrong/celebration sounds
 
+  // ---------- PRELOAD LESSON CONTENT (Background) ----------
+
+  async function preloadLessonContent(lessonId, lessonFormat) {
+    // Skip if already cached
+    if (lessonContentCache.current.has(lessonId)) return;
+
+    try {
+      // Fetch all content in parallel for speed
+      const [questionsRes, vocabRes, explRes, notesRes, speakingRes, blocksRes] = await Promise.all([
+        supabase.from("questions").select("id, question_type, prompt_text, order").eq("lesson_id", lessonId).order("order", { ascending: true }),
+        supabase.from("lesson_vocab").select("*").eq("lesson_id", lessonId).order("order", { ascending: true }),
+        supabase.from("lesson_explanations").select("*").eq("lesson_id", lessonId).order("order", { ascending: true }),
+        supabase.from("lesson_notes").select("*").eq("lesson_id", lessonId).order("order_index", { ascending: true }),
+        supabase.from("lesson_speaking_exercises").select("*").eq("lesson_id", lessonId).order("order_index", { ascending: true }),
+        lessonFormat === "blocks"
+          ? supabase.from("lesson_blocks").select(`id, lesson_id, block_type, order_index, text_ar, text_en, speaker_id, audio_url, start_time_seconds, end_time_seconds, speakers (id, display_name_ar, avatar_url, bubble_side)`).eq("lesson_id", lessonId).order("order_index", { ascending: true })
+          : Promise.resolve({ data: [], error: null })
+      ]);
+
+      // Fetch question options for MCQs
+      const questions = questionsRes.data || [];
+      const questionsWithOptions = [];
+      for (const q of questions) {
+        if (q.question_type === "mcq") {
+          const { data: options } = await supabase.from("question_options").select("*").eq("question_id", q.id);
+          questionsWithOptions.push({ ...q, options: shuffleArray(options || []) });
+        } else {
+          questionsWithOptions.push({ ...q, options: [] });
+        }
+      }
+
+      // Store in cache
+      lessonContentCache.current.set(lessonId, {
+        questions: questionsWithOptions,
+        vocab: vocabRes.data || [],
+        explanations: explRes.data || [],
+        grammarNotes: notesRes.data || [],
+        speakingExercises: speakingRes.data || [],
+        blocks: blocksRes.data || []
+      });
+
+      console.log("Preloaded lesson content:", lessonId);
+    } catch (err) {
+      console.error("Error preloading lesson:", lessonId, err);
+    }
+  }
+
+  // Preload multiple lessons in background
+  async function preloadLessonsForStage(stageId, lessonsData) {
+    const stageLessons = lessonsData.filter(l => l.stage_id === stageId).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    // Preload all lessons for this stage (limit to first 5 to avoid overloading)
+    const toPreload = stageLessons.slice(0, 5);
+    for (const lesson of toPreload) {
+      await preloadLessonContent(lesson.id, lesson.lesson_format);
+    }
+  }
+
   // ---------- LOAD STAGES + ALL LESSONS ----------
 
   useEffect(() => {
@@ -419,6 +498,14 @@ function App() {
         setAllLessons([]);
       } else {
         setAllLessons(lessonsData || []);
+
+        // Background preload first stage lessons for instant loading
+        if (stagesData && stagesData.length > 0 && lessonsData) {
+          const firstStageId = stagesData[0].id;
+          console.log("Starting background preload for first stage:", firstStageId);
+          // Don't await - run in background
+          preloadLessonsForStage(firstStageId, lessonsData);
+        }
       }
 
       setLoadingStages(false);
@@ -472,6 +559,9 @@ function App() {
     resetQuiz();
     resetAudio();
     resetLessonFlow();
+
+    // Background preload this stage's lessons
+    preloadLessonsForStage(stageId, allLessons);
   }
 
   // ---------- LOAD PROGRESS WHEN USER CHANGES ----------
@@ -615,6 +705,8 @@ function App() {
   const sendAudioToBackend = async (audioBase64) => {
     if (!audioBase64) return;
 
+    setSpeechFeedback(null); // Reset feedback
+
     try {
       const { data, error } = await supabase.functions.invoke(
         "speech-check",
@@ -630,7 +722,34 @@ function App() {
         console.error("Speech check error:", error);
         setSpeechError("Failed to send audio: " + error.message);
       } else {
-        console.log("Speech check response:", JSON.stringify(data, null, 2));
+        // Parse response if it's a string (Supabase sometimes returns stringified JSON)
+        const parsed = typeof data === "string" ? JSON.parse(data) : data;
+        console.log("Speech check response:", JSON.stringify(parsed, null, 2));
+
+        // Compute feedback based on transcript
+        const transcript = parsed?.transcript || "";
+        const expectedText = speakingExercises[0]?.prompt_ar || "";
+
+        console.log("Transcript from backend:", transcript);
+        console.log("Expected text:", expectedText);
+
+
+        const spoken = normalizeArabic(transcript);
+        const expected = normalizeArabic(expectedText);
+
+        const score = scoreSimilarity(spoken, expected);
+        console.log("Similarity score:", score, "spoken:", spoken, "expected:", expected);
+
+        let feedback;
+        // If no expected text, show success for any transcription
+        if (!expected) {
+          feedback = transcript ? "Good ✅" : "Try again 🔁";
+        } else if (score >= 0.85) feedback = "Good ✅";
+        else if (score >= 0.6) feedback = "Almost 👍";
+        else feedback = "Try again 🔁";
+
+        setSpeechFeedback(feedback);
+        setSpokenText(transcript); // Show what was transcribed
       }
     } catch (e) {
       console.error("Speech check exception:", e);
@@ -683,134 +802,153 @@ function App() {
     setLoadingQuestions(true);
 
     try {
-      // Load questions
-      const { data: qData, error: qError } = await supabase
-        .from("questions")
-        .select("id, question_type, prompt_text, order")
-        .eq("lesson_id", lesson.id)
-        .order("order", { ascending: true });
+      // Check if lesson content is already cached
+      const cached = lessonContentCache.current.get(lesson.id);
 
-      if (qError) throw qError;
+      if (cached) {
+        console.log("Using cached content for lesson:", lesson.id);
+        // Use cached content (instant!)
+        setQuestions(cached.questions);
+        setVocabItems(cached.vocab);
+        setExplanations(cached.explanations);
+        setGrammarNotes(cached.grammarNotes);
+        setSpeakingExercises(cached.speakingExercises);
 
-      const questionsWithOptions = [];
-
-      for (const q of qData || []) {
-        if (q.question_type === "mcq") {
-          const { data: options, error: optError } = await supabase
-            .from("question_options")
-            .select("*")
-            .eq("question_id", q.id);
-
-          if (optError) {
-            console.error("Error loading options:", optError);
-            questionsWithOptions.push({ ...q, options: [] });
-          } else {
-            questionsWithOptions.push({
-              ...q,
-              options: shuffleArray(options || []),
-            });
-          }
-        } else {
-          questionsWithOptions.push({ ...q, options: [] });
+        if (lesson.lesson_format === "blocks") {
+          setLessonBlocks(cached.blocks);
         }
-      }
-
-      setQuestions(questionsWithOptions);
-
-      // Load vocab
-      const { data: vocab, error: vocabErr } = await supabase
-        .from("lesson_vocab")
-        .select("*")
-        .eq("lesson_id", lesson.id)
-        .order("order", { ascending: true });
-
-      if (vocabErr) {
-        console.error("Error loading vocab:", vocabErr);
-        setVocabItems([]);
       } else {
-        setVocabItems(vocab || []);
-      }
+        console.log("Fetching content for lesson:", lesson.id);
+        // Not cached - fetch from database
+        // Load questions
+        const { data: qData, error: qError } = await supabase
+          .from("questions")
+          .select("id, question_type, prompt_text, order")
+          .eq("lesson_id", lesson.id)
+          .order("order", { ascending: true });
 
-      // Load explanation sentences
-      const { data: expl, error: explErr } = await supabase
-        .from("lesson_explanations")
-        .select("*")
-        .eq("lesson_id", lesson.id)
-        .order("order", { ascending: true });
+        if (qError) throw qError;
 
-      if (explErr) {
-        console.error("Error loading explanations:", explErr);
-        setExplanations([]);
-      } else {
-        setExplanations(expl || []);
-      }
+        const questionsWithOptions = [];
 
-      // Load grammar notes (Grammar Spotlight)
-      const { data: notes, error: notesErr } = await supabase
-        .from("lesson_notes")
-        .select("*")
-        .eq("lesson_id", lesson.id)
-        .order("order_index", { ascending: true });
+        for (const q of qData || []) {
+          if (q.question_type === "mcq") {
+            const { data: options, error: optError } = await supabase
+              .from("question_options")
+              .select("*")
+              .eq("question_id", q.id);
 
-      if (!notesErr) {
-        setGrammarNotes(notes || []);
-      } else {
-        console.error("Error loading grammar notes:", notesErr);
-        setGrammarNotes([]);
-      }
+            if (optError) {
+              console.error("Error loading options:", optError);
+              questionsWithOptions.push({ ...q, options: [] });
+            } else {
+              questionsWithOptions.push({
+                ...q,
+                options: shuffleArray(options || []),
+              });
+            }
+          } else {
+            questionsWithOptions.push({ ...q, options: [] });
+          }
+        }
 
-      // Load speaking exercises
-      const { data: speakingData, error: speakingError } = await supabase
-        .from('lesson_speaking_exercises')
-        .select('*')
-        .eq('lesson_id', lesson.id)
-        .order('order_index', { ascending: true });
+        setQuestions(questionsWithOptions);
 
-      if (!speakingError) {
-        setSpeakingExercises(speakingData || []);
-        console.log('Speaking exercises:', speakingData);
-      } else {
-        console.error("Error loading speaking exercises:", speakingError);
-        setSpeakingExercises([]);
-      }
+        // Load vocab
+        const { data: vocab, error: vocabErr } = await supabase
+          .from("lesson_vocab")
+          .select("*")
+          .eq("lesson_id", lesson.id)
+          .order("order", { ascending: true });
 
-      // ✅ Load blocks (One query join!)
-      if (lesson.lesson_format === "blocks") {
-        setLoadingBlocks(true);
-        // Instant placeholder to avoid blank screen
-        setLessonBlocks([{ id: "loading", block_type: "loading" }]);
+        if (vocabErr) {
+          console.error("Error loading vocab:", vocabErr);
+          setVocabItems([]);
+        } else {
+          setVocabItems(vocab || []);
+        }
 
-        const { data: blocks, error: blocksErr } = await supabase
-          .from("lesson_blocks")
-          .select(`
-            id,
-            lesson_id,
-            block_type,
-            order_index,
-            text_ar,
-            text_en,
-            speaker_id,
-            audio_url,
-            start_time_seconds,
-            end_time_seconds,
-            speakers (
-              id,
-              display_name_ar,
-              avatar_url,
-              bubble_side
-            )
-          `)
+        // Load explanation sentences
+        const { data: expl, error: explErr } = await supabase
+          .from("lesson_explanations")
+          .select("*")
+          .eq("lesson_id", lesson.id)
+          .order("order", { ascending: true });
+
+        if (explErr) {
+          console.error("Error loading explanations:", explErr);
+          setExplanations([]);
+        } else {
+          setExplanations(expl || []);
+        }
+
+        // Load grammar notes (Grammar Spotlight)
+        const { data: notes, error: notesErr } = await supabase
+          .from("lesson_notes")
+          .select("*")
           .eq("lesson_id", lesson.id)
           .order("order_index", { ascending: true });
 
-        if (blocksErr) {
-          console.error("Error loading lesson blocks:", blocksErr);
-          setLessonBlocks([]);
+        if (!notesErr) {
+          setGrammarNotes(notes || []);
         } else {
-          setLessonBlocks(blocks || []);
+          console.error("Error loading grammar notes:", notesErr);
+          setGrammarNotes([]);
         }
 
-        setLoadingBlocks(false);
+        // Load speaking exercises
+        const { data: speakingData, error: speakingError } = await supabase
+          .from('lesson_speaking_exercises')
+          .select('*')
+          .eq('lesson_id', lesson.id)
+          .order('order_index', { ascending: true });
+
+        if (!speakingError) {
+          setSpeakingExercises(speakingData || []);
+          console.log('Speaking exercises:', speakingData);
+        } else {
+          console.error("Error loading speaking exercises:", speakingError);
+          setSpeakingExercises([]);
+        }
+
+        // ✅ Load blocks (One query join!)
+        if (lesson.lesson_format === "blocks") {
+          setLoadingBlocks(true);
+          // Instant placeholder to avoid blank screen
+          setLessonBlocks([{ id: "loading", block_type: "loading" }]);
+
+          const { data: blocks, error: blocksErr } = await supabase
+            .from("lesson_blocks")
+            .select(`
+              id,
+              lesson_id,
+              block_type,
+              order_index,
+              text_ar,
+              text_en,
+              speaker_id,
+              audio_url,
+              start_time_seconds,
+              end_time_seconds,
+              speakers (
+                id,
+                display_name_ar,
+                avatar_url,
+                bubble_side
+              )
+            `)
+            .eq("lesson_id", lesson.id)
+            .order("order_index", { ascending: true });
+
+          if (blocksErr) {
+            console.error("Error loading lesson blocks:", blocksErr);
+            setLessonBlocks([]);
+          } else {
+            setLessonBlocks(blocks || []);
+          }
+
+          setLoadingBlocks(false);
+        }
       }
     } catch (err) {
       console.error("Error opening lesson:", err);
@@ -1893,9 +2031,45 @@ function App() {
                 </p>
               )}
 
-              {recordedAudio && (
-                <div style={{ marginTop: 16 }}>
-                  <div style={{ fontWeight: 700, color: 'green' }}>✓ Audio recorded!</div>
+              {/* Show feedback after recording */}
+              {speechFeedback && (
+                <div style={{
+                  marginTop: 20,
+                  padding: '16px 24px',
+                  borderRadius: 12,
+                  background: speechFeedback.includes('Good') ? 'rgba(34, 197, 94, 0.15)'
+                    : speechFeedback.includes('Almost') ? 'rgba(251, 191, 36, 0.15)'
+                      : 'rgba(239, 68, 68, 0.15)',
+                  border: `2px solid ${speechFeedback.includes('Good') ? '#22c55e'
+                    : speechFeedback.includes('Almost') ? '#fbbf24'
+                      : '#ef4444'
+                    }`
+                }}>
+                  <div style={{
+                    fontSize: '1.5rem',
+                    fontWeight: 700,
+                    color: speechFeedback.includes('Good') ? '#22c55e'
+                      : speechFeedback.includes('Almost') ? '#fbbf24'
+                        : '#ef4444'
+                  }}>
+                    {speechFeedback}
+                  </div>
+                  {spokenText && (
+                    <div dir="rtl" style={{
+                      marginTop: 12,
+                      fontSize: '1.1rem',
+                      color: 'var(--text-secondary)',
+                      fontStyle: 'italic'
+                    }}>
+                      You said: "{spokenText}"
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {isRecording && (
+                <div style={{ marginTop: 16, color: 'var(--text-secondary)' }}>
+                  🔴 Recording...
                 </div>
               )}
 
