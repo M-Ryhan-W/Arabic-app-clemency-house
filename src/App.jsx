@@ -158,6 +158,20 @@ function App() {
   // LESSON CONTENT CACHE (for preloading)
   const lessonContentCache = useRef(new Map()); // Map<lessonId, { questions, vocab, explanations, grammarNotes, speakingExercises, blocks }>
 
+  // ✅ SPEAKING PRACTICE MODE STATE
+  const [practiceMode, setPracticeMode] = useState(null); // null = selection, 'book' | 'speaking'
+  const [speakingModes, setSpeakingModes] = useState([]);
+  const [loadingSpeakingModes, setLoadingSpeakingModes] = useState(false);
+  const [selectedSpeakingMode, setSelectedSpeakingMode] = useState(null);
+  const [speakingLessons, setSpeakingLessons] = useState([]);
+  const [loadingSpeakingLessons, setLoadingSpeakingLessons] = useState(false);
+  const [activeSpeakingLesson, setActiveSpeakingLesson] = useState(null);
+  const [speakingLessonItems, setSpeakingLessonItems] = useState([]);
+  const [currentSpeakingItemIndex, setCurrentSpeakingItemIndex] = useState(0);
+  const [currentSpeakingModeType, setCurrentSpeakingModeType] = useState(null); // 'speaking_repeat' | 'speaking_translate'
+  const [speakingItemCorrect, setSpeakingItemCorrect] = useState(false);
+  const [speakingLessonComplete, setSpeakingLessonComplete] = useState(false);
+
   // ---------- TRANSITION HELPER ----------
 
   function beginTransition(minMs = 250) {
@@ -564,6 +578,135 @@ function App() {
     preloadLessonsForStage(stageId, allLessons);
   }
 
+  // ---------- SPEAKING PRACTICE DATA FETCHING ----------
+
+  async function loadSpeakingModes() {
+    setLoadingSpeakingModes(true);
+    console.log("Loading speaking modes...");
+    const { data, error } = await supabase
+      .from("speaking_modes")
+      .select("*");
+
+    console.log("Speaking modes response:", { data, error });
+
+    if (error) {
+      console.error("Error loading speaking modes:", error);
+      setSpeakingModes([]);
+    } else {
+      setSpeakingModes(data || []);
+    }
+    setLoadingSpeakingModes(false);
+  }
+
+  async function loadSpeakingLessons(modeId) {
+    // Toggle: if clicking the same mode, close it
+    if (selectedSpeakingMode === modeId) {
+      setSelectedSpeakingMode(null);
+      setSpeakingLessons([]);
+      return;
+    }
+
+    setSelectedSpeakingMode(modeId);
+    setLoadingSpeakingLessons(true);
+
+    console.log("Loading speaking lessons for mode:", modeId);
+
+    const { data, error } = await supabase
+      .from("speaking_lessons")
+      .select("*")
+      .eq("mode_id", modeId)
+      .order("order", { ascending: true });
+
+    console.log("Speaking lessons response:", { data, error });
+
+    if (error) {
+      console.error("Error loading speaking lessons:", error);
+      setSpeakingLessons([]);
+    } else {
+      setSpeakingLessons(data || []);
+    }
+    setLoadingSpeakingLessons(false);
+  }
+
+  async function openSpeakingLesson(lesson) {
+    triggerHaptic();
+
+    const endTransition = beginTransition(350);
+    setTransitionDirection("forward");
+
+    // Get the mode type for this lesson (e.g., 'speaking_repeat' or 'speaking_translate')
+    // Use loose equality (==) to handle string/number type mismatches
+    const currentMode = speakingModes.find(m => String(m.id) === String(lesson.mode_id));
+    console.log("Finding mode - lesson.mode_id:", lesson.mode_id, "Available modes:", speakingModes.map(m => ({ id: m.id, name: m.name })));
+
+    // Detect mode type: check explicit field OR infer from mode name
+    let modeType = currentMode?.lesson_type || currentMode?.mode_type || currentMode?.type;
+
+    // If no explicit type field, infer from the mode's name
+    if (!modeType && currentMode?.name) {
+      const modeName = currentMode.name.toLowerCase();
+      console.log("Mode name (lowercase):", modeName, "Contains 'translate':", modeName.includes('translate'));
+      if (modeName.includes('translate')) {
+        modeType = 'speaking_translate';
+      } else {
+        modeType = 'speaking_repeat';
+      }
+    }
+
+    // Default fallback
+    if (!modeType) modeType = 'speaking_repeat';
+
+    console.log("Speaking mode detected:", currentMode, "Mode type:", modeType);
+    setCurrentSpeakingModeType(modeType);
+
+    setActiveSpeakingLesson(lesson);
+    setCurrentSpeakingItemIndex(0);
+    setSpeakingItemCorrect(false);
+    setSpeakingLessonComplete(false);
+    setSpeechFeedback(null);
+    setSpokenText("");
+    setSpeechError("");
+
+    // Fetch speaking lesson items (FK is speaking_lesson_id)
+    console.log("Loading speaking lesson items for lesson:", lesson.id);
+    const { data, error } = await supabase
+      .from("speaking_lesson_items")
+      .select("*")
+      .eq("speaking_lesson_id", lesson.id)
+      .order("order", { ascending: true });
+
+    console.log("Speaking lesson items response:", { data, error });
+
+    if (error) {
+      console.error("Error loading speaking lesson items:", error);
+      setSpeakingLessonItems([]);
+    } else {
+      setSpeakingLessonItems(data || []);
+    }
+
+    endTransition();
+    window.scrollTo(0, 0);
+  }
+
+  function resetSpeakingFlow() {
+    setActiveSpeakingLesson(null);
+    setSpeakingLessonItems([]);
+    setCurrentSpeakingItemIndex(0);
+    setSpeakingItemCorrect(false);
+    setSpeakingLessonComplete(false);
+    setSpeechFeedback(null);
+    setSpokenText("");
+    setSpeechError("");
+    setCurrentSpeakingModeType(null);
+  }
+
+  function backToSpeakingLessons() {
+    const endTransition = beginTransition(250);
+    setTransitionDirection("back");
+    resetSpeakingFlow();
+    endTransition();
+  }
+
   // ---------- LOAD PROGRESS WHEN USER CHANGES ----------
 
   useEffect(() => {
@@ -673,7 +816,11 @@ function App() {
           const base64Audio = base64String.split(',')[1];
           setRecordedAudio(base64Audio);
           console.log('Audio recorded (WEBM_OPUS base64), length:', base64Audio.length);
-          sendAudioToBackend(base64Audio);
+
+          // For Speaking Practice mode, pass the current item's arabic_text
+          const currentSpeakingItem = speakingLessonItems[currentSpeakingItemIndex];
+          const expectedText = currentSpeakingItem?.arabic_text || null;
+          sendAudioToBackend(base64Audio, expectedText);
         };
         reader.readAsDataURL(audioBlob);
       };
@@ -702,18 +849,22 @@ function App() {
   };
 
   // Send recorded audio to Supabase Edge Function
-  const sendAudioToBackend = async (audioBase64) => {
+  // expectedTextOverride: optional text to compare against (for Speaking Practice mode)
+  const sendAudioToBackend = async (audioBase64, expectedTextOverride = null) => {
     if (!audioBase64) return;
 
     setSpeechFeedback(null); // Reset feedback
 
     try {
+      // Use override if provided, otherwise fall back to speakingExercises
+      const expectedText = expectedTextOverride ?? speakingExercises[0]?.prompt_ar ?? "";
+
       const { data, error } = await supabase.functions.invoke(
         "speech-check",
         {
           body: {
             audioBase64: audioBase64,
-            expectedText: speakingExercises[0]?.prompt_ar
+            expectedText: expectedText
           }
         }
       );
@@ -728,7 +879,6 @@ function App() {
 
         // Compute feedback based on transcript
         const transcript = parsed?.transcript || "";
-        const expectedText = speakingExercises[0]?.prompt_ar || "";
 
         console.log("Transcript from backend:", transcript);
         console.log("Expected text:", expectedText);
@@ -744,12 +894,17 @@ function App() {
         // If no expected text, show success for any transcription
         if (!expected) {
           feedback = transcript ? "Good ✅" : "Try again 🔁";
-        } else if (score >= 0.85) feedback = "Good ✅";
-        else if (score >= 0.6) feedback = "Almost 👍";
+        } else if (score >= 0.50) feedback = "Good ✅";
+        else if (score >= 0.3) feedback = "Almost 👍";
         else feedback = "Try again 🔁";
 
         setSpeechFeedback(feedback);
         setSpokenText(transcript); // Show what was transcribed
+
+        // Update speakingItemCorrect for Speaking Practice mode
+        if (feedback === "Good ✅") {
+          setSpeakingItemCorrect(true);
+        }
       }
     } catch (e) {
       console.error("Speech check exception:", e);
@@ -1320,6 +1475,422 @@ function App() {
 
 
         </div>
+      </div>
+    );
+  }
+
+  // ---------- PRACTICE SELECTION SCREEN ----------
+
+  if (user && practiceMode === null && !activeLesson && !activeSpeakingLesson) {
+    return (
+      <div className="app-shell">
+        <header className="app-header">
+          <div className="app-header-content">
+            <div className="app-logo">
+              <img src="/clemency-icon.png" alt="Ihya Institute Logo" style={{ height: "50px" }} />
+            </div>
+            <div className="app-header-right">
+              <ProfileMenu />
+            </div>
+          </div>
+        </header>
+
+        <main className="app-main">
+          <div className="page-layout">
+            <section className="page-card" style={{ background: "transparent", border: "none", boxShadow: "none", padding: 0, textAlign: "center" }}>
+              <h1 className="page-title" style={{ marginBottom: "0.5rem" }}>Choose Your Practice</h1>
+              <p className="page-subtitle" style={{ marginBottom: "2rem", color: "var(--text-light)" }}>
+                Select how you'd like to learn today
+              </p>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem", maxWidth: "400px", margin: "0 auto" }}>
+                <button
+                  className="practice-mode-card"
+                  onClick={() => { triggerHaptic(); setPracticeMode("book"); }}
+                >
+                  <div className="practice-mode-icon">📚</div>
+                  <div className="practice-mode-info">
+                    <div className="practice-mode-title">Book Lessons</div>
+                    <div className="practice-mode-desc">Learn with dialogues, vocab & quizzes</div>
+                  </div>
+                </button>
+
+                <button
+                  className="practice-mode-card"
+                  onClick={() => { triggerHaptic(); setPracticeMode("speaking"); loadSpeakingModes(); }}
+                >
+                  <div className="practice-mode-icon">🎤</div>
+                  <div className="practice-mode-info">
+                    <div className="practice-mode-title">Speaking Practice</div>
+                    <div className="practice-mode-desc">Practice pronunciation & speaking</div>
+                  </div>
+                </button>
+              </div>
+            </section>
+          </div>
+        </main>
+
+        {/* Global Transition Overlay */}
+        {transitioning && (
+          <div className="transition-overlay">
+            <div className="transition-card">
+              <Leapfrog size="40" speed="2.5" color="#8b5cf6" />
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ---------- SPEAKING LESSON RUNNER SCREEN ----------
+
+  if (activeSpeakingLesson && speakingLessonItems.length > 0) {
+    const currentItem = speakingLessonItems[currentSpeakingItemIndex];
+    const isLastItem = currentSpeakingItemIndex === speakingLessonItems.length - 1;
+    const progressPercent = ((currentSpeakingItemIndex) / speakingLessonItems.length) * 100;
+
+    // Speaking Lesson Complete Screen
+    if (speakingLessonComplete) {
+      return (
+        <div className="celebration-fullpage">
+          <audio autoPlay>
+            <source src="/Quiz pass123.mp3" type="audio/mpeg" />
+          </audio>
+
+          <div className="celebration-lottie">
+            <DotLottieReact
+              src="/animations/done.lottie"
+              loop
+              autoplay
+              style={{ width: '260px', height: '260px' }}
+            />
+          </div>
+
+          <h1 className="celebration-title-grand">Speaking Complete!</h1>
+          <p className="celebration-subtitle-grand">
+            Great job practicing your pronunciation
+          </p>
+
+          <div className="celebration-stats">
+            <div className="stat-item">
+              <span className="stat-value">{toArabicNum(speakingLessonItems.length)}</span>
+              <span className="stat-label">Phrases Practiced</span>
+            </div>
+          </div>
+
+          <button className="btn-celebration" onClick={() => { triggerHaptic(); backToSpeakingLessons(); }}>
+            Continue →
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className={`app-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <main className="app-main quiz-screen" style={{ marginTop: 0 }}>
+          <div className="quiz-content">
+            <div className="quiz-header-row">
+              <span
+                style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+                onClick={() => backToSpeakingLessons()}
+              >
+                ←
+              </span>
+              <div className="lesson-title-badge">{activeSpeakingLesson.title || "Speaking Practice"}</div>
+            </div>
+
+            <div className="quiz-progress-bar">
+              <div
+                className="quiz-progress-fill"
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
+
+            {/* Speaking Item Card */}
+            <div className="quiz-question-container swipe-in">
+              {/* Mode-based prompt: Translate mode shows English, Repeat mode shows Arabic */}
+              {currentSpeakingModeType === 'speaking_translate' ? (
+                <>
+                  <p style={{ fontSize: '0.9rem', color: 'var(--text-light)', marginBottom: '0.5rem' }}>
+                    Translate to Arabic:
+                  </p>
+                  <h2 className="quiz-question" style={{ fontSize: '1.6rem', lineHeight: 1.6 }}>
+                    {currentItem.english_text}
+                  </h2>
+                </>
+              ) : (
+                <>
+                  <p style={{ fontSize: '0.9rem', color: 'var(--text-light)', marginBottom: '0.5rem' }}>
+                    Speak this phrase:
+                  </p>
+                  <h2 className="quiz-question" dir="rtl" style={{ fontSize: '1.8rem', lineHeight: 1.8 }}>
+                    {currentItem.arabic_text}
+                  </h2>
+                </>
+              )}
+
+              {/* Recording Button */}
+              <div style={{ marginTop: '2rem', display: 'flex', justifyContent: 'center' }}>
+                <button
+                  className={`btn-record ${isRecording ? 'recording' : ''}`}
+                  onClick={() => {
+                    if (isRecording) {
+                      stopRecording();
+                    } else {
+                      setSpeechFeedback(null);
+                      setSpeakingItemCorrect(false);
+                      startRecording();
+                    }
+                  }}
+                >
+                  {isRecording ? "⏹ Stop" : "🎤 Record"}
+                </button>
+              </div>
+
+              {isRecording && (
+                <div style={{ marginTop: '1rem', textAlign: 'center', color: 'var(--red)' }}>
+                  🔴 Recording...
+                </div>
+              )}
+
+              {speechError && (
+                <p style={{ color: 'red', marginTop: '1rem', textAlign: 'center' }}>
+                  {speechError}
+                </p>
+              )}
+
+              {/* Feedback */}
+              {speechFeedback && (
+                <div style={{
+                  marginTop: '1.5rem',
+                  padding: '16px 24px',
+                  borderRadius: 12,
+                  textAlign: 'center',
+                  background: speechFeedback.includes('Good') ? 'rgba(34, 197, 94, 0.15)'
+                    : speechFeedback.includes('Almost') ? 'rgba(251, 191, 36, 0.15)'
+                      : 'rgba(239, 68, 68, 0.15)',
+                  border: `2px solid ${speechFeedback.includes('Good') ? '#22c55e'
+                    : speechFeedback.includes('Almost') ? '#fbbf24'
+                      : '#ef4444'
+                    }`
+                }}>
+                  <div style={{
+                    fontSize: '1.5rem',
+                    fontWeight: 700,
+                    color: speechFeedback.includes('Good') ? '#22c55e'
+                      : speechFeedback.includes('Almost') ? '#fbbf24'
+                        : '#ef4444'
+                  }}>
+                    {speechFeedback}
+                  </div>
+
+                  {/* Mode 2 (translate): Show "You said" and "Expected" format */}
+                  {currentSpeakingModeType === 'speaking_translate' ? (
+                    <div style={{ marginTop: 16, textAlign: 'left' }}>
+                      {spokenText && (
+                        <div style={{
+                          marginBottom: 12,
+                          padding: '10px 14px',
+                          borderRadius: 10,
+                          background: 'rgba(0,0,0,0.03)'
+                        }}>
+                          <span style={{
+                            fontSize: '0.75rem',
+                            color: 'var(--text-light)',
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.05em',
+                            display: 'block',
+                            marginBottom: '4px'
+                          }}>
+                            You said:
+                          </span>
+                          <div dir="rtl" style={{
+                            fontSize: '1.2rem',
+                            color: 'var(--text-primary)',
+                            lineHeight: 1.5
+                          }}>
+                            {spokenText}
+                          </div>
+                        </div>
+                      )}
+                      <div style={{
+                        padding: '10px 14px',
+                        borderRadius: 10,
+                        background: 'rgba(139, 92, 246, 0.08)',
+                        border: '1px solid rgba(139, 92, 246, 0.2)'
+                      }}>
+                        <span style={{
+                          fontSize: '0.75rem',
+                          color: 'var(--text-light)',
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.05em',
+                          display: 'block',
+                          marginBottom: '4px'
+                        }}>
+                          Expected:
+                        </span>
+                        <div dir="rtl" style={{
+                          fontSize: '1.2rem',
+                          fontWeight: 600,
+                          color: 'var(--purple)',
+                          lineHeight: 1.5
+                        }}>
+                          {currentItem.arabic_text}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    /* Mode 1 (repeat): Original "You said" format */
+                    spokenText && (
+                      <div dir="rtl" style={{
+                        marginTop: 12,
+                        fontSize: '1.1rem',
+                        color: 'var(--text-secondary)',
+                        fontStyle: 'italic'
+                      }}>
+                        You said: "{spokenText}"
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+
+              {/* Continue Button - only after correct */}
+              <div className="quiz-actions" style={{ marginTop: '2rem' }}>
+                <button
+                  className="btn-primary"
+                  disabled={!speakingItemCorrect}
+                  style={{ opacity: speakingItemCorrect ? 1 : 0.5 }}
+                  onClick={() => {
+                    triggerHaptic();
+                    if (isLastItem) {
+                      setSpeakingLessonComplete(true);
+                      playCelebrationSound();
+                    } else {
+                      setCurrentSpeakingItemIndex(i => i + 1);
+                      setSpeakingItemCorrect(false);
+                      setSpeechFeedback(null);
+                      setSpokenText("");
+                    }
+                  }}
+                >
+                  {isLastItem ? "Finish" : "Continue"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  // ---------- SPEAKING MODES & LESSONS SCREEN ----------
+
+  if (practiceMode === "speaking" && !activeSpeakingLesson) {
+    return (
+      <div className="app-shell">
+        <header className="app-header">
+          <div className="app-header-content">
+            <div className="app-logo">
+              <img src="/clemency-icon.png" alt="Ihya Institute Logo" style={{ height: "50px" }} />
+            </div>
+            <div className="app-header-right">
+              <ProfileMenu />
+            </div>
+          </div>
+        </header>
+
+        <main className={`app-main ${transitionDirection === 'back' ? 'page-transition-back' : ''}`}>
+          <div className="page-layout">
+            <section className="page-card" style={{ background: "transparent", border: "none", boxShadow: "none", padding: 0 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                <button
+                  className="btn-back-text"
+                  onClick={() => { triggerHaptic(); setPracticeMode(null); setSelectedSpeakingMode(null); setSpeakingLessons([]); }}
+                >
+                  ← Back
+                </button>
+                <h1 className="page-title" style={{ fontSize: "1.5rem", fontFamily: "'Amiri', serif", margin: 0 }}>
+                  🎤 Speaking Practice
+                </h1>
+              </div>
+
+              {loadingSpeakingModes ? (
+                <p className="muted">Loading…</p>
+              ) : speakingModes.length === 0 ? (
+                <p className="muted">No speaking modes found.</p>
+              ) : (
+                <div className="stage-list">
+                  {speakingModes.map((mode) => {
+                    const isSelected = selectedSpeakingMode === mode.id;
+
+                    return (
+                      <div key={mode.id} style={{ marginBottom: "1rem" }}>
+                        <button
+                          onClick={() => { triggerHaptic(); loadSpeakingLessons(mode.id); }}
+                          className="stage-card"
+                          style={{
+                            width: "100%",
+                            marginBottom: 0,
+                            borderColor: isSelected ? "var(--blue)" : "var(--gray-200)",
+                            background: "var(--white)",
+                          }}
+                        >
+                          <div className="stage-card-top">
+                            <div>
+                              <div className="stage-name">{mode.name || "Mode"}</div>
+                              <div className="stage-description">{mode.description}</div>
+                            </div>
+                          </div>
+                        </button>
+
+                        {isSelected && (
+                          <div className="lesson-container-inline">
+                            {loadingSpeakingLessons ? (
+                              <p className="muted" style={{ textAlign: "center" }}>
+                                Loading lessons…
+                              </p>
+                            ) : speakingLessons.length === 0 ? (
+                              <p className="muted" style={{ textAlign: "center" }}>
+                                No lessons found.
+                              </p>
+                            ) : (
+                              <ul className="lesson-list">
+                                {speakingLessons.map((lesson) => (
+                                  <li key={lesson.id}>
+                                    <button
+                                      onClick={() => openSpeakingLesson(lesson)}
+                                      className="lesson-row"
+                                    >
+                                      <div className="lesson-progress-donut" />
+                                      <div className="lesson-row-content">
+                                        <div className="lesson-row-title">{lesson.title}</div>
+                                        <div className="lesson-row-desc">{lesson.prompt_text}</div>
+                                      </div>
+                                    </button>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          </div>
+        </main>
+
+        {/* Global Transition Overlay */}
+        {transitioning && (
+          <div className="transition-overlay">
+            <div className="transition-card">
+              <Leapfrog size="40" speed="2.5" color="#8b5cf6" />
+            </div>
+          </div>
+        )}
       </div>
     );
   }

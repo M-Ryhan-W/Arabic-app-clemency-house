@@ -2557,3 +2557,118 @@ button {
     animation: none;
   }
 }
+
+/* =============================================
+   SPEAKING PRACTICE MODE STYLES
+   ============================================= */
+
+/* Practice Mode Selection Cards */
+.practice-mode-card {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  background: var(--white);
+  border: 2px solid var(--gray-200);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 0 var(--gray-200);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: left;
+  width: 100%;
+}
+
+.practice-mode-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 0 var(--gray-200);
+  background: var(--gray-100);
+}
+
+.practice-mode-card:active {
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 var(--gray-200);
+}
+
+.practice-mode-icon {
+  font-size: 2.5rem;
+  flex-shrink: 0;
+}
+
+.practice-mode-info {
+  flex: 1;
+}
+
+.practice-mode-title {
+  font-size: 1.2rem;
+  font-weight: 800;
+  color: var(--text-main);
+  margin-bottom: 0.25rem;
+}
+
+.practice-mode-desc {
+  font-size: 0.9rem;
+  color: var(--text-light);
+  text-transform: none;
+  font-weight: 500;
+}
+
+/* Record Button */
+.btn-record {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 1rem 2rem;
+  font-size: 1.1rem;
+  border-radius: 50px;
+  background: var(--purple);
+  color: white;
+  box-shadow: 0 4px 0 var(--purple-dark);
+  min-width: 160px;
+  transition: all 0.2s ease;
+}
+
+.btn-record:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 0 var(--purple-dark);
+}
+
+.btn-record:active {
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 var(--purple-dark);
+}
+
+.btn-record.recording {
+  background: var(--red);
+  box-shadow: 0 4px 0 var(--red-dark);
+  animation: recordPulse 1s ease-in-out infinite;
+}
+
+@keyframes recordPulse {
+
+  0%,
+  100% {
+    box-shadow: 0 4px 0 var(--red-dark), 0 0 0 0 rgba(255, 75, 75, 0.4);
+  }
+
+  50% {
+    box-shadow: 0 4px 0 var(--red-dark), 0 0 0 12px rgba(255, 75, 75, 0);
+  }
+}
+
+/* Back Text Button */
+.btn-back-text {
+  background: none;
+  border: none;
+  color: var(--text-light);
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0.5rem;
+  text-transform: none;
+  transition: color 0.2s ease;
+}
+
+.btn-back-text:hover {
+  color: var(--blue);
+}
