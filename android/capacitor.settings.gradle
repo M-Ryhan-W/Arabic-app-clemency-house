@@ -8,5 +8,8 @@ project(':capacitor-app').projectDir = new File('../node_modules/@capacitor/app/
 include ':capacitor-haptics'
 project(':capacitor-haptics').projectDir = new File('../node_modules/@capacitor/haptics/android')
 
+include ':capacitor-status-bar'
+project(':capacitor-status-bar').projectDir = new File('../node_modules/@capacitor/status-bar/android')
+
 include ':independo-capacitor-voice-recorder'
 project(':independo-capacitor-voice-recorder').projectDir = new File('../node_modules/@independo/capacitor-voice-recorder/android')

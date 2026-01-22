@@ -5,12 +5,59 @@ import 'ldrs/react/Leapfrog.css';
 import { App as CapacitorApp } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
+import { StatusBar, Style } from '@capacitor/status-bar';
 import { DotLottieReact } from '@lottiefiles/dotlottie-react';
+import { MdArrowBackIosNew } from "react-icons/md";
+import { motion, AnimatePresence } from 'motion/react';
 // Web MediaRecorder API used instead of Capacitor plugins (outputs WEBM_OPUS for Google STT)
 import "./App.css";
 
-// Utility function for haptic feedback
+// Initialize status bar for edge-to-edge design
+const initStatusBar = async () => {
+  if (Capacitor.isNativePlatform()) {
+    try {
+      // Set status bar to light style (dark icons on light background)
+      await StatusBar.setStyle({ style: Style.Light });
+      // Set background color to match app theme
+      await StatusBar.setBackgroundColor({ color: '#f7f2e8' });
+    } catch (e) {
+      console.log('StatusBar not available');
+    }
+  }
+};
+
+// Call on app start
+initStatusBar();
+
+// Synthesized click sound using Web Audio API (instant, no loading delay)
+const playClickSound = () => {
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const oscillator = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+
+    oscillator.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+
+    // Bubbly pop sound - quick frequency sweep
+    oscillator.frequency.setValueAtTime(600, audioCtx.currentTime);
+    oscillator.frequency.exponentialRampToValueAtTime(200, audioCtx.currentTime + 0.05);
+    oscillator.type = 'sine';
+
+    // Quick fade out for a soft "pop"
+    gainNode.gain.setValueAtTime(0.05, audioCtx.currentTime); // Quieter
+    gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.06);
+
+    oscillator.start(audioCtx.currentTime);
+    oscillator.stop(audioCtx.currentTime + 0.06);
+  } catch (e) {
+    // Audio not available
+  }
+};
+
+// Utility function for haptic feedback + click sound
 const triggerHaptic = async () => {
+  playClickSound();
   try {
     await Haptics.impact({ style: ImpactStyle.Light });
   } catch (e) {
@@ -51,7 +98,91 @@ const scoreSimilarity = (a, b) => {
   return common / Math.max(A.size, B.size);
 };
 
+// ============ SPLASH SCREEN COMPONENT ============
+function SplashScreen({ onComplete }) {
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      onComplete();
+    }, 3000);
+
+    return () => clearTimeout(timer);
+  }, [onComplete]);
+
+  return (
+    <motion.div
+      className="splash-screen"
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.5 }}
+    >
+      {/* Ripple effects */}
+      <motion.div
+        className="splash-ripple"
+        initial={{ scale: 0, opacity: 0.8 }}
+        animate={{ scale: 4, opacity: 0 }}
+        transition={{ duration: 2, ease: "easeOut" }}
+      />
+      <motion.div
+        className="splash-ripple"
+        initial={{ scale: 0, opacity: 0.8 }}
+        animate={{ scale: 4, opacity: 0 }}
+        transition={{ duration: 2, delay: 0.3, ease: "easeOut" }}
+      />
+      <motion.div
+        className="splash-ripple"
+        initial={{ scale: 0, opacity: 0.8 }}
+        animate={{ scale: 4, opacity: 0 }}
+        transition={{ duration: 2, delay: 0.6, ease: "easeOut" }}
+      />
+
+      <div className="splash-content">
+        {/* Logo with explosion effect */}
+        <motion.div
+          className="splash-logo-container"
+          initial={{ scale: 0, rotate: -180 }}
+          animate={{ scale: 1, rotate: 0 }}
+          transition={{
+            type: "spring",
+            stiffness: 200,
+            damping: 15,
+            duration: 1
+          }}
+        >
+          <img
+            src="/clemency-icon.png"
+            alt="IHYA Institute Logo"
+            className="splash-logo"
+          />
+        </motion.div>
+
+        <motion.div
+          className="splash-text"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.8, duration: 0.5 }}
+        >
+          <h1 className="splash-title">Welcome</h1>
+          <p className="splash-subtitle">Your Arabic journey awaits</p>
+        </motion.div>
+
+        <motion.div
+          className="splash-dots"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 1.2, duration: 0.5 }}
+        >
+          <div className="splash-dot" style={{ animationDelay: '0ms' }}></div>
+          <div className="splash-dot" style={{ animationDelay: '150ms' }}></div>
+          <div className="splash-dot" style={{ animationDelay: '300ms' }}></div>
+        </motion.div>
+      </div>
+    </motion.div>
+  );
+}
+
 function App() {
+  // ============ SPLASH SCREEN STATE ============
+  const [showSplash, setShowSplash] = useState(true);
+
   const [stages, setStages] = useState([]);
   const [loadingStages, setLoadingStages] = useState(true);
 
@@ -117,6 +248,7 @@ function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [recordedAudio, setRecordedAudio] = useState(null);
   const [speechFeedback, setSpeechFeedback] = useState(null); // "Good ✅" | "Almost 👍" | "Try again 🔁"
+  const [isCheckingAnswer, setIsCheckingAnswer] = useState(false); // Show loading while checking speech
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
 
@@ -171,6 +303,7 @@ function App() {
   const [currentSpeakingModeType, setCurrentSpeakingModeType] = useState(null); // 'speaking_repeat' | 'speaking_translate'
   const [speakingItemCorrect, setSpeakingItemCorrect] = useState(false);
   const [speakingLessonComplete, setSpeakingLessonComplete] = useState(false);
+  const [speakingLessonProgress, setSpeakingLessonProgress] = useState([]); // [{speaking_lesson_id}, ...]
 
   // ---------- TRANSITION HELPER ----------
 
@@ -207,6 +340,36 @@ function App() {
     const completed = stageLessons.filter((l) => isLessonCompleted(l.id)).length;
     const percent = Math.round((completed / total) * 100);
     return { completed, total, percent };
+  }
+
+  function isSpeakingLessonCompleted(lessonId) {
+    return speakingLessonProgress.some(
+      (p) => p.speaking_lesson_id === lessonId
+    );
+  }
+
+  async function saveSpeakingLessonProgress(lessonId) {
+    if (!user) return;
+
+    // Update local state immediately
+    setSpeakingLessonProgress((prev) => {
+      const exists = prev.some(p => p.speaking_lesson_id === lessonId);
+      if (exists) return prev;
+      return [...prev, { speaking_lesson_id: lessonId }];
+    });
+
+    // Save to Supabase
+    const { error } = await supabase
+      .from("speaking_lesson_progress")
+      .upsert({
+        user_id: user.id,
+        speaking_lesson_id: lessonId,
+        completed_at: new Date().toISOString()
+      }, { onConflict: ['user_id', 'speaking_lesson_id'] });
+
+    if (error) {
+      console.error("Error saving speaking lesson progress:", error);
+    }
   }
 
   function shuffleArray(arr) {
@@ -267,6 +430,50 @@ function App() {
         oscillator.start(ctx.currentTime + i * 0.15);
         oscillator.stop(ctx.currentTime + i * 0.15 + 0.3);
       });
+    } catch (e) {
+      console.log("Sound not supported");
+    }
+  }
+
+  // Speaking practice correct jingle - pleasant chime
+  function playSpeakingCorrectSound() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      // Two-note rising chime (G5 -> C6)
+      const notes = [783.99, 1046.50];
+      notes.forEach((freq, i) => {
+        const oscillator = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        oscillator.type = 'sine';
+        oscillator.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        const startTime = ctx.currentTime + i * 0.12;
+        oscillator.frequency.setValueAtTime(freq, startTime);
+        gainNode.gain.setValueAtTime(0.15, startTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, startTime + 0.25);
+        oscillator.start(startTime);
+        oscillator.stop(startTime + 0.25);
+      });
+    } catch (e) {
+      console.log("Sound not supported");
+    }
+  }
+
+  // Speaking practice incorrect jingle - soft descending tone
+  function playSpeakingIncorrectSound() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+      oscillator.type = 'sine';
+      oscillator.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      oscillator.frequency.setValueAtTime(330, ctx.currentTime); // E4
+      oscillator.frequency.linearRampToValueAtTime(220, ctx.currentTime + 0.2); // A3
+      gainNode.gain.setValueAtTime(0.12, ctx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.25);
+      oscillator.start(ctx.currentTime);
+      oscillator.stop(ctx.currentTime + 0.25);
     } catch (e) {
       console.log("Sound not supported");
     }
@@ -713,9 +920,11 @@ function App() {
     async function fetchProgress() {
       if (!user) {
         setLessonProgress([]);
+        setSpeakingLessonProgress([]);
         return;
       }
 
+      // Load book lesson progress
       const { data, error } = await supabase
         .from("lesson_progress")
         .select("lesson_id, hearts_left");
@@ -725,6 +934,18 @@ function App() {
         setLessonProgress([]);
       } else {
         setLessonProgress(data || []);
+      }
+
+      // Load speaking lesson progress
+      const { data: speakingData, error: speakingError } = await supabase
+        .from("speaking_lesson_progress")
+        .select("speaking_lesson_id");
+
+      if (speakingError) {
+        console.error("Error loading speaking lesson progress:", speakingError);
+        setSpeakingLessonProgress([]);
+      } else {
+        setSpeakingLessonProgress(speakingData || []);
       }
     }
 
@@ -820,7 +1041,9 @@ function App() {
           // For Speaking Practice mode, pass the current item's arabic_text
           const currentSpeakingItem = speakingLessonItems[currentSpeakingItemIndex];
           const expectedText = currentSpeakingItem?.arabic_text || null;
-          sendAudioToBackend(base64Audio, expectedText);
+          // Pass isSpeakingPractice flag when in speaking lesson mode
+          const isSpeakingPractice = !!currentSpeakingItem;
+          sendAudioToBackend(base64Audio, expectedText, isSpeakingPractice);
         };
         reader.readAsDataURL(audioBlob);
       };
@@ -850,10 +1073,12 @@ function App() {
 
   // Send recorded audio to Supabase Edge Function
   // expectedTextOverride: optional text to compare against (for Speaking Practice mode)
-  const sendAudioToBackend = async (audioBase64, expectedTextOverride = null) => {
+  // isSpeakingPractice: if true, play jingle sounds for feedback
+  const sendAudioToBackend = async (audioBase64, expectedTextOverride = null, isSpeakingPractice = false) => {
     if (!audioBase64) return;
 
     setSpeechFeedback(null); // Reset feedback
+    setIsCheckingAnswer(true); // Show loading state
 
     try {
       // Use override if provided, otherwise fall back to speakingExercises
@@ -872,6 +1097,7 @@ function App() {
       if (error) {
         console.error("Speech check error:", error);
         setSpeechError("Failed to send audio: " + error.message);
+        setIsCheckingAnswer(false);
       } else {
         // Parse response if it's a string (Supabase sometimes returns stringified JSON)
         const parsed = typeof data === "string" ? JSON.parse(data) : data;
@@ -894,12 +1120,22 @@ function App() {
         // If no expected text, show success for any transcription
         if (!expected) {
           feedback = transcript ? "Good ✅" : "Try again 🔁";
-        } else if (score >= 0.50) feedback = "Good ✅";
+        } else if (score >= 0.55) feedback = "Good ✅";
         else if (score >= 0.3) feedback = "Almost 👍";
         else feedback = "Try again 🔁";
 
         setSpeechFeedback(feedback);
         setSpokenText(transcript); // Show what was transcribed
+        setIsCheckingAnswer(false);
+
+        // Play jingle sounds for speaking practice
+        if (isSpeakingPractice) {
+          if (feedback === "Good ✅") {
+            playSpeakingCorrectSound();
+          } else {
+            playSpeakingIncorrectSound();
+          }
+        }
 
         // Update speakingItemCorrect for Speaking Practice mode
         if (feedback === "Good ✅") {
@@ -909,8 +1145,10 @@ function App() {
     } catch (e) {
       console.error("Speech check exception:", e);
       setSpeechError("Failed to send audio: " + (e.message || e));
+      setIsCheckingAnswer(false);
     }
   };
+
 
   // ---------- OPEN LESSON: QUESTIONS + VOCAB + EXPLANATIONS + BLOCKS ----------
 
@@ -1377,6 +1615,16 @@ function App() {
     );
   }
 
+  // ---------- SPLASH SCREEN ----------
+
+  if (showSplash) {
+    return (
+      <AnimatePresence mode="wait">
+        <SplashScreen key="splash" onComplete={() => setShowSplash(false)} />
+      </AnimatePresence>
+    );
+  }
+
   // ---------- LOGIN LANDING SCREEN ----------
 
   if (!user) {
@@ -1393,7 +1641,7 @@ function App() {
               />
             </div>
             <h1 className="text-display animate-slide-up delay-100">
-              Welcome to the Clemency House Arabic App!
+              Welcome to the Iyha Arabic App!
             </h1>
 
             {/* Auth Card - Moved here between title and description */}
@@ -1498,15 +1746,12 @@ function App() {
         <main className="app-main">
           <div className="page-layout">
             <section className="page-card" style={{ background: "transparent", border: "none", boxShadow: "none", padding: 0, textAlign: "center" }}>
-              <h1 className="page-title" style={{ marginBottom: "0.5rem" }}>Choose Your Practice</h1>
-              <p className="page-subtitle" style={{ marginBottom: "2rem", color: "var(--text-light)" }}>
-                Select how you'd like to learn today
-              </p>
+              <h1 className="page-title" style={{ marginBottom: "1.5rem", fontSize: "1.3rem", color: "var(--text-light)", fontWeight: 600 }}>Choose Your Practice</h1>
 
               <div style={{ display: "flex", flexDirection: "column", gap: "1rem", maxWidth: "400px", margin: "0 auto" }}>
                 <button
                   className="practice-mode-card"
-                  onClick={() => { triggerHaptic(); setPracticeMode("book"); }}
+                  onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("book"); }}
                 >
                   <div className="practice-mode-icon">📚</div>
                   <div className="practice-mode-info">
@@ -1517,7 +1762,7 @@ function App() {
 
                 <button
                   className="practice-mode-card"
-                  onClick={() => { triggerHaptic(); setPracticeMode("speaking"); loadSpeakingModes(); }}
+                  onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("speaking"); loadSpeakingModes(); }}
                 >
                   <div className="practice-mode-icon">🎤</div>
                   <div className="practice-mode-info">
@@ -1594,7 +1839,7 @@ function App() {
                 style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
                 onClick={() => backToSpeakingLessons()}
               >
-                ←
+                <MdArrowBackIosNew />
               </span>
               <div className="lesson-title-badge">{activeSpeakingLesson.title || "Speaking Practice"}</div>
             </div>
@@ -1629,29 +1874,49 @@ function App() {
                 </>
               )}
 
-              {/* Recording Button */}
-              <div style={{ marginTop: '2rem', display: 'flex', justifyContent: 'center' }}>
-                <button
-                  className={`btn-record ${isRecording ? 'recording' : ''}`}
-                  onClick={() => {
-                    if (isRecording) {
-                      stopRecording();
-                    } else {
+              {/* Recording Button with Lottie */}
+              <div style={{ marginTop: '2rem', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                {isCheckingAnswer ? (
+                  <>
+                    {/* Sleek checking answer loading state */}
+                    <div className="checking-answer-container">
+                      <div className="checking-answer-pulse"></div>
+                      <div className="checking-answer-icon">🎧</div>
+                    </div>
+                    <p className="checking-answer-text">
+                      Checking your answer<span className="checking-dots"></span>
+                    </p>
+                  </>
+                ) : isRecording ? (
+                  <>
+                    <div
+                      onClick={() => stopRecording()}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <DotLottieReact
+                        src="/animations/Audio wave micro interaction.json"
+                        loop
+                        autoplay
+                        style={{ width: '120px', height: '120px' }}
+                      />
+                    </div>
+                    <p style={{ marginTop: '0.5rem', color: 'var(--red)', fontWeight: 600, fontSize: '0.9rem' }}>
+                      Tap to stop
+                    </p>
+                  </>
+                ) : (
+                  <button
+                    className="btn-record"
+                    onClick={() => {
                       setSpeechFeedback(null);
                       setSpeakingItemCorrect(false);
                       startRecording();
-                    }
-                  }}
-                >
-                  {isRecording ? "⏹ Stop" : "🎤 Record"}
-                </button>
+                    }}
+                  >
+                    🎤 Record
+                  </button>
+                )}
               </div>
-
-              {isRecording && (
-                <div style={{ marginTop: '1rem', textAlign: 'center', color: 'var(--red)' }}>
-                  🔴 Recording...
-                </div>
-              )}
 
               {speechError && (
                 <p style={{ color: 'red', marginTop: '1rem', textAlign: 'center' }}>
@@ -1766,6 +2031,8 @@ function App() {
                     if (isLastItem) {
                       setSpeakingLessonComplete(true);
                       playCelebrationSound();
+                      // Save speaking lesson progress
+                      saveSpeakingLessonProgress(activeSpeakingLesson.id);
                     } else {
                       setCurrentSpeakingItemIndex(i => i + 1);
                       setSpeakingItemCorrect(false);
@@ -1784,36 +2051,41 @@ function App() {
     );
   }
 
+  // ---------- SPEAKING LESSON LOADING SCREEN ----------
+  // Show loading when a speaking lesson is selected but items haven't loaded yet
+  if (activeSpeakingLesson && speakingLessonItems.length === 0) {
+    return (
+      <div className="app-shell">
+        <main className="app-main" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+          <div style={{ textAlign: 'center' }}>
+            <Leapfrog size="50" speed="2.5" color="#8b5cf6" />
+            <p style={{ marginTop: '1rem', color: 'var(--text-light)' }}>Loading lesson...</p>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   // ---------- SPEAKING MODES & LESSONS SCREEN ----------
 
   if (practiceMode === "speaking" && !activeSpeakingLesson) {
     return (
-      <div className="app-shell">
-        <header className="app-header">
-          <div className="app-header-content">
-            <div className="app-logo">
-              <img src="/clemency-icon.png" alt="Ihya Institute Logo" style={{ height: "50px" }} />
-            </div>
-            <div className="app-header-right">
-              <ProfileMenu />
-            </div>
-          </div>
-        </header>
-
-        <main className={`app-main ${transitionDirection === 'back' ? 'page-transition-back' : ''}`}>
+      <div className={`app-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <main className="app-main" style={{ marginTop: 0, paddingTop: '1rem' }}>
           <div className="page-layout">
             <section className="page-card" style={{ background: "transparent", border: "none", boxShadow: "none", padding: 0 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
                 <button
                   className="btn-back-text"
-                  onClick={() => { triggerHaptic(); setPracticeMode(null); setSelectedSpeakingMode(null); setSpeakingLessons([]); }}
+                  onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); setSelectedSpeakingMode(null); setSpeakingLessons([]); }}
                 >
-                  ← Back
+                  <MdArrowBackIosNew />
                 </button>
-                <h1 className="page-title" style={{ fontSize: "1.5rem", fontFamily: "'Amiri', serif", margin: 0 }}>
-                  🎤 Speaking Practice
+                <h1 className="page-title" style={{ fontSize: "1.5rem", fontFamily: "'Amiri', serif", direction: "rtl", margin: 0 }}>
+                  🎤 تمارين النطق
                 </h1>
               </div>
+
 
               {loadingSpeakingModes ? (
                 <p className="muted">Loading…</p>
@@ -1856,20 +2128,23 @@ function App() {
                               </p>
                             ) : (
                               <ul className="lesson-list">
-                                {speakingLessons.map((lesson) => (
-                                  <li key={lesson.id}>
-                                    <button
-                                      onClick={() => openSpeakingLesson(lesson)}
-                                      className="lesson-row"
-                                    >
-                                      <div className="lesson-progress-donut" />
-                                      <div className="lesson-row-content">
-                                        <div className="lesson-row-title">{lesson.title}</div>
-                                        <div className="lesson-row-desc">{lesson.prompt_text}</div>
-                                      </div>
-                                    </button>
-                                  </li>
-                                ))}
+                                {speakingLessons.map((lesson) => {
+                                  const completed = isSpeakingLessonCompleted(lesson.id);
+                                  return (
+                                    <li key={lesson.id}>
+                                      <button
+                                        onClick={() => openSpeakingLesson(lesson)}
+                                        className="lesson-row"
+                                      >
+                                        <div className={`lesson-progress-donut ${completed ? "completed" : ""}`} />
+                                        <div className="lesson-row-content">
+                                          <div className="lesson-row-title">{lesson.title}</div>
+                                          <div className="lesson-row-desc">{lesson.prompt_text}</div>
+                                        </div>
+                                      </button>
+                                    </li>
+                                  );
+                                })}
                               </ul>
                             )}
                           </div>
@@ -2406,7 +2681,7 @@ function App() {
                   style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
                   onClick={() => setLessonPhase("lesson")}
                 >
-                  ←
+                  <MdArrowBackIosNew />
                 </span>
                 <h2 className="grammar-title-text" style={{ margin: 0, fontSize: '1.25rem' }}>{grammarNotes[grammarIndex].title}</h2>
               </header>
@@ -2429,7 +2704,7 @@ function App() {
                     disabled={grammarIndex === 0}
                     style={{ opacity: grammarIndex === 0 ? 0.3 : 1 }}
                   >
-                    ←
+                    <MdArrowBackIosNew />
                   </button>
                   <button
                     className="btn-primary"
@@ -2483,7 +2758,7 @@ function App() {
                   style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
                   onClick={() => setLessonPhase("lesson")}
                 >
-                  ←
+                  <MdArrowBackIosNew />
                 </span>
                 <div className="lesson-title-badge">{activeLesson.title}</div>
               </header>
@@ -2543,7 +2818,7 @@ function App() {
                       disabled={vocabIndex === 0}
                       style={{ opacity: vocabIndex === 0 ? 0.3 : 1 }}
                     >
-                      ←
+                      <MdArrowBackIosNew />
                     </button>
                     <button
                       className="btn-primary"
@@ -2588,13 +2863,28 @@ function App() {
                 {speakingExercises[0]?.prompt_ar}
               </p>
 
-              <button
-                className="btn-primary"
-                onClick={isRecording ? stopRecording : startRecording}
-                style={{ maxWidth: 320 }}
-              >
-                {isRecording ? "⏹ Stop recording" : "🎤 Start recording"}
-              </button>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minHeight: '140px', justifyContent: 'center' }}>
+                {isCheckingAnswer ? (
+                  <>
+                    <div className="checking-answer-container">
+                      <div className="checking-answer-pulse"></div>
+                      <div className="checking-answer-icon">🎧</div>
+                    </div>
+                    <p className="checking-answer-text">
+                      Checking your answer<span className="checking-dots"></span>
+                    </p>
+                  </>
+                ) : (
+                  <button
+                    className="btn-primary"
+                    onClick={isRecording ? stopRecording : startRecording}
+                    style={{ maxWidth: 320 }}
+                    disabled={isCheckingAnswer}
+                  >
+                    {isRecording ? "⏹ Stop recording" : "🎤 Start recording"}
+                  </button>
+                )}
+              </div>
 
               {speechError && (
                 <p style={{ color: 'red', marginTop: 12 }}>
@@ -2679,7 +2969,7 @@ function App() {
                   style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
                   onClick={() => setLessonPhase("lesson")}
                 >
-                  ←
+                  <MdArrowBackIosNew />
                 </span>
                 <div className="lesson-title-badge">{activeLesson.title}</div>
               </header>
@@ -2704,7 +2994,7 @@ function App() {
                     disabled={explanationIndex === 0}
                     style={{ opacity: explanationIndex === 0 ? 0.3 : 1 }}
                   >
-                    ←
+                    <MdArrowBackIosNew />
                   </button>
                   <button
                     className="btn-primary"
@@ -2897,19 +3187,8 @@ function App() {
   // ---------- MAIN SCREEN: STAGES + LESSONS ----------
 
   return (
-    <div className="app-shell">
-      <header className="app-header">
-        <div className="app-header-content">
-          <div className="app-logo">
-            <img src="/clemency-icon.png" alt="Ihya Institute Logo" style={{ height: "50px" }} />
-          </div>
-          <div className="app-header-right">
-            <ProfileMenu />
-          </div>
-        </div>
-      </header>
-
-      <main className={`app-main ${transitionDirection === 'back' ? 'page-transition-back' : ''}`}>
+    <div className={`app-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+      <main className="app-main" style={{ marginTop: 0, paddingTop: '1rem' }}>
         <div className="page-layout">
           <section
             className="page-card"
@@ -2920,12 +3199,15 @@ function App() {
               padding: 0,
             }}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1rem" }}>
-              <p style={{ fontSize: "0.9rem", color: "var(--text-light)", margin: 0 }}>
-                Stages
-              </p>
-              <h1 className="page-title" style={{ fontSize: "2rem", fontFamily: "'Amiri', serif", direction: "rtl", margin: 0 }}>
-                المراحل
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+              <button
+                className="btn-back-text"
+                onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); }}
+              >
+                <MdArrowBackIosNew />
+              </button>
+              <h1 className="page-title" style={{ fontSize: "1.5rem", fontFamily: "'Amiri', serif", direction: "rtl", margin: 0 }}>
+                📚 المراحل
               </h1>
             </div>
 
