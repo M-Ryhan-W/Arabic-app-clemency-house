@@ -8,6 +8,7 @@ import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import { DotLottieReact } from '@lottiefiles/dotlottie-react';
 import { MdArrowBackIosNew } from "react-icons/md";
+import { Icon } from "@iconify/react";
 import { motion, AnimatePresence } from 'motion/react';
 // Web MediaRecorder API used instead of Capacitor plugins (outputs WEBM_OPUS for Google STT)
 import "./App.css";
@@ -205,6 +206,7 @@ function App() {
   const [currentAudioTime, setCurrentAudioTime] = useState(0);
   const [revealedCount, setRevealedCount] = useState(0);
   const [dialogueFinished, setDialogueFinished] = useState(false);
+  const [showDialogueReview, setShowDialogueReview] = useState(false); // Shows all dialogue after 2s delay
   const blockRefs = useRef({});
   const convoScrollRef = useRef(null);
   const [autoFollow, setAutoFollow] = useState(true);
@@ -511,34 +513,43 @@ function App() {
   // Native Android hardware back button handling via Capacitor
   // Register ONCE to avoid stale closures - use ref to get current value
   useEffect(() => {
-    const backListener = CapacitorApp.addListener('backButton', (event) => {
-      // 🔴 IMPORTANT: stop default behaviour (closing app)
-      event.preventDefault?.();
+    let backListenerHandle = null;
 
-      // Use ref to get current value (avoids stale closure)
-      if (activeLessonRef.current) {
-        // Inside a lesson → show exit lesson modal
-        setShowExitModal(true);
-      } else {
-        // On homepage → double-tap to exit
-        const now = Date.now();
-        if (now - lastBackPressRef.current < 2000) {
-          // Second tap within 2 seconds → exit app
-          CapacitorApp.exitApp();
+    const setupBackListener = async () => {
+      backListenerHandle = await CapacitorApp.addListener('backButton', (event) => {
+        // 🔴 IMPORTANT: stop default behaviour (closing app)
+        event.preventDefault?.();
+
+        // Use ref to get current value (avoids stale closure)
+        if (activeLessonRef.current) {
+          // Inside a lesson → show exit lesson modal
+          setShowExitModal(true);
         } else {
-          // First tap → record time (user can tap again to exit)
-          lastBackPressRef.current = now;
+          // On homepage → double-tap to exit
+          const now = Date.now();
+          if (now - lastBackPressRef.current < 2000) {
+            // Second tap within 2 seconds → exit app
+            CapacitorApp.exitApp();
+          } else {
+            // First tap → record time (user can tap again to exit)
+            lastBackPressRef.current = now;
+          }
         }
-      }
-    });
+      });
+    };
+
+    setupBackListener();
 
     return () => {
-      backListener.remove();
+      if (backListenerHandle && typeof backListenerHandle.remove === 'function') {
+        backListenerHandle.remove();
+      }
     };
   }, []); // Register only ONCE
 
   async function handleSignUp(e) {
-    e.preventDefault();
+    if (e) e.preventDefault();
+    triggerHaptic();
     setAuthError("");
 
     const { error } = await supabase.auth.signUp({
@@ -555,7 +566,8 @@ function App() {
   }
 
   async function handleSignIn(e) {
-    e.preventDefault();
+    if (e) e.preventDefault();
+    triggerHaptic();
     setAuthError("");
 
     const { error } = await supabase.auth.signInWithPassword({
@@ -756,6 +768,7 @@ function App() {
     setCurrentAudioTime(0);
     setRevealedCount(0);
     setDialogueFinished(false);
+    setShowDialogueReview(false);
     blockRefs.current = {};
   }
 
@@ -1185,6 +1198,7 @@ function App() {
     setCurrentAudioTime(0);
     setRevealedCount(0);
     setDialogueFinished(false);
+    setShowDialogueReview(false);
     blockRefs.current = {};
     setClickedParagraphs(new Set());
     setHideInstruction(false);
@@ -1406,10 +1420,12 @@ function App() {
 
   function handleStartLessonAudio() {
     if (!activeLesson?.audio_url || !audioRef.current) return;
+    triggerHaptic();
 
     // Reset dialogue UI immediately
     if (activeLesson.lesson_format === "blocks") {
       setDialogueFinished(false);
+      setShowDialogueReview(false);
       setRevealedCount(1); // show first line instantly
       setAutoFollow(true);
       setShowJumpToCurrent(false);
@@ -1431,6 +1447,7 @@ function App() {
   function handleParagraphClick(block) {
     if (!activeLesson?.audio_url || !audioRef.current) return;
     if (block.start_time_seconds == null) return;
+    triggerHaptic();
 
     // If clicking the same block that's currently playing, toggle speed
     if (playingParagraphId === block.id && audioPlaying) {
@@ -1476,6 +1493,7 @@ function App() {
     if (quizFinished) return;
     if (hasAnswered) return;
 
+    triggerHaptic(); // Add haptic feedback + sound on option selection
     setSelectedOptionId(option.id);
     setAnswerResult(null);
   }
@@ -1484,6 +1502,8 @@ function App() {
     if (!quizActive) return;
     if (quizFinished) return;
     if (selectedOptionId === null) return;
+
+    triggerHaptic(); // Haptic feedback when confirming answer
 
     const currentQuestion = questions[currentQuestionIndex];
     if (!currentQuestion || !currentQuestion.options) return;
@@ -1556,7 +1576,7 @@ function App() {
       <div className="profile-menu-container">
         <button
           className="profile-icon-btn"
-          onClick={() => setShowProfileMenu(!showProfileMenu)}
+          onClick={() => { triggerHaptic(); setShowProfileMenu(!showProfileMenu); }}
           aria-label="Profile menu"
         >
           <span className="profile-icon">👤</span>
@@ -1566,12 +1586,13 @@ function App() {
           <>
             <div
               className="profile-menu-backdrop"
-              onClick={() => setShowProfileMenu(false)}
+              onClick={() => { triggerHaptic(); setShowProfileMenu(false); }}
             />
             <div className="profile-menu-dropdown">
               <button
                 className="profile-menu-item"
                 onClick={() => {
+                  triggerHaptic();
                   setShowProfileMenu(false);
                   setShowSignOutConfirm(true);
                 }}
@@ -1583,7 +1604,7 @@ function App() {
         )}
 
         {showSignOutConfirm && (
-          <div className="modal-overlay" onClick={() => setShowSignOutConfirm(false)}>
+          <div className="modal-overlay" onClick={() => { triggerHaptic(); setShowSignOutConfirm(false); }}>
             <div className="modal-content" onClick={(e) => e.stopPropagation()}>
               <h3 className="modal-title">Sign out?</h3>
               <p style={{ color: "var(--text-light)", marginBottom: "1.5rem" }}>
@@ -1592,7 +1613,7 @@ function App() {
               <div className="modal-actions">
                 <button
                   className="btn-outline"
-                  onClick={() => setShowSignOutConfirm(false)}
+                  onClick={() => { triggerHaptic(); setShowSignOutConfirm(false); }}
                   style={{ flex: 1 }}
                 >
                   Cancel
@@ -1600,6 +1621,7 @@ function App() {
                 <button
                   className="btn-primary"
                   onClick={() => {
+                    triggerHaptic();
                     setShowSignOutConfirm(false);
                     handleSignOut();
                   }}
@@ -1690,9 +1712,10 @@ function App() {
               <button
                 type="button"
                 className="auth-secondary-link"
-                onClick={() =>
-                  setAuthMode(authMode === "signin" ? "signup" : "signin")
-                }
+                onClick={() => {
+                  triggerHaptic();
+                  setAuthMode(authMode === "signin" ? "signup" : "signin");
+                }}
               >
                 {authMode === "signin"
                   ? "Need an account? Create one"
@@ -1731,55 +1754,163 @@ function App() {
 
   if (user && practiceMode === null && !activeLesson && !activeSpeakingLesson) {
     return (
-      <div className="app-shell">
-        <header className="app-header">
-          <div className="app-header-content">
-            <div className="app-logo">
-              <img src="/clemency-icon.png" alt="Ihya Institute Logo" style={{ height: "50px" }} />
+      <div className="explorer-shell">
+        {/* Aged paper texture overlay */}
+        <div className="texture-overlay" />
+
+        {/* Header with profile */}
+        <header className="explorer-header">
+          <div className="explorer-header-content">
+            <div className="explorer-profile">
+              <div className="explorer-avatar-wrap">
+                <div className="explorer-avatar">
+                  <Icon icon="solar:user-circle-bold" className="explorer-avatar-icon" />
+                </div>
+                <div className="explorer-level-badge">LVL 1</div>
+              </div>
+              <div className="explorer-user-info">
+                <h2 className="explorer-username">Explorer</h2>
+                <p className="explorer-title">Scholar of the Sands</p>
+              </div>
             </div>
-            <div className="app-header-right">
-              <ProfileMenu />
+            <div className="explorer-stats">
+              <div className="explorer-stat">
+                <Icon icon="solar:flame-bold" className="explorer-stat-icon flame" />
+                <span className="explorer-stat-value">1</span>
+              </div>
+              <div className="explorer-stat">
+                <Icon icon="solar:crown-star-bold" className="explorer-stat-icon crown" />
+                <span className="explorer-stat-value">0</span>
+              </div>
+              <button
+                className="explorer-profile-btn"
+                onClick={() => { triggerHaptic(); setShowProfileMenu(!showProfileMenu); }}
+              >
+                <Icon icon="solar:settings-bold" className="explorer-settings-icon" />
+              </button>
             </div>
           </div>
-        </header>
 
-        <main className="app-main">
-          <div className="page-layout">
-            <section className="page-card" style={{ background: "transparent", border: "none", boxShadow: "none", padding: 0, textAlign: "center" }}>
-              <h1 className="page-title" style={{ marginBottom: "1.5rem", fontSize: "1.3rem", color: "var(--text-light)", fontWeight: 600 }}>Choose Your Practice</h1>
-
-              <div style={{ display: "flex", flexDirection: "column", gap: "1rem", maxWidth: "400px", margin: "0 auto" }}>
+          {/* Profile Menu Dropdown */}
+          {showProfileMenu && (
+            <>
+              <div
+                className="profile-menu-backdrop"
+                onClick={() => { triggerHaptic(); setShowProfileMenu(false); }}
+              />
+              <div className="profile-menu-dropdown">
                 <button
-                  className="practice-mode-card"
-                  onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("book"); }}
+                  className="profile-menu-item"
+                  onClick={() => {
+                    triggerHaptic();
+                    setShowProfileMenu(false);
+                    setShowSignOutConfirm(true);
+                  }}
                 >
-                  <div className="practice-mode-icon">📚</div>
-                  <div className="practice-mode-info">
-                    <div className="practice-mode-title">Book Lessons</div>
-                    <div className="practice-mode-desc">Learn with dialogues, vocab & quizzes</div>
-                  </div>
-                </button>
-
-                <button
-                  className="practice-mode-card"
-                  onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("speaking"); loadSpeakingModes(); }}
-                >
-                  <div className="practice-mode-icon">🎤</div>
-                  <div className="practice-mode-info">
-                    <div className="practice-mode-title">Speaking Practice</div>
-                    <div className="practice-mode-desc">Practice pronunciation & speaking</div>
-                  </div>
+                  Sign out
                 </button>
               </div>
-            </section>
+            </>
+          )}
+        </header>
+
+        {/* Main content */}
+        <main className="explorer-main">
+          {/* Decorative blurs */}
+          <div className="explorer-blur explorer-blur-1" />
+          <div className="explorer-blur explorer-blur-2" />
+
+          <div className="explorer-content">
+            {/* Section title */}
+            <div className="explorer-section-header">
+              <div className="explorer-section-line" />
+              <h3 className="explorer-section-title">Begin Your Journey</h3>
+              <div className="explorer-section-line" />
+            </div>
+
+            {/* Practice Mode Cards */}
+            <div className="explorer-cards">
+              {/* Book Lessons Card */}
+              <button
+                className="explorer-quest-card explorer-quest-active"
+                onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("book"); }}
+              >
+                <div className="explorer-quest-glow" />
+                <div className="explorer-quest-icon-wrap">
+                  <Icon icon="solar:notebook-bookmark-bold" className="explorer-quest-icon" />
+                </div>
+                <div className="explorer-quest-info">
+                  <h3 className="explorer-quest-name">Book Lessons</h3>
+                  <p className="explorer-quest-desc">المراحل والدروس</p>
+                  <p className="explorer-quest-detail">Learn with dialogues, vocab & quizzes</p>
+                </div>
+                <div className="explorer-quest-arrow">
+                  <Icon icon="solar:arrow-right-linear" />
+                </div>
+              </button>
+
+              {/* Speaking Practice Card */}
+              <button
+                className="explorer-quest-card"
+                onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("speaking"); loadSpeakingModes(); }}
+              >
+                <div className="explorer-quest-icon-wrap speaking">
+                  <Icon icon="solar:microphone-3-bold" className="explorer-quest-icon" />
+                </div>
+                <div className="explorer-quest-info">
+                  <h3 className="explorer-quest-name">Speaking Practice</h3>
+                  <p className="explorer-quest-desc">تمارين النطق</p>
+                  <p className="explorer-quest-detail">Practice pronunciation & speaking</p>
+                </div>
+                <div className="explorer-quest-arrow">
+                  <Icon icon="solar:arrow-right-linear" />
+                </div>
+              </button>
+            </div>
+
+            {/* Decorative compass */}
+            <div className="explorer-compass-wrap">
+              <Icon icon="solar:compass-bold" className="explorer-compass" />
+            </div>
           </div>
         </main>
+
+        {/* Sign Out Confirmation Modal */}
+        {showSignOutConfirm && (
+          <div className="modal-overlay" onClick={() => { triggerHaptic(); setShowSignOutConfirm(false); }}>
+            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+              <h3 className="modal-title">Sign out?</h3>
+              <p style={{ color: "var(--text-light)", marginBottom: "1.5rem" }}>
+                Are you sure you want to sign out?
+              </p>
+              <div className="modal-actions">
+                <button
+                  className="btn-outline"
+                  onClick={() => { triggerHaptic(); setShowSignOutConfirm(false); }}
+                  style={{ flex: 1 }}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="btn-primary"
+                  onClick={() => {
+                    setShowSignOutConfirm(false);
+                    handleSignOut();
+                  }}
+                  style={{ flex: 1, background: "var(--red)", boxShadow: "0 4px 0 var(--red-dark)" }}
+                >
+                  Sign out
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Global Transition Overlay */}
         {transitioning && (
           <div className="transition-overlay">
             <div className="transition-card">
-              <Leapfrog size="40" speed="2.5" color="#8b5cf6" />
+              <Leapfrog size="40" speed="2.5" color="var(--primary)" />
             </div>
           </div>
         )}
@@ -1837,7 +1968,7 @@ function App() {
             <div className="quiz-header-row">
               <span
                 style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
-                onClick={() => backToSpeakingLessons()}
+                onClick={() => { triggerHaptic(); backToSpeakingLessons(); }}
               >
                 <MdArrowBackIosNew />
               </span>
@@ -1890,7 +2021,7 @@ function App() {
                 ) : isRecording ? (
                   <>
                     <div
-                      onClick={() => stopRecording()}
+                      onClick={() => { triggerHaptic(); stopRecording(); }}
                       style={{ cursor: 'pointer' }}
                     >
                       <DotLottieReact
@@ -1908,6 +2039,7 @@ function App() {
                   <button
                     className="btn-record"
                     onClick={() => {
+                      triggerHaptic();
                       setSpeechFeedback(null);
                       setSpeakingItemCorrect(false);
                       startRecording();
@@ -2055,11 +2187,12 @@ function App() {
   // Show loading when a speaking lesson is selected but items haven't loaded yet
   if (activeSpeakingLesson && speakingLessonItems.length === 0) {
     return (
-      <div className="app-shell">
-        <main className="app-main" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
-          <div style={{ textAlign: 'center' }}>
-            <Leapfrog size="50" speed="2.5" color="#8b5cf6" />
-            <p style={{ marginTop: '1rem', color: 'var(--text-light)' }}>Loading lesson...</p>
+      <div className="explorer-shell">
+        <div className="texture-overlay" />
+        <main className="explorer-main" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+          <div className="explorer-loading">
+            <Leapfrog size="50" speed="2.5" color="var(--secondary)" />
+            <p>Loading lesson...</p>
           </div>
         </main>
       </div>
@@ -2070,91 +2203,120 @@ function App() {
 
   if (practiceMode === "speaking" && !activeSpeakingLesson) {
     return (
-      <div className={`app-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
-        <main className="app-main" style={{ marginTop: 0, paddingTop: '1rem' }}>
-          <div className="page-layout">
-            <section className="page-card" style={{ background: "transparent", border: "none", boxShadow: "none", padding: 0 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-                <button
-                  className="btn-back-text"
-                  onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); setSelectedSpeakingMode(null); setSpeakingLessons([]); }}
-                >
-                  <MdArrowBackIosNew />
-                </button>
-                <h1 className="page-title" style={{ fontSize: "1.5rem", fontFamily: "'Amiri', serif", direction: "rtl", margin: 0 }}>
-                  🎤 تمارين النطق
-                </h1>
+      <div className={`explorer-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        {/* Aged paper texture overlay */}
+        <div className="texture-overlay" />
+
+        {/* Explorer Header */}
+        <header className="explorer-region-header">
+          <div className="explorer-region-header-content">
+            <button
+              className="explorer-back-btn"
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); setSelectedSpeakingMode(null); setSpeakingLessons([]); }}
+            >
+              <Icon icon="solar:arrow-left-linear" className="explorer-back-icon" />
+            </button>
+            <div className="explorer-region-title-wrap">
+              <h1 className="explorer-region-title">🎤 تمارين النطق</h1>
+              <p className="explorer-region-subtitle" style={{ color: 'var(--secondary)' }}>Speaking Practice</p>
+            </div>
+          </div>
+        </header>
+
+        {/* Main Content */}
+        <main className="explorer-region-main">
+          {/* Decorative blurs */}
+          <div className="explorer-blur" style={{ top: '2rem', right: '-3rem', background: 'var(--secondary)', opacity: 0.15 }} />
+          <div className="explorer-blur explorer-blur-2" />
+
+          <div className="explorer-region-content">
+            {loadingSpeakingModes ? (
+              <div className="explorer-loading">
+                <Leapfrog size="40" speed="2.5" color="var(--secondary)" />
+                <p>Loading modes...</p>
               </div>
+            ) : speakingModes.length === 0 ? (
+              <div className="explorer-empty">
+                <Icon icon="solar:microphone-3-bold" className="explorer-empty-icon" />
+                <p>No speaking modes found</p>
+              </div>
+            ) : (
+              <div className="explorer-stages">
+                {speakingModes.map((mode) => {
+                  const isSelected = selectedSpeakingMode === mode.id;
 
+                  return (
+                    <div key={mode.id} className="explorer-stage-wrap">
+                      {/* Mode Card */}
+                      <button
+                        onClick={() => { triggerHaptic(); loadSpeakingLessons(mode.id); }}
+                        className={`explorer-stage-card ${isSelected ? 'selected' : ''}`}
+                        style={{ borderColor: isSelected ? 'var(--secondary)' : undefined }}
+                      >
+                        <div className="explorer-stage-icon-wrap" style={{ background: isSelected ? 'var(--secondary)' : undefined }}>
+                          <Icon
+                            icon="solar:chat-round-dots-bold"
+                            className="explorer-stage-icon"
+                            style={{ color: isSelected ? 'white' : undefined }}
+                          />
+                        </div>
+                        <div className="explorer-stage-info">
+                          <h3 className="explorer-stage-name">{mode.name || "Mode"}</h3>
+                          <p className="explorer-stage-desc">{mode.description}</p>
+                        </div>
+                        <div className="explorer-stage-arrow">
+                          <Icon icon="solar:alt-arrow-down-linear" className={isSelected ? 'rotated' : ''} />
+                        </div>
+                      </button>
 
-              {loadingSpeakingModes ? (
-                <p className="muted">Loading…</p>
-              ) : speakingModes.length === 0 ? (
-                <p className="muted">No speaking modes found.</p>
-              ) : (
-                <div className="stage-list">
-                  {speakingModes.map((mode) => {
-                    const isSelected = selectedSpeakingMode === mode.id;
-
-                    return (
-                      <div key={mode.id} style={{ marginBottom: "1rem" }}>
-                        <button
-                          onClick={() => { triggerHaptic(); loadSpeakingLessons(mode.id); }}
-                          className="stage-card"
-                          style={{
-                            width: "100%",
-                            marginBottom: 0,
-                            borderColor: isSelected ? "var(--blue)" : "var(--gray-200)",
-                            background: "var(--white)",
-                          }}
-                        >
-                          <div className="stage-card-top">
-                            <div>
-                              <div className="stage-name">{mode.name || "Mode"}</div>
-                              <div className="stage-description">{mode.description}</div>
+                      {/* Lessons List */}
+                      {isSelected && (
+                        <div className="explorer-lessons-wrap">
+                          {loadingSpeakingLessons ? (
+                            <div className="explorer-lessons-loading">
+                              <Leapfrog size="30" speed="2.5" color="var(--secondary)" />
                             </div>
-                          </div>
-                        </button>
+                          ) : speakingLessons.length === 0 ? (
+                            <p className="explorer-lessons-empty">No lessons found</p>
+                          ) : (
+                            <div className="explorer-lessons-list">
+                              {speakingLessons.map((lesson) => {
+                                const lessonCompleted = isSpeakingLessonCompleted(lesson.id);
 
-                        {isSelected && (
-                          <div className="lesson-container-inline">
-                            {loadingSpeakingLessons ? (
-                              <p className="muted" style={{ textAlign: "center" }}>
-                                Loading lessons…
-                              </p>
-                            ) : speakingLessons.length === 0 ? (
-                              <p className="muted" style={{ textAlign: "center" }}>
-                                No lessons found.
-                              </p>
-                            ) : (
-                              <ul className="lesson-list">
-                                {speakingLessons.map((lesson) => {
-                                  const completed = isSpeakingLessonCompleted(lesson.id);
-                                  return (
-                                    <li key={lesson.id}>
-                                      <button
-                                        onClick={() => openSpeakingLesson(lesson)}
-                                        className="lesson-row"
-                                      >
-                                        <div className={`lesson-progress-donut ${completed ? "completed" : ""}`} />
-                                        <div className="lesson-row-content">
-                                          <div className="lesson-row-title">{lesson.title}</div>
-                                          <div className="lesson-row-desc">{lesson.prompt_text}</div>
-                                        </div>
-                                      </button>
-                                    </li>
-                                  );
-                                })}
-                              </ul>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
+                                return (
+                                  <button
+                                    key={lesson.id}
+                                    onClick={() => { triggerHaptic(); openSpeakingLesson(lesson); }}
+                                    className={`explorer-lesson-card ${lessonCompleted ? 'completed' : ''}`}
+                                  >
+                                    <div className="explorer-lesson-status">
+                                      {lessonCompleted ? (
+                                        <Icon icon="solar:check-circle-bold" className="explorer-lesson-check" style={{ color: 'var(--secondary)' }} />
+                                      ) : (
+                                        <div className="explorer-lesson-dot" style={{ background: 'var(--secondary)' }} />
+                                      )}
+                                    </div>
+                                    <div className="explorer-lesson-info">
+                                      <h4 className="explorer-lesson-title">{lesson.title}</h4>
+                                      <p className="explorer-lesson-desc">{lesson.prompt_text}</p>
+                                    </div>
+                                    {!lessonCompleted && (
+                                      <div className="explorer-lesson-play" style={{ background: 'var(--secondary)' }}>
+                                        <Icon icon="solar:microphone-3-bold" />
+                                      </div>
+                                    )}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </main>
 
@@ -2162,7 +2324,7 @@ function App() {
         {transitioning && (
           <div className="transition-overlay">
             <div className="transition-card">
-              <Leapfrog size="40" speed="2.5" color="#8b5cf6" />
+              <Leapfrog size="40" speed="2.5" color="var(--secondary)" />
             </div>
           </div>
         )}
@@ -2218,149 +2380,190 @@ function App() {
     }
 
     return (
-      <div className={`app-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
-        <main className="app-main quiz-screen" style={{ marginTop: 0 }}>
-          <div className="quiz-content">
-            <div className="quiz-header-row">
-              <span
-                style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
-                onClick={() => setShowQuitQuizConfirm(true)}
-              >
-                ✕
-              </span>
-              <HeartsBar />
-            </div>
+      <div className="explorer-shell">
+        <div className="texture-overlay" />
 
-            {/* Quit Quiz Confirmation Modal */}
-            {showQuitQuizConfirm && (
-              <div className="modal-overlay">
-                <div className="modal-content">
-                  <h3 className="modal-title">Leave Quiz?</h3>
-                  <p className="text-muted">Are you sure you want to return to the home page? All progress will be lost.</p>
-                  <div className="modal-actions">
-                    <button className="btn-outline" style={{ flex: 1 }} onClick={() => setShowQuitQuizConfirm(false)}>
-                      Stay
-                    </button>
-                    <button
-                      className="btn-primary"
-                      style={{ flex: 1, backgroundColor: "var(--red)", boxShadow: "0 4px 0 var(--red-dark)" }}
-                      onClick={() => {
-                        setShowQuitQuizConfirm(false);
-                        backToLessons();
-                      }}
-                    >
-                      Leave
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
+        {/* Quiz Header */}
+        <header className="quiz-explorer-header">
+          <button
+            className="quiz-map-btn"
+            onClick={() => { triggerHaptic(); setShowQuitQuizConfirm(true); }}
+          >
+            <Icon icon="solar:map-bold" className="quiz-map-icon" />
+          </button>
 
-            <div className="quiz-progress-bar">
+          {/* Journey Progress Bar */}
+          <div className="quiz-journey-progress">
+            <div className="quiz-journey-track">
               <div
-                className="quiz-progress-fill"
-                style={{
-                  width: `${(currentQuestionIndex / Math.max(questions.length, 1)) * 100}%`,
-                }}
+                className="quiz-journey-fill"
+                style={{ width: `${(currentQuestionIndex / Math.max(questions.length, 1)) * 100}%` }}
               />
             </div>
-
-            {/* QUIZ QUESTIONS */}
-            {!quizFinished && currentQuestion && (
-              <div key={currentQuestion.id} className="quiz-question-container swipe-in">
-                <h2 className="quiz-question">{currentQuestion.prompt_text}</h2>
-
-                <div className={`quiz-options ${currentQuestion.options.length === 3 ? 'quiz-options-three' : ''}`}>
-                  {currentQuestion.options.map((opt) => {
-                    const isSelected = selectedOptionId === opt.id;
-                    const isCorrect = opt.is_correct;
-
-                    let stateClass = "";
-
-                    if (!hasAnswered) {
-                      if (isSelected) stateClass = "option-pending";
-                    } else {
-                      if (isSelected && isCorrect) stateClass = "option-correct";
-                      else if (isSelected && !isCorrect)
-                        stateClass = "option-wrong";
-                      else if (isCorrect) stateClass = "option-reveal-correct";
-                    }
-
-                    return (
-                      <button
-                        key={opt.id}
-                        onClick={() => handleOptionClick(opt)}
-                        className={`option-button ${stateClass}`}
-                        style={{ direction: "rtl" }}
-                        disabled={quizFinished}
-                      >
-                        {opt.text}
-                      </button>
-                    );
-                  })}
+            <div className="quiz-journey-dots">
+              {questions.map((_, idx) => (
+                <div
+                  key={idx}
+                  className={`quiz-journey-dot ${idx < currentQuestionIndex ? 'completed' : ''} ${idx === currentQuestionIndex ? 'current' : ''}`}
+                >
+                  {idx === currentQuestionIndex && (
+                    <Icon icon="solar:compass-bold" className="quiz-compass-icon" />
+                  )}
                 </div>
+              ))}
+            </div>
+          </div>
 
-                <div className="quiz-feedback">
-                  {answerResult === "correct" && "✅ Correct!"}
-                  {answerResult === "wrong" && "❌ Not quite."}
+          {/* Hearts Display */}
+          <div className="quiz-hearts-display">
+            <Icon icon="solar:heart-bold" className="quiz-heart-icon" />
+            <span className="quiz-hearts-count">{hearts}</span>
+          </div>
+        </header>
+
+        {/* Quit Quiz Confirmation Modal */}
+        {showQuitQuizConfirm && (
+          <div className="modal-overlay">
+            <div className="modal-content">
+              <h3 className="modal-title">Leave Quest?</h3>
+              <p className="text-muted">Are you sure you want to return to the map? All progress will be lost.</p>
+              <div className="modal-actions">
+                <button className="btn-outline" style={{ flex: 1 }} onClick={() => { triggerHaptic(); setShowQuitQuizConfirm(false); }}>
+                  Stay
+                </button>
+                <button
+                  className="btn-primary"
+                  style={{ flex: 1, backgroundColor: "var(--red)", boxShadow: "0 4px 0 var(--red-dark)" }}
+                  onClick={() => {
+                    triggerHaptic();
+                    setShowQuitQuizConfirm(false);
+                    backToLessons();
+                  }}
+                >
+                  Leave
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Quiz Main Content */}
+        <main className="quiz-explorer-main">
+          {!quizFinished && currentQuestion && (
+            <div key={currentQuestion.id} className="quiz-question-wrap swipe-in">
+              {/* Question Title */}
+              <div className="quiz-lesson-label">
+                <span>Question {currentQuestionIndex + 1} of {questions.length}</span>
+              </div>
+              <h2 className="quiz-prompt">{currentQuestion.prompt_text}</h2>
+
+              {/* Question Card with Corner Accents - COMMENTED OUT FOR NOW
+              <div className="quiz-question-card">
+                <div className="quiz-card-corner top-left" />
+                <div className="quiz-card-corner top-right" />
+                <div className="quiz-card-corner bottom-left" />
+                <div className="quiz-card-corner bottom-right" />
+
+                <div className="quiz-card-content">
+                  {currentQuestion.options.length > 0 && currentQuestion.options[0].text && (
+                    <p className="quiz-arabic-text" dir="rtl">
+                      {currentQuestion.prompt_arabic || "اختر الجواب الصحيح"}
+                    </p>
+                  )}
                 </div>
+              </div>
+              */}
 
-                {selectedOptionId !== null && !quizFinished && (
-                  <div className="quiz-actions">
-                    {!hasAnswered && (
-                      <button className="btn-primary" onClick={handleConfirmAnswer}>
-                        Confirm
-                      </button>
-                    )}
+              {/* Answer Options Grid */}
+              <div className={`quiz-options-grid ${currentQuestion.options.length === 3 ? 'three-options' : ''}`}>
+                {currentQuestion.options.map((opt) => {
+                  const isSelected = selectedOptionId === opt.id;
+                  const isCorrect = opt.is_correct;
 
-                    {hasAnswered && (
-                      <button className="btn-primary" onClick={goToNextQuestion}>
-                        {currentQuestionIndex === questions.length - 1
-                          ? "Finish"
-                          : "Next"}
-                      </button>
-                    )}
+                  let stateClass = "";
+                  if (!hasAnswered) {
+                    if (isSelected) stateClass = "selected";
+                  } else {
+                    if (isSelected && isCorrect) stateClass = "correct";
+                    else if (isSelected && !isCorrect) stateClass = "wrong";
+                    else if (isCorrect) stateClass = "reveal-correct";
+                  }
+
+                  return (
+                    <button
+                      key={opt.id}
+                      onClick={() => handleOptionClick(opt)}
+                      className={`quiz-option-card ${stateClass}`}
+                      disabled={hasAnswered}
+                    >
+                      <div className="quiz-option-dashed" />
+                      <div className="quiz-option-inner">
+                        <span className="quiz-option-text">{opt.text}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Failure Screen */}
+          {quizFinished && hearts <= 0 && (
+            <div className="quiz-failure-wrap swipe-in">
+              <div className="quiz-failure-icon">
+                <Icon icon="solar:heart-broken-bold" className="quiz-broken-heart" />
+              </div>
+              <h1 className="quiz-failure-title">Out of Hearts</h1>
+              <p className="quiz-failure-subtitle">Don't give up! Review the lesson and try again.</p>
+              <div className="quiz-failure-buttons">
+                <button className="btn-primary" onClick={() => { triggerHaptic(); startQuiz(); }}>
+                  Try Again
+                </button>
+                <button className="btn-outline" onClick={() => { triggerHaptic(); backToLessons(); }}>
+                  Return to Map
+                </button>
+              </div>
+            </div>
+          )}
+        </main>
+
+        {/* Bottom Action Bar */}
+        {
+          !quizFinished && currentQuestion && (
+            <footer className="quiz-explorer-footer">
+              {/* Feedback Message */}
+              {hasAnswered && (
+                <div className={`quiz-feedback-bar ${answerResult === 'correct' ? 'success' : 'error'}`}>
+                  <div className="quiz-feedback-icon">
+                    <Icon icon={answerResult === 'correct' ? 'solar:star-rainbow-bold' : 'solar:close-circle-bold'} />
                   </div>
+                  <div className="quiz-feedback-text">
+                    <h3>{answerResult === 'correct' ? 'أحسنت!' : 'حاول مرة أخرى'}</h3>
+                    <p>{answerResult === 'correct' ? 'Excellent work!' : 'Keep practicing!'}</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div className="quiz-action-buttons">
+                {!hasAnswered && selectedOptionId !== null && (
+                  <button className="quiz-confirm-btn" onClick={handleConfirmAnswer}>
+                    <span>Confirm Answer</span>
+                    <Icon icon="solar:check-read-bold" />
+                  </button>
+                )}
+
+                {hasAnswered && (
+                  <button className="quiz-continue-btn" onClick={() => { triggerHaptic(); goToNextQuestion(); }}>
+                    <span>{currentQuestionIndex === questions.length - 1 ? 'Complete Quest' : 'Continue Journey'}</span>
+                    <Icon icon="solar:arrow-right-linear" />
+                  </button>
                 )}
               </div>
-            )}
-
-            {/* FAILURE SCREEN - Full page sad design */}
-            {quizFinished && hearts <= 0 && (
-              <div className="failure-fullpage swipe-in">
-                {/* Broken Heart SVG Icon */}
-                <div className="failure-icon-container">
-                  <svg width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <circle cx="60" cy="60" r="55" fill="#1e293b" stroke="#334155" strokeWidth="2" />
-                    <path d="M60 90C60 90 30 70 30 50C30 40 38 32 48 32C54 32 58 36 60 40C62 36 66 32 72 32C82 32 90 40 90 50C90 70 60 90 60 90Z" fill="#475569" />
-                    <path d="M55 45L65 55L55 65L60 75L65 65L60 55L70 45" stroke="#94a3b8" strokeWidth="3" strokeLinecap="round" />
-                  </svg>
-                </div>
-
-                <h1 className="failure-title">Out of Hearts</h1>
-                <p className="failure-subtitle">
-                  Don't give up! Review the lesson and try again.
-                </p>
-
-                <div className="failure-buttons">
-                  <button
-                    className="btn-failure-retry"
-                    onClick={() => { triggerHaptic(); startQuiz(); }}
-                  >
-                    Try Again
-                  </button>
-                  <button
-                    className="btn-failure-home"
-                    onClick={() => { triggerHaptic(); backToLessons(); }}
-                  >
-                    Return Home
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </main>
-      </div>
+            </footer>
+          )
+        }
+      </div >
     );
   }
 
@@ -2370,8 +2573,9 @@ function App() {
     const completed = isLessonCompleted(activeLesson.id);
 
     return (
-      <div className={`app-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
-        <main className="app-main" style={{ marginTop: 0 }}>
+      <div className={`explorer-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <div className="texture-overlay" />
+        <main className="app-main" style={{ marginTop: 0, position: 'relative', zIndex: 10 }}>
           {lessonPhase === "lesson" && (
             <div className="lesson-content">
               {activeLesson.audio_url && (
@@ -2405,6 +2609,10 @@ function App() {
                     setAudioCompleted(true);
                     setPlayingParagraphId(null);
                     setPlayingParagraphEnd(null);
+                    // Add 2-second delay before showing full dialogue for review
+                    setTimeout(() => {
+                      setShowDialogueReview(true);
+                    }, 2000);
                   }}
                   style={{ display: "none" }}
                 />
@@ -2429,15 +2637,22 @@ function App() {
                   // Hide audio button for legacy lessons (non-blocks format) - only show for dialogue lessons
                   if (activeLesson.lesson_format !== "blocks" || !hasDialogue) return null;
 
+                  // For dialogue lessons: only show button initially OR after showDialogueReview (after 2s delay)
+                  const showButton = !audioPlaying && (!audioCompleted || showDialogueReview);
+
                   return (
                     <div
+                      className={`dialogue-controls-wrap ${showDialogueReview ? 'fade-in' : ''}`}
                       style={{
                         marginBottom: "1rem",
                         display: "flex",
                         justifyContent: "center",
+                        opacity: showButton ? 1 : 0,
+                        visibility: showButton ? 'visible' : 'hidden',
+                        transition: 'opacity 0.5s ease, visibility 0.5s ease',
                       }}
                     >
-                      {!audioPlaying && (
+                      {showButton && (
                         <button
                           className="btn-primary"
                           onClick={handleStartLessonAudio}
@@ -2556,12 +2771,12 @@ function App() {
                       const visibleDialogue = dialogueBlocks.slice(0, revealedCount);
                       const visibleLines = (audioPlaying && !dialogueFinished)
                         ? visibleDialogue.slice(-1)
-                        : visibleDialogue;
+                        : showDialogueReview ? visibleDialogue : visibleDialogue.slice(-1);
 
                       return (
                         <div
                           ref={convoScrollRef}
-                          className={`convo-area ${!dialogueFinished && audioPlaying ? "playback-mode" : "list-mode"}`}
+                          className={`convo-area ${!dialogueFinished && audioPlaying ? "playback-mode" : showDialogueReview ? "list-mode" : "playback-mode"}`}
                         >
                           {visibleLines.map((b) => {
                             const speaker = b.speakers;
@@ -2619,13 +2834,26 @@ function App() {
                 )
               }
 
-              <div style={{ marginTop: "0.5rem", paddingBottom: "2rem", minHeight: "60px" }}>
+              <div
+                className={showDialogueReview ? 'fade-in' : ''}
+                style={{
+                  marginTop: "1.5rem",
+                  paddingBottom: "2.5rem",
+                  minHeight: "60px",
+                  opacity: showDialogueReview || !audioCompleted ? 1 : 0,
+                  transition: 'opacity 0.5s ease',
+                }}
+              >
                 {(() => {
                   // Check if this is a paragraph-based lesson (they have their own proceed button)
                   const hasParagraphs = lessonBlocks.some(b => b.block_type === "paragraph");
+                  const hasDialogue = lessonBlocks.some(b => b.block_type === "dialogue");
 
                   // Don't show this bottom proceed button for paragraph lessons
                   if (hasParagraphs) return null;
+
+                  // For dialogue lessons: only show proceed after showDialogueReview
+                  if (hasDialogue && audioCompleted && !showDialogueReview) return null;
 
                   if (!activeLesson.audio_url || audioCompleted) {
                     return (
@@ -2658,165 +2886,54 @@ function App() {
           }
 
           {/* PHASE: TRANSITION TO GRAMMAR */}
-          {lessonPhase === "intro_grammar" && (
-            <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
-              <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
-                <img src="/images/explanation-icon.jpg" alt="Story" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-              </div>
-              <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Story Explanation</h1>
-              <p className="page-subtitle">Let's have a look at the story content in more detail!</p>
-              <footer className="sticky-footer">
-                <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("grammar"); }}>
-                  Continue
-                </button>
-              </footer>
-            </div>
-          )}
-
-          {/* PHASE: GRAMMAR SPOTLIGHT CAROUSEL (No Scrolling) */}
-          {lessonPhase === "grammar" && grammarNotes.length > 0 && (
-            <div className="vocab-fullscreen no-scroll-container swipe-in">
-              <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
-                <span
-                  style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
-                  onClick={() => setLessonPhase("lesson")}
-                >
-                  <MdArrowBackIosNew />
-                </span>
-                <h2 className="grammar-title-text" style={{ margin: 0, fontSize: '1.25rem' }}>{grammarNotes[grammarIndex].title}</h2>
-              </header>
-
-              <div key={grammarIndex} className="carousel-content-area swipe-in">
-                <div className="explanation-bubble" style={{ fontSize: '1.1rem', padding: '1.25rem', lineHeight: '1.7' }}>
-                  {grammarNotes[grammarIndex].content_en}
+          {
+            lessonPhase === "intro_grammar" && (
+              <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+                <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
+                  <img src="/images/explanation-icon.jpg" alt="Story" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                 </div>
-
-                <div className="arabic-box spotlight-arabic" style={{ borderLeft: '5px solid var(--blue)', padding: '1.5rem' }}>
-                  {grammarNotes[grammarIndex].content_ar}
-                </div>
-              </div>
-
-              <footer className="sticky-footer">
-                <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
-                  <button
-                    className="btn-nav-arrow"
-                    onClick={() => grammarIndex > 0 && setGrammarIndex(i => i - 1)}
-                    disabled={grammarIndex === 0}
-                    style={{ opacity: grammarIndex === 0 ? 0.3 : 1 }}
-                  >
-                    <MdArrowBackIosNew />
-                  </button>
-                  <button
-                    className="btn-primary"
-                    style={{ flex: 1 }}
-                    onClick={() => {
-                      triggerHaptic();
-                      if (grammarIndex === grammarNotes.length - 1) {
-                        setLessonPhase("intro_vocab");
-                      } else {
-                        setGrammarIndex(i => i + 1);
-                      }
-                    }}
-                  >
-                    CONTINUE
-                  </button>
-                  <button
-                    className="btn-nav-arrow"
-                    onClick={() => grammarIndex < grammarNotes.length - 1 && setGrammarIndex(i => i + 1)}
-                    disabled={grammarIndex === grammarNotes.length - 1}
-                    style={{ opacity: grammarIndex === grammarNotes.length - 1 ? 0.3 : 1 }}
-                  >
-                    →
-                  </button>
-                </div>
-              </footer>
-            </div>
-          )}
-
-          {/* PHASE: TRANSITION TO VOCAB */}
-          {lessonPhase === "intro_vocab" && (
-            <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
-              <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
-                <img src="/images/vocab-book.jpg" alt="Vocabulary" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-              </div>
-              <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>New Words</h1>
-              <p className="page-subtitle">Let's take a look at the new words we have learnt!</p>
-              <footer className="sticky-footer">
-                <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("vocab"); }}>
-                  Continue
-                </button>
-              </footer>
-            </div>
-          )}
-
-          {/* PHASE 2: VOCAB CAROUSEL */}
-          {lessonPhase === "vocab" && (
-            <div className="vocab-fullscreen no-scroll-container swipe-in">
-              {/* Header with back arrow and lesson title */}
-              <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
-                <span
-                  style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
-                  onClick={() => setLessonPhase("lesson")}
-                >
-                  <MdArrowBackIosNew />
-                </span>
-                <div className="lesson-title-badge">{activeLesson.title}</div>
-              </header>
-
-              {vocabItems.length === 0 ? (
-                <div className="center-content">
-                  <p className="muted">No vocabulary added yet for this lesson.</p>
-                  <button
-                    className="btn-primary"
-                    onClick={() => setLessonPhase("intro_drills")}
-                  >
+                <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Story Explanation</h1>
+                <p className="page-subtitle">Let's have a look at the story content in more detail!</p>
+                <footer className="sticky-footer">
+                  <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("grammar"); }}>
                     Continue
                   </button>
+                </footer>
+              </div>
+            )
+          }
+
+          {/* PHASE: GRAMMAR SPOTLIGHT CAROUSEL (No Scrolling) */}
+          {
+            lessonPhase === "grammar" && grammarNotes.length > 0 && (
+              <div className="vocab-fullscreen no-scroll-container swipe-in">
+                <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
+                  <span
+                    style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+                    onClick={() => { triggerHaptic(); setLessonPhase("lesson"); }}
+                  >
+                    <MdArrowBackIosNew />
+                  </span>
+                  <h2 className="grammar-title-text" style={{ margin: 0, fontSize: '1.25rem' }}>{grammarNotes[grammarIndex].title}</h2>
+                </header>
+
+                <div key={grammarIndex} className="carousel-content-area swipe-in">
+                  <div className="explanation-bubble" style={{ fontSize: '1.1rem', padding: '1.25rem', lineHeight: '1.7' }}>
+                    {grammarNotes[grammarIndex].content_en}
+                  </div>
+
+                  <div className="arabic-box spotlight-arabic" style={{ borderLeft: '5px solid var(--blue)', padding: '1.5rem' }}>
+                    {grammarNotes[grammarIndex].content_ar}
+                  </div>
                 </div>
-              ) : (
-                (() => {
-                  const item = vocabItems[vocabIndex];
-                  return (
-                    <div key={vocabIndex} className="carousel-content-area swipe-in">
-                      <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>
-                        :عربي
-                      </div>
-                      <div className="vocab-card" style={{ direction: "rtl" }}>
-                        <div className="vocab-text-main">
-                          {item.arabic}
-                          {item.note && (
-                            <span
-                              style={{
-                                display: "block",
-                                fontSize: "0.9rem",
-                                marginTop: "0.5rem",
-                                color: "var(--text-light)",
-                              }}
-                            >
-                              [{item.note}]
-                            </span>
-                          )}
-                        </div>
-                      </div>
 
-                      <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
-                      <div className="vocab-card">
-                        <div className="vocab-text-main">{item.english}</div>
-                      </div>
-                    </div>
-                  );
-                })()
-              )}
-
-              {/* Footer with left/right arrows and continue button */}
-              {vocabItems.length > 0 && (
                 <footer className="sticky-footer">
                   <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
                     <button
                       className="btn-nav-arrow"
-                      onClick={() => vocabIndex > 0 && setVocabIndex(i => i - 1)}
-                      disabled={vocabIndex === 0}
-                      style={{ opacity: vocabIndex === 0 ? 0.3 : 1 }}
+                      onClick={() => { if (grammarIndex > 0) { triggerHaptic(); setGrammarIndex(i => i - 1); } }}
+                      disabled={grammarIndex === 0}
+                      style={{ opacity: grammarIndex === 0 ? 0.3 : 1 }}
                     >
                       <MdArrowBackIosNew />
                     </button>
@@ -2825,15 +2942,10 @@ function App() {
                       style={{ flex: 1 }}
                       onClick={() => {
                         triggerHaptic();
-                        if (vocabIndex === vocabItems.length - 1) {
-                          // After vocab, go to speaking if exercises exist, otherwise intro_drills
-                          if (speakingExercises.length > 0) {
-                            setLessonPhase("speaking");
-                          } else {
-                            setLessonPhase("intro_drills");
-                          }
+                        if (grammarIndex === grammarNotes.length - 1) {
+                          setLessonPhase("intro_vocab");
                         } else {
-                          setVocabIndex(i => i + 1);
+                          setGrammarIndex(i => i + 1);
                         }
                       }}
                     >
@@ -2841,189 +2953,326 @@ function App() {
                     </button>
                     <button
                       className="btn-nav-arrow"
-                      onClick={() => vocabIndex < vocabItems.length - 1 && setVocabIndex(i => i + 1)}
-                      disabled={vocabIndex === vocabItems.length - 1}
-                      style={{ opacity: vocabIndex === vocabItems.length - 1 ? 0.3 : 1 }}
+                      onClick={() => { if (grammarIndex < grammarNotes.length - 1) { triggerHaptic(); setGrammarIndex(i => i + 1); } }}
+                      disabled={grammarIndex === grammarNotes.length - 1}
+                      style={{ opacity: grammarIndex === grammarNotes.length - 1 ? 0.3 : 1 }}
                     >
                       →
                     </button>
                   </div>
                 </footer>
-              )}
-            </div>
-          )
+              </div>
+            )
+          }
+
+          {/* PHASE: TRANSITION TO VOCAB */}
+          {
+            lessonPhase === "intro_vocab" && (
+              <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+                <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
+                  <img src="/images/vocab-book.jpg" alt="Vocabulary" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                </div>
+                <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>New Words</h1>
+                <p className="page-subtitle">Let's take a look at the new words we have learnt!</p>
+                <footer className="sticky-footer">
+                  <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("vocab"); }}>
+                    Continue
+                  </button>
+                </footer>
+              </div>
+            )
+          }
+
+          {/* PHASE 2: VOCAB CAROUSEL */}
+          {
+            lessonPhase === "vocab" && (
+              <div className="vocab-fullscreen no-scroll-container swipe-in">
+                {/* Header with back arrow and lesson title */}
+                <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
+                  <span
+                    style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+                    onClick={() => { triggerHaptic(); setLessonPhase("lesson"); }}
+                  >
+                    <MdArrowBackIosNew />
+                  </span>
+                  <div className="lesson-title-badge">{activeLesson.title}</div>
+                </header>
+
+                {vocabItems.length === 0 ? (
+                  <div className="center-content">
+                    <p className="muted">No vocabulary added yet for this lesson.</p>
+                    <button
+                      className="btn-primary"
+                      onClick={() => { triggerHaptic(); setLessonPhase("intro_drills"); }}
+                    >
+                      Continue
+                    </button>
+                  </div>
+                ) : (
+                  (() => {
+                    const item = vocabItems[vocabIndex];
+                    return (
+                      <div key={vocabIndex} className="carousel-content-area swipe-in">
+                        <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>
+                          :عربي
+                        </div>
+                        <div className="vocab-card" style={{ direction: "rtl" }}>
+                          <span className="explorer-card-corner top-left"></span>
+                          <span className="explorer-card-corner top-right"></span>
+                          <span className="explorer-card-corner bottom-left"></span>
+                          <span className="explorer-card-corner bottom-right"></span>
+                          <div className="vocab-text-main">
+                            {item.arabic}
+                            {item.note && (
+                              <span
+                                style={{
+                                  display: "block",
+                                  fontSize: "0.9rem",
+                                  marginTop: "0.5rem",
+                                  color: "var(--muted-foreground)",
+                                }}
+                              >
+                                [{item.note}]
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
+                        <div className="vocab-card">
+                          <span className="explorer-card-corner top-left"></span>
+                          <span className="explorer-card-corner top-right"></span>
+                          <span className="explorer-card-corner bottom-left"></span>
+                          <span className="explorer-card-corner bottom-right"></span>
+                          <div className="vocab-text-main">{item.english}</div>
+                        </div>
+                      </div>
+                    );
+                  })()
+                )}
+
+                {/* Footer with left/right arrows and continue button */}
+                {vocabItems.length > 0 && (
+                  <footer className="sticky-footer">
+                    <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+                      <button
+                        className="btn-nav-arrow"
+                        onClick={() => { if (vocabIndex > 0) { triggerHaptic(); setVocabIndex(i => i - 1); } }}
+                        disabled={vocabIndex === 0}
+                        style={{ opacity: vocabIndex === 0 ? 0.3 : 1 }}
+                      >
+                        <MdArrowBackIosNew />
+                      </button>
+                      <button
+                        className="btn-primary"
+                        style={{ flex: 1 }}
+                        onClick={() => {
+                          triggerHaptic();
+                          if (vocabIndex === vocabItems.length - 1) {
+                            // After vocab, go to speaking if exercises exist, otherwise intro_drills
+                            if (speakingExercises.length > 0) {
+                              setLessonPhase("speaking");
+                            } else {
+                              setLessonPhase("intro_drills");
+                            }
+                          } else {
+                            setVocabIndex(i => i + 1);
+                          }
+                        }}
+                      >
+                        CONTINUE
+                      </button>
+                      <button
+                        className="btn-nav-arrow"
+                        onClick={() => { if (vocabIndex < vocabItems.length - 1) { triggerHaptic(); setVocabIndex(i => i + 1); } }}
+                        disabled={vocabIndex === vocabItems.length - 1}
+                        style={{ opacity: vocabIndex === vocabItems.length - 1 ? 0.3 : 1 }}
+                      >
+                        →
+                      </button>
+                    </div>
+                  </footer>
+                )}
+              </div>
+            )
           }
 
           {/* PHASE: SPEAKING PRACTICE */}
-          {lessonPhase === "speaking" && (
-            <div className="speaking-practice no-scroll-container swipe-in" style={{ padding: '2rem', textAlign: 'center' }}>
-              <h2 style={{ marginBottom: '2rem' }}>Speaking Practice</h2>
+          {
+            lessonPhase === "speaking" && (
+              <div className="speaking-practice no-scroll-container swipe-in" style={{ padding: '2rem', textAlign: 'center' }}>
+                <h2 style={{ marginBottom: '2rem' }}>Speaking Practice</h2>
 
-              <p dir="rtl" style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '2rem', lineHeight: 1.8 }}>
-                {speakingExercises[0]?.prompt_ar}
-              </p>
-
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minHeight: '140px', justifyContent: 'center' }}>
-                {isCheckingAnswer ? (
-                  <>
-                    <div className="checking-answer-container">
-                      <div className="checking-answer-pulse"></div>
-                      <div className="checking-answer-icon">🎧</div>
-                    </div>
-                    <p className="checking-answer-text">
-                      Checking your answer<span className="checking-dots"></span>
-                    </p>
-                  </>
-                ) : (
-                  <button
-                    className="btn-primary"
-                    onClick={isRecording ? stopRecording : startRecording}
-                    style={{ maxWidth: 320 }}
-                    disabled={isCheckingAnswer}
-                  >
-                    {isRecording ? "⏹ Stop recording" : "🎤 Start recording"}
-                  </button>
-                )}
-              </div>
-
-              {speechError && (
-                <p style={{ color: 'red', marginTop: 12 }}>
-                  {speechError}
+                <p dir="rtl" style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '2rem', lineHeight: 1.8 }}>
+                  {speakingExercises[0]?.prompt_ar}
                 </p>
-              )}
 
-              {/* Show feedback after recording */}
-              {speechFeedback && (
-                <div style={{
-                  marginTop: 20,
-                  padding: '16px 24px',
-                  borderRadius: 12,
-                  background: speechFeedback.includes('Good') ? 'rgba(34, 197, 94, 0.15)'
-                    : speechFeedback.includes('Almost') ? 'rgba(251, 191, 36, 0.15)'
-                      : 'rgba(239, 68, 68, 0.15)',
-                  border: `2px solid ${speechFeedback.includes('Good') ? '#22c55e'
-                    : speechFeedback.includes('Almost') ? '#fbbf24'
-                      : '#ef4444'
-                    }`
-                }}>
-                  <div style={{
-                    fontSize: '1.5rem',
-                    fontWeight: 700,
-                    color: speechFeedback.includes('Good') ? '#22c55e'
-                      : speechFeedback.includes('Almost') ? '#fbbf24'
-                        : '#ef4444'
-                  }}>
-                    {speechFeedback}
-                  </div>
-                  {spokenText && (
-                    <div dir="rtl" style={{
-                      marginTop: 12,
-                      fontSize: '1.1rem',
-                      color: 'var(--text-secondary)',
-                      fontStyle: 'italic'
-                    }}>
-                      You said: "{spokenText}"
-                    </div>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minHeight: '140px', justifyContent: 'center' }}>
+                  {isCheckingAnswer ? (
+                    <>
+                      <div className="checking-answer-container">
+                        <div className="checking-answer-pulse"></div>
+                        <div className="checking-answer-icon">🎧</div>
+                      </div>
+                      <p className="checking-answer-text">
+                        Checking your answer<span className="checking-dots"></span>
+                      </p>
+                    </>
+                  ) : (
+                    <button
+                      className="btn-primary"
+                      onClick={() => { triggerHaptic(); if (isRecording) stopRecording(); else startRecording(); }}
+                      style={{ maxWidth: 320 }}
+                      disabled={isCheckingAnswer}
+                    >
+                      {isRecording ? "⏹ Stop recording" : "🎤 Start recording"}
+                    </button>
                   )}
                 </div>
-              )}
 
-              {isRecording && (
-                <div style={{ marginTop: 16, color: 'var(--text-secondary)' }}>
-                  🔴 Recording...
-                </div>
-              )}
+                {speechError && (
+                  <p style={{ color: 'red', marginTop: 12 }}>
+                    {speechError}
+                  </p>
+                )}
 
-              <button
-                className="btn-outline"
-                style={{ marginTop: 20 }}
-                onClick={() => { triggerHaptic(); setLessonPhase('intro_drills'); }}
-              >
-                Continue
-              </button>
-            </div>
-          )}
+                {/* Show feedback after recording */}
+                {speechFeedback && (
+                  <div style={{
+                    marginTop: 20,
+                    padding: '16px 24px',
+                    borderRadius: 12,
+                    background: speechFeedback.includes('Good') ? 'rgba(34, 197, 94, 0.15)'
+                      : speechFeedback.includes('Almost') ? 'rgba(251, 191, 36, 0.15)'
+                        : 'rgba(239, 68, 68, 0.15)',
+                    border: `2px solid ${speechFeedback.includes('Good') ? '#22c55e'
+                      : speechFeedback.includes('Almost') ? '#fbbf24'
+                        : '#ef4444'
+                      }`
+                  }}>
+                    <div style={{
+                      fontSize: '1.5rem',
+                      fontWeight: 700,
+                      color: speechFeedback.includes('Good') ? '#22c55e'
+                        : speechFeedback.includes('Almost') ? '#fbbf24'
+                          : '#ef4444'
+                    }}>
+                      {speechFeedback}
+                    </div>
+                    {spokenText && (
+                      <div dir="rtl" style={{
+                        marginTop: 12,
+                        fontSize: '1.1rem',
+                        color: 'var(--text-secondary)',
+                        fontStyle: 'italic'
+                      }}>
+                        You said: "{spokenText}"
+                      </div>
+                    )}
+                  </div>
+                )}
 
-          {/* PHASE: TRANSITION TO DRILLS */}
-          {lessonPhase === "intro_drills" && (
-            <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
-              <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
-                <img src="/images/sentence-practice.png" alt="Sentence Practice" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-              </div>
-              <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Sentence Practice</h1>
-              <p className="page-subtitle">Let's look at some ways of using these words in sentences!</p>
-              <footer className="sticky-footer">
-                <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("explain"); }}>
+                {isRecording && (
+                  <div style={{ marginTop: 16, color: 'var(--text-secondary)' }}>
+                    🔴 Recording...
+                  </div>
+                )}
+
+                <button
+                  className="btn-outline"
+                  style={{ marginTop: 20 }}
+                  onClick={() => { triggerHaptic(); setLessonPhase('intro_drills'); }}
+                >
                   Continue
                 </button>
-              </footer>
-            </div>
-          )}
+              </div>
+            )
+          }
+
+          {/* PHASE: TRANSITION TO DRILLS */}
+          {
+            lessonPhase === "intro_drills" && (
+              <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+                <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
+                  <img src="/images/sentence-practice.png" alt="Sentence Practice" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                </div>
+                <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Sentence Practice</h1>
+                <p className="page-subtitle">Let's look at some ways of using these words in sentences!</p>
+                <footer className="sticky-footer">
+                  <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("explain"); }}>
+                    Continue
+                  </button>
+                </footer>
+              </div>
+            )
+          }
 
           {/* PHASE 3: USAGE DRILLS (Carousel Mode) */}
-          {lessonPhase === "explain" && explanations.length > 0 && (
-            <div className="no-scroll-container">
-              {/* Header with back arrow and lesson title */}
-              <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
-                <span
-                  style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
-                  onClick={() => setLessonPhase("lesson")}
-                >
-                  <MdArrowBackIosNew />
-                </span>
-                <div className="lesson-title-badge">{activeLesson.title}</div>
-              </header>
-
-              <div className="carousel-content-area">
-                <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>:عربي</div>
-                <div className="arabic-box spotlight-arabic" dir="rtl" style={{ fontSize: '2rem' }}>
-                  {explanations[explanationIndex].arabic_sentence}
-                </div>
-
-                <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
-                <div className="explanation-bubble" style={{ borderLeft: '5px solid var(--green)', background: '#f0fff4' }}>
-                  {explanations[explanationIndex].english_sentence}
-                </div>
-              </div>
-
-              <footer className="sticky-footer">
-                <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
-                  <button
-                    className="btn-nav-arrow"
-                    onClick={() => explanationIndex > 0 && setExplanationIndex(i => i - 1)}
-                    disabled={explanationIndex === 0}
-                    style={{ opacity: explanationIndex === 0 ? 0.3 : 1 }}
+          {
+            lessonPhase === "explain" && explanations.length > 0 && (
+              <div className="no-scroll-container">
+                {/* Header with back arrow and lesson title */}
+                <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
+                  <span
+                    style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+                    onClick={() => { triggerHaptic(); setLessonPhase("lesson"); }}
                   >
                     <MdArrowBackIosNew />
-                  </button>
-                  <button
-                    className="btn-primary"
-                    style={{ flex: 1 }}
-                    onClick={() => {
-                      triggerHaptic();
-                      if (explanationIndex === explanations.length - 1) {
-                        setLessonPhase("relisten");
-                        setAudioCompleted(false);
-                        setAudioProgress(0);
-                      } else {
-                        setExplanationIndex(i => i + 1);
-                      }
-                    }}
-                  >
-                    CONTINUE
-                  </button>
-                  <button
-                    className="btn-nav-arrow"
-                    onClick={() => explanationIndex < explanations.length - 1 && setExplanationIndex(i => i + 1)}
-                    disabled={explanationIndex === explanations.length - 1}
-                    style={{ opacity: explanationIndex === explanations.length - 1 ? 0.3 : 1 }}
-                  >
-                    →
-                  </button>
+                  </span>
+                  <div className="lesson-title-badge">{activeLesson.title}</div>
+                </header>
+
+                <div className="carousel-content-area">
+                  <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>:عربي</div>
+                  <div className="arabic-box spotlight-arabic" dir="rtl" style={{ fontSize: '2rem' }}>
+                    {explanations[explanationIndex].arabic_sentence}
+                  </div>
+
+                  <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
+                  <div className="explanation-bubble" style={{ borderLeft: '5px solid var(--green)', background: '#f0fff4' }}>
+                    {explanations[explanationIndex].english_sentence}
+                  </div>
                 </div>
-              </footer>
-            </div>
-          )}
+
+                <footer className="sticky-footer">
+                  <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+                    <button
+                      className="btn-nav-arrow"
+                      onClick={() => { if (explanationIndex > 0) { triggerHaptic(); setExplanationIndex(i => i - 1); } }}
+                      disabled={explanationIndex === 0}
+                      style={{ opacity: explanationIndex === 0 ? 0.3 : 1 }}
+                    >
+                      <MdArrowBackIosNew />
+                    </button>
+                    <button
+                      className="btn-primary"
+                      style={{ flex: 1 }}
+                      onClick={() => {
+                        triggerHaptic();
+                        if (explanationIndex === explanations.length - 1) {
+                          setLessonPhase("relisten");
+                          setAudioCompleted(false);
+                          setAudioProgress(0);
+                        } else {
+                          setExplanationIndex(i => i + 1);
+                        }
+                      }}
+                    >
+                      CONTINUE
+                    </button>
+                    <button
+                      className="btn-nav-arrow"
+                      onClick={() => { if (explanationIndex < explanations.length - 1) { triggerHaptic(); setExplanationIndex(i => i + 1); } }}
+                      disabled={explanationIndex === explanations.length - 1}
+                      style={{ opacity: explanationIndex === explanations.length - 1 ? 0.3 : 1 }}
+                    >
+                      →
+                    </button>
+                  </div>
+                </footer>
+              </div>
+            )
+          }
 
           {/* PHASE 4: RELISTEN */}
           {
@@ -3141,6 +3390,7 @@ function App() {
                       className="btn-outline"
                       style={{ flex: 1 }}
                       onClick={() => {
+                        triggerHaptic();
                         setShowExitModal(false);
                         if (audioRef.current && !audioCompleted) {
                           audioRef.current.play().then(() => {
@@ -3159,6 +3409,7 @@ function App() {
                         boxShadow: "0 4px 0 var(--red-dark)",
                       }}
                       onClick={() => {
+                        triggerHaptic();
                         setShowExitModal(false);
                         backToLessons();
                       }}
@@ -3172,13 +3423,15 @@ function App() {
           }
 
           {/* Global Transition Overlay */}
-          {transitioning && (
-            <div className="transition-overlay">
-              <div className="transition-card">
-                <Leapfrog size="40" speed="2.5" color="#8b5cf6" />
+          {
+            transitioning && (
+              <div className="transition-overlay">
+                <div className="transition-card">
+                  <Leapfrog size="40" speed="2.5" color="#8b5cf6" />
+                </div>
               </div>
-            </div>
-          )}
+            )
+          }
         </main >
       </div >
     );
@@ -3187,109 +3440,152 @@ function App() {
   // ---------- MAIN SCREEN: STAGES + LESSONS ----------
 
   return (
-    <div className={`app-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
-      <main className="app-main" style={{ marginTop: 0, paddingTop: '1rem' }}>
-        <div className="page-layout">
-          <section
-            className="page-card"
-            style={{
-              background: "transparent",
-              border: "none",
-              boxShadow: "none",
-              padding: 0,
-            }}
+    <div className={`explorer-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+      {/* Aged paper texture overlay */}
+      <div className="texture-overlay" />
+
+      {/* Explorer Header */}
+      <header className="explorer-region-header">
+        <div className="explorer-region-header-content">
+          <button
+            className="explorer-back-btn"
+            onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); }}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-              <button
-                className="btn-back-text"
-                onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); }}
-              >
-                <MdArrowBackIosNew />
-              </button>
-              <h1 className="page-title" style={{ fontSize: "1.5rem", fontFamily: "'Amiri', serif", direction: "rtl", margin: 0 }}>
-                📚 المراحل
-              </h1>
+            <Icon icon="solar:arrow-left-linear" className="explorer-back-icon" />
+          </button>
+          <div className="explorer-region-title-wrap">
+            <h1 className="explorer-region-title">📚 المراحل</h1>
+            <p className="explorer-region-subtitle">Book Lessons</p>
+          </div>
+        </div>
+
+        {/* Progress bar */}
+        {allLessons.length > 0 && (
+          <div className="explorer-progress-wrap">
+            <div className="explorer-progress-bar">
+              <div
+                className="explorer-progress-fill"
+                style={{ width: `${(lessonProgress.filter(p => p.hearts_left > 0).length / Math.max(allLessons.length, 1)) * 100}%` }}
+              />
             </div>
+            <span className="explorer-progress-text">
+              {lessonProgress.filter(p => p.hearts_left > 0).length}/{allLessons.length} lessons completed
+            </span>
+          </div>
+        )}
+      </header>
 
-            {loadingStages ? (
-              <p className="muted">Loading…</p>
-            ) : stages.length === 0 ? (
-              <p className="muted">No stages found.</p>
-            ) : (
-              <div className="stage-list">
-                {stages.map((stage) => {
-                  const { completed, total, percent } = getStageProgress(stage.id);
-                  const isSelected = selectedStage === stage.id;
+      {/* Main Content */}
+      <main className="explorer-region-main">
+        <div className="explorer-region-content">
+          {loadingStages ? (
+            <div className="explorer-loading">
+              <Leapfrog size="40" speed="2.5" color="var(--primary)" />
+              <p>Loading stages...</p>
+            </div>
+          ) : stages.length === 0 ? (
+            <div className="explorer-empty">
+              <Icon icon="solar:map-point-wave-bold" className="explorer-empty-icon" />
+              <p>No stages found</p>
+            </div>
+          ) : (
+            <div className="explorer-stages">
+              {stages.map((stage, index) => {
+                const { completed, total, percent } = getStageProgress(stage.id);
+                const isSelected = selectedStage === stage.id;
+                const isCompleted = percent === 100;
+                const isLocked = index > 0 && getStageProgress(stages[index - 1].id).percent < 50;
 
-                  return (
-                    <div key={stage.id} style={{ marginBottom: "1rem" }}>
-                      <button
-                        onClick={() => { triggerHaptic(); loadLessons(stage.id); }}
-                        className="stage-card"
-                        style={{
-                          width: "100%",
-                          marginBottom: 0,
-                          borderColor: isSelected ? "var(--blue)" : "var(--gray-200)",
-                          background: "var(--white)",
-                        }}
-                      >
-                        <div className="stage-card-top">
-                          <div>
-                            <div className="stage-name">{stage.name || "Stage"}</div>
-                            <div className="stage-description">{stage.description}</div>
-                          </div>
-                          {total > 0 && (
-                            <span className="stage-progress-text">
-                              {completed}/{total} lessons • {percent}%
-                            </span>
-                          )}
-                        </div>
+                return (
+                  <div key={stage.id} className="explorer-stage-wrap">
+                    {/* Stage Card */}
+                    <button
+                      onClick={() => { if (!isLocked) { triggerHaptic(); loadLessons(stage.id); } }}
+                      className={`explorer-stage-card ${isSelected ? 'selected' : ''} ${isCompleted ? 'completed' : ''} ${isLocked ? 'locked' : ''}`}
+                      disabled={isLocked}
+                    >
+                      <div className="explorer-stage-icon-wrap">
+                        {isCompleted ? (
+                          <Icon icon="solar:check-circle-bold" className="explorer-stage-icon completed" />
+                        ) : isLocked ? (
+                          <Icon icon="solar:lock-keyhole-bold" className="explorer-stage-icon locked" />
+                        ) : isSelected ? (
+                          <Icon icon="solar:compass-bold" className="explorer-stage-icon active" />
+                        ) : (
+                          <Icon icon="solar:map-point-bold" className="explorer-stage-icon" />
+                        )}
+                      </div>
+                      <div className="explorer-stage-info">
+                        <h3 className="explorer-stage-name">{stage.name || "Stage"}</h3>
+                        <p className="explorer-stage-desc">{stage.description}</p>
                         {total > 0 && (
-                          <div className="stage-progress-bar">
-                            <div className="stage-progress-fill" style={{ width: `${percent}%` }} />
+                          <div className="explorer-stage-progress">
+                            <div className="explorer-stage-progress-bar">
+                              <div className="explorer-stage-progress-fill" style={{ width: `${percent}%` }} />
+                            </div>
+                            <span className="explorer-stage-progress-text">{completed}/{total}</span>
                           </div>
                         )}
-                      </button>
-
-                      {isSelected && (
-                        <div className="lesson-container-inline">
-                          {loadingLessons ? (
-                            <p className="muted" style={{ textAlign: "center" }}>
-                              Loading lessons…
-                            </p>
-                          ) : lessons.length === 0 ? (
-                            <p className="muted" style={{ textAlign: "center" }}>
-                              No lessons found.
-                            </p>
-                          ) : (
-                            <ul className="lesson-list">
-                              {lessons.map((lesson) => {
-                                const completed = isLessonCompleted(lesson.id);
-                                return (
-                                  <li key={lesson.id}>
-                                    <button
-                                      onClick={() => openLesson(lesson)}
-                                      className="lesson-row"
-                                    >
-                                      <div className={`lesson-progress-donut ${completed ? "completed" : ""}`} />
-                                      <div className="lesson-row-content">
-                                        <div className="lesson-row-title">{lesson.title}</div>
-                                        <div className="lesson-row-desc">{lesson.description}</div>
-                                      </div>
-                                    </button>
-                                  </li>
-                                );
-                              })}
-                            </ul>
-                          )}
+                      </div>
+                      {!isLocked && (
+                        <div className="explorer-stage-arrow">
+                          <Icon icon="solar:alt-arrow-down-linear" className={isSelected ? 'rotated' : ''} />
                         </div>
                       )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
+                    </button>
+
+                    {/* Lessons List */}
+                    {isSelected && (
+                      <div className="explorer-lessons-wrap">
+                        {loadingLessons ? (
+                          <div className="explorer-lessons-loading">
+                            <Leapfrog size="30" speed="2.5" color="var(--primary)" />
+                          </div>
+                        ) : lessons.length === 0 ? (
+                          <p className="explorer-lessons-empty">No lessons found</p>
+                        ) : (
+                          <div className="explorer-lessons-list">
+                            {lessons.map((lesson, lessonIndex) => {
+                              const lessonCompleted = isLessonCompleted(lesson.id);
+                              const isActive = lessonIndex === 0 || isLessonCompleted(lessons[lessonIndex - 1]?.id);
+
+                              return (
+                                <button
+                                  key={lesson.id}
+                                  onClick={() => { if (isActive) { triggerHaptic(); openLesson(lesson); } }}
+                                  className={`explorer-lesson-card ${lessonCompleted ? 'completed' : ''} ${!isActive ? 'locked' : ''}`}
+                                  disabled={!isActive}
+                                >
+                                  <div className="explorer-lesson-status">
+                                    {lessonCompleted ? (
+                                      <Icon icon="solar:check-circle-bold" className="explorer-lesson-check" />
+                                    ) : !isActive ? (
+                                      <Icon icon="solar:lock-keyhole-bold" className="explorer-lesson-lock" />
+                                    ) : (
+                                      <div className="explorer-lesson-dot" />
+                                    )}
+                                  </div>
+                                  <div className="explorer-lesson-info">
+                                    <h4 className="explorer-lesson-title">{lesson.title}</h4>
+                                    <p className="explorer-lesson-desc">{lesson.description}</p>
+                                  </div>
+                                  {isActive && !lessonCompleted && (
+                                    <div className="explorer-lesson-play">
+                                      <Icon icon="solar:play-bold" />
+                                    </div>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </main>
 
@@ -3297,7 +3593,7 @@ function App() {
       {transitioning && (
         <div className="transition-overlay">
           <div className="transition-card">
-            <Leapfrog size="40" speed="2.5" color="#8b5cf6" />
+            <Leapfrog size="40" speed="2.5" color="var(--primary)" />
           </div>
         </div>
       )}
