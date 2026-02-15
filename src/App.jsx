@@ -307,6 +307,30 @@ function App() {
   const [speakingLessonComplete, setSpeakingLessonComplete] = useState(false);
   const [speakingLessonProgress, setSpeakingLessonProgress] = useState([]); // [{speaking_lesson_id}, ...]
 
+  // ✅ WORD OF THE DAY STATE
+  const [wotdPhase, setWotdPhase] = useState("intro"); // "intro" | "word" | "examples" | "complete"
+  const [currentWotd, setCurrentWotd] = useState(null);
+  const [wotdExamples, setWotdExamples] = useState([]);
+  const [wotdExampleIndex, setWotdExampleIndex] = useState(0);
+  const [loadingWotd, setLoadingWotd] = useState(false);
+
+  // ✅ PICTURE DESCRIBE STATE
+  const [pictureDescribeLessons, setPictureDescribeLessons] = useState([]);
+  const [loadingPictureLessons, setLoadingPictureLessons] = useState(false);
+  const [activePictureLesson, setActivePictureLesson] = useState(null);
+  const [pictureVocab, setPictureVocab] = useState([]);
+  const [pictureVocabIndex, setPictureVocabIndex] = useState(0);
+  const [picturePhase, setPicturePhase] = useState("lessons");
+  // Phases: "lessons" | "vocab" | "picture" | "recording" | "success" | "retry" | "solution"
+  const [pictureTranscript, setPictureTranscript] = useState("");
+  const [pictureMatchPercent, setPictureMatchPercent] = useState(0);
+  const [pictureMatchedWords, setPictureMatchedWords] = useState([]);
+  const [pictureMissedWords, setPictureMissedWords] = useState([]);
+  const [showPictureHint, setShowPictureHint] = useState(false);
+  const [pictureRecording, setPictureRecording] = useState(false);
+  const [pictureCheckingAnswer, setPictureCheckingAnswer] = useState(false);
+  const pictureAudioRef = useRef(null);
+
   // ---------- TRANSITION HELPER ----------
 
   function beginTransition(minMs = 250) {
@@ -925,6 +949,284 @@ function App() {
     setTransitionDirection("back");
     resetSpeakingFlow();
     endTransition();
+  }
+
+  // ---------- WORD OF THE DAY FUNCTIONS ----------
+
+  async function loadWordOfTheDay() {
+    setLoadingWotd(true);
+    setWotdPhase("intro");
+    setWotdExampleIndex(0);
+
+    try {
+      // Calculate which word to show based on days since start date
+      const startDate = new Date('2026-02-05T00:00:00Z');
+      const today = new Date();
+      const daysDiff = Math.floor((today - startDate) / (1000 * 60 * 60 * 24));
+      const wordOrderIndex = (daysDiff % 100) + 1; // Cycles through 1-100
+
+      // Fetch today's word
+      const { data: wordData, error: wordError } = await supabase
+        .from("word_of_the_day")
+        .select("*")
+        .eq("order_index", wordOrderIndex)
+        .single();
+
+      if (wordError) {
+        console.error("Error loading word of the day:", wordError);
+        // Fallback to first word if not found
+        const { data: fallbackData } = await supabase
+          .from("word_of_the_day")
+          .select("*")
+          .order("order_index", { ascending: true })
+          .limit(1)
+          .single();
+
+        if (fallbackData) {
+          setCurrentWotd(fallbackData);
+          // Fetch examples for fallback word
+          const { data: examplesData } = await supabase
+            .from("word_of_the_day_examples")
+            .select("*")
+            .eq("word_id", fallbackData.id)
+            .order("order_index", { ascending: true });
+          setWotdExamples(examplesData || []);
+        }
+      } else {
+        setCurrentWotd(wordData);
+        // Fetch examples for this word
+        const { data: examplesData } = await supabase
+          .from("word_of_the_day_examples")
+          .select("*")
+          .eq("word_id", wordData.id)
+          .order("order_index", { ascending: true });
+        setWotdExamples(examplesData || []);
+      }
+    } catch (err) {
+      console.error("Error in loadWordOfTheDay:", err);
+    }
+
+    setLoadingWotd(false);
+  }
+
+  function resetWotdFlow() {
+    setWotdPhase("intro");
+    setCurrentWotd(null);
+    setWotdExamples([]);
+    setWotdExampleIndex(0);
+    setLoadingWotd(false);
+  }
+
+  // ---------- PICTURE DESCRIBE FUNCTIONS ----------
+
+  async function loadPictureDescribeLessons() {
+    setLoadingPictureLessons(true);
+    try {
+      const { data, error } = await supabase
+        .from("picture_describe_lessons")
+        .select("*")
+        .order("order_index", { ascending: true });
+
+      if (error) {
+        console.error("Error loading picture describe lessons:", error);
+      } else {
+        setPictureDescribeLessons(data || []);
+      }
+    } catch (err) {
+      console.error("Error in loadPictureDescribeLessons:", err);
+    }
+    setLoadingPictureLessons(false);
+  }
+
+  async function openPictureDescribeLesson(lesson) {
+    setActivePictureLesson(lesson);
+    setPicturePhase("vocab");
+    setPictureVocabIndex(0);
+    setPictureTranscript("");
+    setPictureMatchPercent(0);
+    setPictureMatchedWords([]);
+    setPictureMissedWords([]);
+    setShowPictureHint(false);
+
+    // Load vocab for this lesson
+    try {
+      const { data, error } = await supabase
+        .from("picture_describe_vocab")
+        .select("*")
+        .eq("lesson_id", lesson.id)
+        .order("order_index", { ascending: true });
+
+      if (error) {
+        console.error("Error loading picture vocab:", error);
+        setPictureVocab([]);
+      } else {
+        setPictureVocab(data || []);
+      }
+    } catch (err) {
+      console.error("Error in openPictureDescribeLesson:", err);
+      setPictureVocab([]);
+    }
+  }
+
+  // Calculate vocab match percentage
+  function calculateVocabMatch(transcript) {
+    const normalizedTranscript = normalizeArabic(transcript);
+
+    let matchCount = 0;
+    const matched = [];
+    const missed = [];
+
+    pictureVocab.forEach(item => {
+      const normalizedWord = normalizeArabic(item.arabic);
+      // Check if the word appears in transcript (partial match for compound words)
+      const words = normalizedWord.split(/\s+/);
+      const isMatch = words.some(w => normalizedTranscript.includes(w)) ||
+        normalizedTranscript.includes(normalizedWord);
+
+      if (isMatch) {
+        matchCount++;
+        matched.push(item);
+      } else {
+        missed.push(item);
+      }
+    });
+
+    const percent = pictureVocab.length > 0
+      ? Math.round((matchCount / pictureVocab.length) * 100)
+      : 0;
+
+    return { percent, matched, missed };
+  }
+
+  // Start recording for picture describe
+  const startPictureRecording = async () => {
+    try {
+      setSpeechError("");
+      audioChunksRef.current = [];
+      setPictureRecording(true);
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'audio/webm;codecs=opus',
+      });
+
+      mediaRecorderRef.current = mediaRecorder;
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        // Stop all tracks to release the microphone
+        stream.getTracks().forEach(track => track.stop());
+
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm;codecs=opus' });
+
+        // Convert blob to base64
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          const base64String = reader.result;
+          const base64Audio = base64String.split(',')[1];
+
+          // Send to backend for transcription
+          await processPictureAudio(base64Audio);
+        };
+        reader.readAsDataURL(audioBlob);
+      };
+
+      mediaRecorder.start();
+      console.log('Picture describe recording started');
+    } catch (err) {
+      console.error("Start picture recording error:", err);
+      setSpeechError("Failed to start recording: " + (err.message || err));
+      setPictureRecording(false);
+    }
+  };
+
+  const stopPictureRecording = async () => {
+    try {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+        setPictureRecording(false);
+        setPictureCheckingAnswer(true);
+        console.log('Picture describe recording stopped');
+      }
+    } catch (e) {
+      console.error('Failed to stop picture recording:', e);
+      setSpeechError('Failed to stop recording: ' + (e.message || e));
+      setPictureRecording(false);
+    }
+  };
+
+  // Process audio and check against vocab
+  const processPictureAudio = async (audioBase64) => {
+    try {
+      // Call the speech-check edge function (just for transcription)
+      const { data, error } = await supabase.functions.invoke(
+        "speech-check",
+        {
+          body: {
+            audioBase64: audioBase64,
+            expectedText: "" // We just want transcription
+          }
+        }
+      );
+
+      if (error) {
+        console.error("Picture speech check error:", error);
+        setSpeechError("Failed to process audio: " + error.message);
+        setPictureCheckingAnswer(false);
+        return;
+      }
+
+      const parsed = typeof data === "string" ? JSON.parse(data) : data;
+      const transcript = parsed?.transcript || "";
+
+      console.log("Picture describe transcript:", transcript);
+      setPictureTranscript(transcript);
+
+      // Calculate match percentage
+      const { percent, matched, missed } = calculateVocabMatch(transcript);
+      setPictureMatchPercent(percent);
+      setPictureMatchedWords(matched);
+      setPictureMissedWords(missed);
+
+      // Check if passed (use lesson threshold or default 70%)
+      const threshold = activePictureLesson?.pass_threshold || 70;
+
+      if (percent >= threshold) {
+        playCelebrationSound();
+        triggerHeavyHaptic();
+        setPicturePhase("success");
+      } else {
+        playSpeakingIncorrectSound();
+        triggerHaptic();
+        setPicturePhase("retry");
+      }
+
+      setPictureCheckingAnswer(false);
+    } catch (err) {
+      console.error("Error processing picture audio:", err);
+      setSpeechError("Error processing audio");
+      setPictureCheckingAnswer(false);
+    }
+  };
+
+  function resetPictureDescribeFlow() {
+    setPicturePhase("lessons");
+    setActivePictureLesson(null);
+    setPictureVocab([]);
+    setPictureVocabIndex(0);
+    setPictureTranscript("");
+    setPictureMatchPercent(0);
+    setPictureMatchedWords([]);
+    setPictureMissedWords([]);
+    setShowPictureHint(false);
+    setPictureRecording(false);
+    setPictureCheckingAnswer(false);
   }
 
   // ---------- LOAD PROGRESS WHEN USER CHANGES ----------
@@ -1866,6 +2168,24 @@ function App() {
                   <Icon icon="solar:arrow-right-linear" />
                 </div>
               </button>
+
+              {/* Word of the Day Card */}
+              <button
+                className="explorer-quest-card wotd-card"
+                onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("wotd"); loadWordOfTheDay(); }}
+              >
+                <div className="explorer-quest-icon-wrap wotd">
+                  <Icon icon="solar:sun-bold" className="explorer-quest-icon" />
+                </div>
+                <div className="explorer-quest-info">
+                  <h3 className="explorer-quest-name">Word of the Day</h3>
+                  <p className="explorer-quest-desc">كلمة اليوم</p>
+                  <p className="explorer-quest-detail">Learn a new phrase daily</p>
+                </div>
+                <div className="explorer-quest-arrow">
+                  <Icon icon="solar:arrow-right-linear" />
+                </div>
+              </button>
             </div>
 
             {/* Decorative compass */}
@@ -2199,6 +2519,673 @@ function App() {
     );
   }
 
+  // ---------- WORD OF THE DAY SCREEN ----------
+
+  if (practiceMode === "wotd") {
+    // Loading state
+    if (loadingWotd) {
+      return (
+        <div className="explorer-shell">
+          <div className="texture-overlay" />
+          <main className="explorer-main" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+            <div className="explorer-loading">
+              <Leapfrog size="50" speed="2.5" color="var(--secondary)" />
+              <p>Loading today's word...</p>
+            </div>
+          </main>
+        </div>
+      );
+    }
+
+    // No word found
+    if (!currentWotd) {
+      return (
+        <div className="explorer-shell">
+          <div className="texture-overlay" />
+          <main className="explorer-main" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', textAlign: 'center', padding: '2rem' }}>
+            <Icon icon="solar:sad-circle-bold" style={{ fontSize: '4rem', color: 'var(--muted-foreground)', marginBottom: '1rem' }} />
+            <h2 style={{ marginBottom: '0.5rem' }}>No Word Available</h2>
+            <p style={{ color: 'var(--muted-foreground)', marginBottom: '2rem' }}>Check back soon for today's phrase!</p>
+            <button
+              className="btn-primary"
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); resetWotdFlow(); }}
+            >
+              Return Home
+            </button>
+          </main>
+        </div>
+      );
+    }
+
+    // PHASE: INTRO
+    if (wotdPhase === "intro") {
+      return (
+        <div className={`wotd-intro-screen ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+          {/* Back button */}
+          <button
+            className="wotd-back-btn"
+            onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); resetWotdFlow(); }}
+          >
+            <MdArrowBackIosNew />
+          </button>
+
+          <div className="wotd-intro-content">
+            <div className="wotd-intro-icon-wrap">
+              <Icon icon="solar:sun-bold" className="wotd-intro-icon" />
+            </div>
+            <h1 className="wotd-intro-title">Word of the Day</h1>
+            <p className="wotd-intro-subtitle">Let's take a look at today's phrase</p>
+          </div>
+
+          <button
+            className="wotd-intro-btn"
+            onClick={() => { triggerHaptic(); setWotdPhase("word"); }}
+          >
+            Let's Go!
+          </button>
+        </div>
+      );
+    }
+
+    // PHASE: WORD DISPLAY
+    if (wotdPhase === "word") {
+      return (
+        <div className="no-scroll-container swipe-in">
+          {/* Header with back arrow */}
+          <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
+            <span
+              style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+              onClick={() => { triggerHaptic(); setWotdPhase("intro"); }}
+            >
+              <MdArrowBackIosNew />
+            </span>
+            <div className="lesson-title-badge" style={{ background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' }}>
+              Today's Word
+            </div>
+          </header>
+
+          <div className="carousel-content-area swipe-in">
+            <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>:عربي</div>
+            <div className="vocab-card wotd-arabic-card" style={{ direction: "rtl" }}>
+              <span className="explorer-card-corner top-left"></span>
+              <span className="explorer-card-corner top-right"></span>
+              <span className="explorer-card-corner bottom-left"></span>
+              <span className="explorer-card-corner bottom-right"></span>
+              <div className="vocab-text-main" style={{ fontSize: '2.2rem' }}>
+                {currentWotd.arabic_text}
+              </div>
+            </div>
+
+            <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
+            <div className="vocab-card">
+              <span className="explorer-card-corner top-left"></span>
+              <span className="explorer-card-corner top-right"></span>
+              <span className="explorer-card-corner bottom-left"></span>
+              <span className="explorer-card-corner bottom-right"></span>
+              <div className="vocab-text-main">{currentWotd.english_text}</div>
+            </div>
+          </div>
+
+          <footer className="sticky-footer">
+            <button
+              className="btn-primary"
+              style={{ width: '100%' }}
+              onClick={() => {
+                triggerHaptic();
+                if (wotdExamples.length > 0) {
+                  setWotdPhase("examples");
+                } else {
+                  playCelebrationSound();
+                  triggerHeavyHaptic();
+                  setWotdPhase("complete");
+                }
+              }}
+            >
+              {wotdExamples.length > 0 ? "See Examples" : "Continue"}
+            </button>
+          </footer>
+        </div>
+      );
+    }
+
+    // PHASE: EXAMPLES
+    if (wotdPhase === "examples" && wotdExamples.length > 0) {
+      const currentExample = wotdExamples[wotdExampleIndex];
+
+      return (
+        <div className="no-scroll-container">
+          {/* Header with back arrow and title */}
+          <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
+            <span
+              style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+              onClick={() => { triggerHaptic(); setWotdPhase("word"); }}
+            >
+              <MdArrowBackIosNew />
+            </span>
+            <div className="lesson-title-badge" style={{ background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' }}>
+              Example {wotdExampleIndex + 1}/{wotdExamples.length}
+            </div>
+          </header>
+
+          <div key={wotdExampleIndex} className="carousel-content-area swipe-in">
+            <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>:عربي</div>
+            <div className="arabic-box spotlight-arabic" dir="rtl" style={{ fontSize: '1.8rem' }}>
+              {currentExample.example_arabic}
+            </div>
+
+            <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
+            <div className="explanation-bubble" style={{ borderLeft: '5px solid var(--yellow)', background: '#fffbeb' }}>
+              {currentExample.example_english}
+            </div>
+
+            {currentExample.notes && (
+              <>
+                <div className="vocab-label" style={{ marginBottom: '0.25rem', color: 'var(--muted-foreground)' }}>Note:</div>
+                <div className="explanation-bubble" style={{ borderLeft: '5px solid var(--gray-300)', background: 'var(--gray-50)', fontSize: '0.95rem', color: 'var(--muted-foreground)' }}>
+                  {currentExample.notes}
+                </div>
+              </>
+            )}
+          </div>
+
+          <footer className="sticky-footer">
+            <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+              <button
+                className="btn-nav-arrow"
+                onClick={() => { if (wotdExampleIndex > 0) { triggerHaptic(); setWotdExampleIndex(i => i - 1); } }}
+                disabled={wotdExampleIndex === 0}
+                style={{ opacity: wotdExampleIndex === 0 ? 0.3 : 1 }}
+              >
+                <MdArrowBackIosNew />
+              </button>
+              <button
+                className="btn-primary"
+                style={{ flex: 1 }}
+                onClick={() => {
+                  triggerHaptic();
+                  if (wotdExampleIndex === wotdExamples.length - 1) {
+                    playCelebrationSound();
+                    triggerHeavyHaptic();
+                    setWotdPhase("complete");
+                  } else {
+                    setWotdExampleIndex(i => i + 1);
+                  }
+                }}
+              >
+                {wotdExampleIndex === wotdExamples.length - 1 ? "FINISH" : "CONTINUE"}
+              </button>
+              <button
+                className="btn-nav-arrow"
+                onClick={() => { if (wotdExampleIndex < wotdExamples.length - 1) { triggerHaptic(); setWotdExampleIndex(i => i + 1); } }}
+                disabled={wotdExampleIndex === wotdExamples.length - 1}
+                style={{ opacity: wotdExampleIndex === wotdExamples.length - 1 ? 0.3 : 1 }}
+              >
+                →
+              </button>
+            </div>
+          </footer>
+        </div>
+      );
+    }
+
+    // PHASE: COMPLETE
+    if (wotdPhase === "complete") {
+      const handleShare = async () => {
+        triggerHaptic();
+        const shareData = {
+          title: 'Word of the Day',
+          text: `Today I learned: "${currentWotd.arabic_text}" means "${currentWotd.english_text}" 🌟`,
+          url: 'https://clemencyhouse.com'
+        };
+
+        try {
+          if (navigator.share) {
+            await navigator.share(shareData);
+          } else {
+            // Fallback: copy to clipboard
+            await navigator.clipboard.writeText(shareData.text);
+            alert('Copied to clipboard!');
+          }
+        } catch (err) {
+          console.log('Share failed:', err);
+        }
+      };
+
+      return (
+        <div className="wotd-complete-screen">
+          <div className="wotd-complete-lottie">
+            <DotLottieReact
+              src="/animations/done.lottie"
+              loop
+              autoplay
+              style={{ width: '200px', height: '200px' }}
+            />
+          </div>
+
+          <h1 className="wotd-complete-title">Well Done!</h1>
+          <p className="wotd-complete-subtitle">Check in tomorrow for a new phrase</p>
+
+          <div className="wotd-complete-word-preview">
+            <span className="wotd-preview-arabic">{currentWotd.arabic_text}</span>
+            <span className="wotd-preview-divider">•</span>
+            <span className="wotd-preview-english">{currentWotd.english_text}</span>
+          </div>
+
+          <div className="wotd-complete-buttons">
+            <button className="btn-wotd-share" onClick={handleShare}>
+              <Icon icon="solar:share-bold" style={{ marginRight: '0.5rem' }} />
+              Share
+            </button>
+            <button
+              className="btn-wotd-home"
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); resetWotdFlow(); }}
+            >
+              Return Home
+            </button>
+          </div>
+        </div>
+      );
+    }
+  }
+
+  // ---------- PICTURE DESCRIBE SCREEN ----------
+
+  if (practiceMode === "picture-describe") {
+    // Loading state
+    if (loadingPictureLessons) {
+      return (
+        <div className="explorer-shell">
+          <div className="texture-overlay" />
+          <main className="explorer-main" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+            <div className="explorer-loading">
+              <Leapfrog size="50" speed="2.5" color="var(--yellow)" />
+              <p>Loading lessons...</p>
+            </div>
+          </main>
+        </div>
+      );
+    }
+
+    // PHASE: LESSONS LIST
+    if (picturePhase === "lessons") {
+      return (
+        <div className={`explorer-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+          <div className="texture-overlay" />
+
+          {/* Header */}
+          <header className="explorer-region-header">
+            <div className="explorer-region-header-content">
+              <button
+                className="explorer-back-btn"
+                onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode("speaking"); resetPictureDescribeFlow(); }}
+              >
+                <Icon icon="solar:arrow-left-linear" className="explorer-back-icon" />
+              </button>
+              <div className="explorer-region-title-wrap">
+                <h1 className="explorer-region-title">🖼️ وصف الصورة</h1>
+                <p className="explorer-region-subtitle" style={{ color: 'var(--yellow-dark)' }}>Describe the Picture</p>
+              </div>
+            </div>
+          </header>
+
+          {/* Lessons Grid */}
+          <main className="explorer-region-main">
+            <div className="explorer-blur" style={{ top: '2rem', right: '-3rem', background: 'var(--yellow)', opacity: 0.15 }} />
+            <div className="explorer-blur explorer-blur-2" />
+
+            <div className="explorer-region-content">
+              {pictureDescribeLessons.length === 0 ? (
+                <div className="explorer-empty">
+                  <Icon icon="solar:gallery-bold" className="explorer-empty-icon" />
+                  <p>No picture lessons found</p>
+                </div>
+              ) : (
+                <div className="picture-lessons-grid">
+                  {pictureDescribeLessons.map((lesson) => (
+                    <button
+                      key={lesson.id}
+                      className="picture-lesson-card"
+                      onClick={() => { triggerHaptic(); openPictureDescribeLesson(lesson); }}
+                    >
+                      <div className="picture-lesson-image">
+                        <img src={lesson.image_url} alt={lesson.title} />
+                      </div>
+                      <div className="picture-lesson-info">
+                        <h3 className="picture-lesson-title">{lesson.title}</h3>
+                        <p className="picture-lesson-title-ar">{lesson.title_ar}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </main>
+        </div>
+      );
+    }
+
+    // PHASE: VOCAB CAROUSEL
+    if (picturePhase === "vocab" && activePictureLesson) {
+      return (
+        <div className="no-scroll-container swipe-in">
+          <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
+            <span
+              style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+              onClick={() => { triggerHaptic(); setPicturePhase("lessons"); setActivePictureLesson(null); }}
+            >
+              <MdArrowBackIosNew />
+            </span>
+            <div className="lesson-title-badge" style={{ background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' }}>
+              {activePictureLesson.title}
+            </div>
+          </header>
+
+          {pictureVocab.length === 0 ? (
+            <div className="center-content">
+              <p className="muted">No vocabulary added yet for this lesson.</p>
+              <button
+                className="btn-primary"
+                onClick={() => { triggerHaptic(); setPicturePhase("picture"); }}
+              >
+                Continue to Picture
+              </button>
+            </div>
+          ) : (
+            <>
+              <div key={pictureVocabIndex} className="carousel-content-area swipe-in">
+                <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>:عربي</div>
+                <div className="vocab-card" style={{ direction: "rtl", borderColor: '#f59e0b' }}>
+                  <span className="explorer-card-corner top-left"></span>
+                  <span className="explorer-card-corner top-right"></span>
+                  <span className="explorer-card-corner bottom-left"></span>
+                  <span className="explorer-card-corner bottom-right"></span>
+                  <div className="vocab-text-main">
+                    {pictureVocab[pictureVocabIndex].arabic}
+                    {pictureVocab[pictureVocabIndex].note && (
+                      <span style={{ display: "block", fontSize: "0.9rem", marginTop: "0.5rem", color: "var(--muted-foreground)" }}>
+                        [{pictureVocab[pictureVocabIndex].note}]
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
+                <div className="vocab-card">
+                  <span className="explorer-card-corner top-left"></span>
+                  <span className="explorer-card-corner top-right"></span>
+                  <span className="explorer-card-corner bottom-left"></span>
+                  <span className="explorer-card-corner bottom-right"></span>
+                  <div className="vocab-text-main">{pictureVocab[pictureVocabIndex].english}</div>
+                </div>
+              </div>
+
+              <footer className="sticky-footer">
+                <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+                  <button
+                    className="btn-nav-arrow"
+                    onClick={() => { if (pictureVocabIndex > 0) { triggerHaptic(); setPictureVocabIndex(i => i - 1); } }}
+                    disabled={pictureVocabIndex === 0}
+                    style={{ opacity: pictureVocabIndex === 0 ? 0.3 : 1 }}
+                  >
+                    <MdArrowBackIosNew />
+                  </button>
+                  <button
+                    className="btn-primary"
+                    style={{ flex: 1, background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' }}
+                    onClick={() => {
+                      triggerHaptic();
+                      if (pictureVocabIndex === pictureVocab.length - 1) {
+                        setPicturePhase("picture");
+                      } else {
+                        setPictureVocabIndex(i => i + 1);
+                      }
+                    }}
+                  >
+                    {pictureVocabIndex === pictureVocab.length - 1 ? "VIEW PICTURE" : "CONTINUE"}
+                  </button>
+                  <button
+                    className="btn-nav-arrow"
+                    onClick={() => { if (pictureVocabIndex < pictureVocab.length - 1) { triggerHaptic(); setPictureVocabIndex(i => i + 1); } }}
+                    disabled={pictureVocabIndex === pictureVocab.length - 1}
+                    style={{ opacity: pictureVocabIndex === pictureVocab.length - 1 ? 0.3 : 1 }}
+                  >
+                    →
+                  </button>
+                </div>
+              </footer>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    // PHASE: PICTURE + MIC
+    if (picturePhase === "picture" && activePictureLesson) {
+      return (
+        <div className="picture-describe-screen">
+          {/* Header */}
+          <header className="picture-describe-header">
+            <button
+              className="picture-back-btn"
+              onClick={() => { triggerHaptic(); setPicturePhase("vocab"); setPictureVocabIndex(0); }}
+            >
+              <MdArrowBackIosNew />
+            </button>
+            <h2 className="picture-describe-title">{activePictureLesson.title}</h2>
+            <button
+              className="picture-hint-btn"
+              onClick={() => { triggerHaptic(); setShowPictureHint(!showPictureHint); }}
+            >
+              <Icon icon="solar:lightbulb-bolt-bold" />
+            </button>
+          </header>
+
+          {/* Picture */}
+          <div className="picture-display-container">
+            <img
+              src={activePictureLesson.image_url}
+              alt={activePictureLesson.title}
+              className="picture-display-image"
+            />
+          </div>
+
+          {/* Instruction */}
+          <p className="picture-instruction">
+            {pictureRecording ? "Keep talking... describe what you see!" : "Tap the microphone and describe the picture in Arabic"}
+          </p>
+
+          {/* Mic Button */}
+          <div className="picture-mic-container">
+            {pictureCheckingAnswer ? (
+              <div className="picture-checking">
+                <Leapfrog size="40" speed="2.5" color="#f59e0b" />
+                <p>Checking your answer...</p>
+              </div>
+            ) : (
+              <button
+                className={`picture-mic-btn ${pictureRecording ? 'recording' : ''}`}
+                onClick={() => {
+                  triggerHaptic();
+                  if (pictureRecording) {
+                    stopPictureRecording();
+                  } else {
+                    startPictureRecording();
+                  }
+                }}
+              >
+                <Icon icon={pictureRecording ? "solar:stop-bold" : "solar:microphone-3-bold"} />
+              </button>
+            )}
+          </div>
+
+          {/* Hint Overlay */}
+          {showPictureHint && (
+            <div className="picture-hint-overlay" onClick={() => setShowPictureHint(false)}>
+              <div className="picture-hint-modal" onClick={(e) => e.stopPropagation()}>
+                <h3>💡 Vocabulary Hint</h3>
+                <div className="picture-hint-list">
+                  {pictureVocab.map((item, idx) => (
+                    <div key={idx} className="picture-hint-item">
+                      <span className="hint-arabic">{item.arabic}</span>
+                      <span className="hint-divider">—</span>
+                      <span className="hint-english">{item.english}</span>
+                    </div>
+                  ))}
+                </div>
+                <button className="btn-primary" onClick={() => setShowPictureHint(false)}>
+                  Got it!
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // PHASE: SUCCESS
+    if (picturePhase === "success" && activePictureLesson) {
+      return (
+        <div className="picture-success-screen">
+          <div className="picture-success-lottie">
+            <DotLottieReact
+              src="/animations/done.lottie"
+              loop
+              autoplay
+              style={{ width: '180px', height: '180px' }}
+            />
+          </div>
+
+          <h1 className="picture-success-title">Well Done!</h1>
+          <p className="picture-success-subtitle">You used {pictureMatchPercent}% of the vocabulary</p>
+
+          <div className="picture-success-stats">
+            <div className="picture-stat">
+              <span className="picture-stat-value">{pictureMatchedWords.length}</span>
+              <span className="picture-stat-label">Words Used</span>
+            </div>
+            <div className="picture-stat-divider" />
+            <div className="picture-stat">
+              <span className="picture-stat-value">{pictureVocab.length}</span>
+              <span className="picture-stat-label">Total Words</span>
+            </div>
+          </div>
+
+          {activePictureLesson.model_audio_url && (
+            <div className="picture-model-audio">
+              <p className="model-audio-label">Listen to a model answer:</p>
+              <audio
+                ref={pictureAudioRef}
+                controls
+                src={activePictureLesson.model_audio_url}
+                className="model-audio-player"
+              />
+            </div>
+          )}
+
+          <button
+            className="btn-picture-home"
+            onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode("speaking"); resetPictureDescribeFlow(); }}
+          >
+            Return to Speaking Practice
+          </button>
+        </div>
+      );
+    }
+
+    // PHASE: RETRY
+    if (picturePhase === "retry" && activePictureLesson) {
+      return (
+        <div className="picture-retry-screen">
+          <div className="picture-retry-icon">
+            <Icon icon="solar:refresh-circle-bold" />
+          </div>
+
+          <h1 className="picture-retry-title">Almost There!</h1>
+          <p className="picture-retry-subtitle">You used {pictureMatchPercent}% of the vocabulary. Try to use more of these words:</p>
+
+          <div className="picture-retry-vocab">
+            {pictureMissedWords.map((item, idx) => (
+              <div key={idx} className="picture-retry-vocab-item">
+                <span className="retry-arabic">{item.arabic}</span>
+                <span className="retry-english">{item.english}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="picture-retry-buttons">
+            <button
+              className="btn-picture-retry"
+              onClick={() => {
+                triggerHaptic();
+                setPicturePhase("picture");
+                setPictureTranscript("");
+                setPictureMatchPercent(0);
+                setPictureMatchedWords([]);
+                setPictureMissedWords([]);
+              }}
+            >
+              <Icon icon="solar:refresh-bold" style={{ marginRight: '0.5rem' }} />
+              Try Again
+            </button>
+            <button
+              className="btn-picture-giveup"
+              onClick={() => { triggerHaptic(); setPicturePhase("solution"); }}
+            >
+              Give Up & Hear Answer
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // PHASE: SOLUTION
+    if (picturePhase === "solution" && activePictureLesson) {
+      return (
+        <div className="picture-solution-screen">
+          <div className="picture-solution-icon">
+            <Icon icon="solar:headphones-round-sound-bold" />
+          </div>
+
+          <h1 className="picture-solution-title">Model Answer</h1>
+          <p className="picture-solution-subtitle">Listen to how a native speaker describes this picture</p>
+
+          {activePictureLesson.model_audio_url ? (
+            <div className="picture-model-audio solution">
+              <audio
+                ref={pictureAudioRef}
+                controls
+                autoPlay
+                src={activePictureLesson.model_audio_url}
+                className="model-audio-player"
+              />
+            </div>
+          ) : (
+            <p className="picture-no-audio">No model audio available for this lesson.</p>
+          )}
+
+          <div className="picture-solution-vocab">
+            <h4>Vocabulary Used:</h4>
+            <div className="solution-vocab-list">
+              {pictureVocab.map((item, idx) => (
+                <div key={idx} className="solution-vocab-item">
+                  <span className="solution-arabic">{item.arabic}</span>
+                  <span className="solution-english">{item.english}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <button
+            className="btn-picture-home"
+            onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode("speaking"); resetPictureDescribeFlow(); }}
+          >
+            Return to Speaking Practice
+          </button>
+        </div>
+      );
+    }
+  }
+
   // ---------- SPEAKING MODES & LESSONS SCREEN ----------
 
   if (practiceMode === "speaking" && !activeSpeakingLesson) {
@@ -2242,6 +3229,31 @@ function App() {
               </div>
             ) : (
               <div className="explorer-stages">
+                {/* Describe the Picture - Special Mode */}
+                <div className="explorer-stage-wrap">
+                  <button
+                    onClick={() => { triggerHaptic(); setPracticeMode("picture-describe"); loadPictureDescribeLessons(); }}
+                    className="explorer-stage-card picture-describe-card"
+                    style={{ borderColor: 'var(--yellow)' }}
+                  >
+                    <div className="explorer-stage-icon-wrap" style={{ background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' }}>
+                      <Icon
+                        icon="solar:gallery-bold"
+                        className="explorer-stage-icon"
+                        style={{ color: 'white' }}
+                      />
+                    </div>
+                    <div className="explorer-stage-info">
+                      <h3 className="explorer-stage-name">Describe the Picture</h3>
+                      <p className="explorer-stage-desc">وصف الصورة</p>
+                    </div>
+                    <div className="explorer-stage-arrow">
+                      <Icon icon="solar:arrow-right-linear" />
+                    </div>
+                  </button>
+                </div>
+
+                {/* Database-driven speaking modes */}
                 {speakingModes.map((mode) => {
                   const isSelected = selectedSpeakingMode === mode.id;
 
