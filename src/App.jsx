@@ -30,49 +30,125 @@ const initStatusBar = async () => {
 // Call on app start
 initStatusBar();
 
-// Synthesized click sound using Web Audio API (instant, no loading delay)
+// ===== SOUND SYSTEM — Layered Feedback =====
+
+// Tap sound (existing bubbly pop — kept)
 const playClickSound = () => {
   try {
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const oscillator = audioCtx.createOscillator();
-    const gainNode = audioCtx.createGain();
-
-    oscillator.connect(gainNode);
-    gainNode.connect(audioCtx.destination);
-
-    // Bubbly pop sound - quick frequency sweep
-    oscillator.frequency.setValueAtTime(600, audioCtx.currentTime);
-    oscillator.frequency.exponentialRampToValueAtTime(200, audioCtx.currentTime + 0.05);
-    oscillator.type = 'sine';
-
-    // Quick fade out for a soft "pop"
-    gainNode.gain.setValueAtTime(0.05, audioCtx.currentTime); // Quieter
-    gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.06);
-
-    oscillator.start(audioCtx.currentTime);
-    oscillator.stop(audioCtx.currentTime + 0.06);
-  } catch (e) {
-    // Audio not available
-  }
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.frequency.setValueAtTime(600, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(200, ctx.currentTime + 0.05);
+    osc.type = 'sine';
+    gain.gain.setValueAtTime(0.05, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.06);
+    osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.06);
+  } catch (e) { }
 };
 
-// Utility function for haptic feedback + click sound
+// Selection sound (slightly higher pitch for quiz picks)
+const playSelectSound = () => {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.frequency.setValueAtTime(700, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(300, ctx.currentTime + 0.05);
+    osc.type = 'sine';
+    gain.gain.setValueAtTime(0.06, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.05);
+    osc.start(); osc.stop(ctx.currentTime + 0.05);
+  } catch (e) { }
+};
+
+// Success chime (rising C5 → E5 two-tone)
+const playSuccessSound = () => {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o1 = ctx.createOscillator(); const g1 = ctx.createGain();
+    o1.connect(g1); g1.connect(ctx.destination);
+    o1.frequency.value = 523; o1.type = 'sine';
+    g1.gain.setValueAtTime(0.08, ctx.currentTime);
+    g1.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+    o1.start(ctx.currentTime); o1.stop(ctx.currentTime + 0.15);
+    const o2 = ctx.createOscillator(); const g2 = ctx.createGain();
+    o2.connect(g2); g2.connect(ctx.destination);
+    o2.frequency.value = 659; o2.type = 'sine';
+    g2.gain.setValueAtTime(0.08, ctx.currentTime + 0.08);
+    g2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+    o2.start(ctx.currentTime + 0.08); o2.stop(ctx.currentTime + 0.2);
+  } catch (e) { }
+};
+
+// Error tone (descending low)
+const playErrorSound = () => {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator(); const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.frequency.setValueAtTime(250, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(150, ctx.currentTime + 0.1);
+    osc.type = 'sine';
+    gain.gain.setValueAtTime(0.07, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+    osc.start(); osc.stop(ctx.currentTime + 0.12);
+  } catch (e) { }
+};
+
+// Reward arpeggio (C5-E5-G5-C6 ascending sparkle)
+const playRewardSound = () => {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    [523, 659, 784, 1047].forEach((freq, i) => {
+      const osc = ctx.createOscillator(); const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.value = freq; osc.type = 'sine';
+      const t = ctx.currentTime + i * 0.07;
+      gain.gain.setValueAtTime(0.06, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+      osc.start(t); osc.stop(t + 0.15);
+    });
+  } catch (e) { }
+};
+
+// ===== HAPTIC + SOUND HELPERS =====
+
+// Light tap (buttons, navigation)
 const triggerHaptic = async () => {
   playClickSound();
-  try {
-    await Haptics.impact({ style: ImpactStyle.Light });
-  } catch (e) {
-    // Haptics not available (e.g., on web)
-  }
+  try { await Haptics.impact({ style: ImpactStyle.Light }); } catch (e) { }
 };
 
-// Utility function for heavy haptic feedback (quiz finish screens)
+// Medium feedback (quiz selection)
+const triggerSelectFeedback = async () => {
+  playSelectSound();
+  try { await Haptics.impact({ style: ImpactStyle.Medium }); } catch (e) { }
+};
+
+// Success feedback (correct answer)
+const triggerSuccessFeedback = async () => {
+  playSuccessSound();
+  try { await Haptics.notification({ type: 'SUCCESS' }); } catch (e) { }
+};
+
+// Error feedback (wrong answer)
+const triggerErrorFeedback = async () => {
+  playErrorSound();
+  try { await Haptics.notification({ type: 'ERROR' }); } catch (e) { }
+};
+
+// Heavy haptic (quiz finish, lesson complete)
 const triggerHeavyHaptic = async () => {
+  playRewardSound();
   try {
     await Haptics.impact({ style: ImpactStyle.Heavy });
-  } catch (e) {
-    // Haptics not available (e.g., on web)
-  }
+    setTimeout(async () => {
+      try { await Haptics.impact({ style: ImpactStyle.Heavy }); } catch (e) { }
+    }, 100);
+  } catch (e) { }
 };
 
 // Convert number to Arabic numerals (٠١٢٣٤٥)
@@ -162,7 +238,7 @@ function SplashScreen({ onComplete }) {
           transition={{ delay: 0.8, duration: 0.5 }}
         >
           <h1 className="splash-title">Welcome</h1>
-          <p className="splash-subtitle">Your Arabic journey awaits</p>
+          <p className="splash-subtitle">أهلاً لنبدأ</p>
         </motion.div>
 
         <motion.div
@@ -180,6 +256,24 @@ function SplashScreen({ onComplete }) {
   );
 }
 
+// Polyfill for navigator.mediaDevices (needed for non-HTTPS / non-localhost)
+if (typeof navigator !== 'undefined') {
+  if (navigator.mediaDevices === undefined) {
+    navigator.mediaDevices = {};
+  }
+  if (navigator.mediaDevices.getUserMedia === undefined) {
+    navigator.mediaDevices.getUserMedia = function (constraints) {
+      const legacyGetUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+      if (!legacyGetUserMedia) {
+        return Promise.reject(new Error('Microphone access requires HTTPS or localhost. Please access via https:// or http://localhost'));
+      }
+      return new Promise((resolve, reject) => {
+        legacyGetUserMedia.call(navigator, constraints, resolve, reject);
+      });
+    };
+  }
+}
+
 function App() {
   // ============ SPLASH SCREEN STATE ============
   const [showSplash, setShowSplash] = useState(true);
@@ -193,7 +287,9 @@ function App() {
   const [loadingLessons, setLoadingLessons] = useState(false);
 
   const [activeLesson, setActiveLesson] = useState(null);
-  const activeLessonRef = useRef(null);
+
+  // NEW: Dedicated Streaks Page state
+  const [showStreaksPage, setShowStreaksPage] = useState(false);
 
   const [questions, setQuestions] = useState([]);
   const [loadingQuestions, setLoadingQuestions] = useState(false);
@@ -282,7 +378,20 @@ function App() {
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [showSignOutConfirm, setShowSignOutConfirm] = useState(false);
   const [showQuitQuizConfirm, setShowQuitQuizConfirm] = useState(false);
-  const lastBackPressRef = useRef(0); // For double-tap to exit
+
+  // EXIT BOTTOM SHEET STATE
+  const [showExitSheet, setShowExitSheet] = useState(false);
+
+  // UNIFIED STATE REFS FOR ANDROID BACK HANDLER
+  const stateRefs = useRef({
+    activeLesson: null,
+    currentWotd: null,
+    practiceMode: null,
+    selectedStage: null,
+    showStreaksPage: false,
+    activePictureLesson: null,
+    user: null
+  });
 
   // TRANSITION OVERLAY STATE
   const [transitioning, setTransitioning] = useState(false);
@@ -329,7 +438,117 @@ function App() {
   const [showPictureHint, setShowPictureHint] = useState(false);
   const [pictureRecording, setPictureRecording] = useState(false);
   const [pictureCheckingAnswer, setPictureCheckingAnswer] = useState(false);
+  const [pictureRecordingTime, setPictureRecordingTime] = useState(0);
+  const pictureTimerRef = useRef(null);
+  const PICTURE_MAX_RECORD_SECONDS = 120;
+
+  // AI Feedback state
+  const [aiFeedback, setAiFeedback] = useState(null);
+  const [loadingAiFeedback, setLoadingAiFeedback] = useState(false);
   const pictureAudioRef = useRef(null);
+
+  // AI HELPER STATE (FAB + slide-up sheet)
+  const [aiSheetOpen, setAiSheetOpen] = useState(false);
+  const [aiSheetBlock, setAiSheetBlock] = useState(null); // the block being explored
+  const [aiSheetView, setAiSheetView] = useState("menu"); // "menu" | "translate" | "vocab" | "loading"
+  const [aiVocabResult, setAiVocabResult] = useState("");
+  const [aiTranslationResult, setAiTranslationResult] = useState("");
+  const aiSheetRef = useRef(null);
+  const aiOverlayRef = useRef(null);
+  const aiDragRef = useRef({ startY: 0, currentY: 0, dragging: false });
+
+  // ---------- TTS (Web Speech API) ----------
+
+  const speakArabic = (text) => {
+    if (!text) return;
+    try {
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = "ar";
+      utter.rate = 0.85;
+      // Try to find an Arabic voice
+      const voices = window.speechSynthesis.getVoices();
+      const arVoice = voices.find(v => v.lang.startsWith("ar"));
+      if (arVoice) utter.voice = arVoice;
+      window.speechSynthesis.speak(utter);
+    } catch (e) { /* TTS not available */ }
+  };
+
+  // ---------- AI HELPER (FAB + Sheet) ----------
+
+  const openAiSheet = (block) => {
+    triggerHaptic();
+    setAiSheetBlock(block);
+    setAiSheetView("menu");
+    setAiVocabResult("");
+    setAiSheetOpen(true);
+  };
+
+  const closeAiSheet = () => {
+    triggerHaptic();
+    setAiSheetOpen(false);
+    setAiSheetBlock(null);
+    setAiSheetView("menu");
+    setAiVocabResult("");
+    setAiTranslationResult("");
+  };
+
+  const showTranslation = async () => {
+    if (!aiSheetBlock) return;
+    triggerHaptic();
+    // If text_en exists, show it instantly
+    if (aiSheetBlock.text_en) {
+      setAiTranslationResult(aiSheetBlock.text_en);
+      setAiSheetView("translate");
+      return;
+    }
+    // Otherwise, ask AI to translate
+    setAiSheetView("loading");
+    try {
+      const question = `Translate the following Arabic text to English. Give ONLY the translation, nothing else. No commentary, no greetings.\n\nArabic: ${aiSheetBlock.text_ar}`;
+      const { data } = await supabase.functions.invoke("lesson-ai-helper", {
+        body: {
+          question,
+          lessonTitle: activeLesson?.title || "",
+          lessonBlocks: [{ text_ar: aiSheetBlock.text_ar, block_type: aiSheetBlock.block_type }],
+          vocabList: [],
+          grammarNotes: []
+        }
+      });
+      setAiTranslationResult(data?.answer || "Translation unavailable.");
+      setAiSheetView("translate");
+    } catch (err) {
+      console.error("AI translate error:", err);
+      setAiTranslationResult("Something went wrong. Try again.");
+      setAiSheetView("translate");
+    }
+  };
+
+  const askAiKeyVocab = async () => {
+    if (!aiSheetBlock) return;
+    triggerHaptic();
+    setAiSheetView("loading");
+    try {
+      const question = `From this Arabic text, pick only the 2-3 hardest or most useful words/phrases for a learner. For each, give:\n- The Arabic word\n- Transliteration\n- Brief English meaning (one line max)\n\nDo NOT add any encouragement, greetings, or filler. Just the words.\n\nText: ${aiSheetBlock.text_ar}`;
+
+      const { data } = await supabase.functions.invoke("lesson-ai-helper", {
+        body: {
+          question,
+          lessonTitle: activeLesson?.title || "",
+          lessonBlocks: [{ text_ar: aiSheetBlock.text_ar, text_en: aiSheetBlock.text_en || "", block_type: aiSheetBlock.block_type }],
+          vocabList: [],
+          grammarNotes: []
+        }
+      });
+
+      setAiVocabResult(data?.answer || "Could not get a response.");
+      setAiSheetView("vocab");
+    } catch (err) {
+      console.error("AI vocab error:", err);
+      setAiVocabResult("Something went wrong. Try again.");
+      setAiSheetView("vocab");
+    }
+  };
 
   // ---------- TRANSITION HELPER ----------
 
@@ -529,13 +748,20 @@ function App() {
     };
   }, []);
 
-  // Keep ref in sync with activeLesson state
+  // Keep refs in sync with routing states for the hardware back listener
   useEffect(() => {
-    activeLessonRef.current = activeLesson;
-  }, [activeLesson]);
+    stateRefs.current = {
+      activeLesson,
+      currentWotd,
+      practiceMode,
+      selectedStage,
+      showStreaksPage,
+      activePictureLesson,
+      user
+    };
+  }, [activeLesson, currentWotd, practiceMode, selectedStage, showStreaksPage, activePictureLesson, user]);
 
   // Native Android hardware back button handling via Capacitor
-  // Register ONCE to avoid stale closures - use ref to get current value
   useEffect(() => {
     let backListenerHandle = null;
 
@@ -544,20 +770,47 @@ function App() {
         // 🔴 IMPORTANT: stop default behaviour (closing app)
         event.preventDefault?.();
 
-        // Use ref to get current value (avoids stale closure)
-        if (activeLessonRef.current) {
-          // Inside a lesson → show exit lesson modal
+        const state = stateRefs.current;
+
+        // 1. Inside a core lesson
+        if (state.activeLesson) {
           setShowExitModal(true);
-        } else {
-          // On homepage → double-tap to exit
-          const now = Date.now();
-          if (now - lastBackPressRef.current < 2000) {
-            // Second tap within 2 seconds → exit app
-            CapacitorApp.exitApp();
-          } else {
-            // First tap → record time (user can tap again to exit)
-            lastBackPressRef.current = now;
-          }
+          return;
+        }
+
+        // 2. Inside Word of the Day
+        if (state.currentWotd) {
+          setCurrentWotd(null);
+          return;
+        }
+
+        // 3. Inside Picture Describe Lesson
+        if (state.activePictureLesson) {
+          setActivePictureLesson(null);
+          return;
+        }
+
+        // 4. Inside Speaking Practice sub-menu
+        if (state.practiceMode) {
+          setPracticeMode(null);
+          return;
+        }
+
+        // 5. Inside a specific Stage (Book view)
+        if (state.selectedStage) {
+          setSelectedStage(null);
+          return;
+        }
+
+        // 6. Inside Streaks Page
+        if (state.showStreaksPage) {
+          setShowStreaksPage(false);
+          return;
+        }
+
+        // 7. On Home Root (None of the above are active)
+        if (state.user) {
+          setShowExitSheet(true);
         }
       });
     };
@@ -1107,13 +1360,30 @@ function App() {
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'audio/webm;codecs=opus',
-      });
+      // Detect best supported mimeType for this device
+      const mimeTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/ogg;codecs=opus',
+        'audio/mp4',
+        ''  // fallback: let browser pick
+      ];
+      let selectedMime = '';
+      for (const mime of mimeTypes) {
+        if (!mime || (typeof MediaRecorder.isTypeSupported === 'function' && MediaRecorder.isTypeSupported(mime))) {
+          selectedMime = mime;
+          break;
+        }
+      }
+      console.log('Picture recording: using mimeType:', selectedMime || '(browser default)');
+
+      const recorderOptions = selectedMime ? { mimeType: selectedMime } : {};
+      const mediaRecorder = new MediaRecorder(stream, recorderOptions);
 
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.ondataavailable = (event) => {
+        console.log('Picture ondataavailable: size =', event.data.size);
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
@@ -1123,13 +1393,26 @@ function App() {
         // Stop all tracks to release the microphone
         stream.getTracks().forEach(track => track.stop());
 
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm;codecs=opus' });
+        console.log('Picture recording stopped. Chunks:', audioChunksRef.current.length,
+          'Total size:', audioChunksRef.current.reduce((sum, c) => sum + c.size, 0));
+
+        const blobType = selectedMime || 'audio/webm;codecs=opus';
+        const audioBlob = new Blob(audioChunksRef.current, { type: blobType });
+        console.log('Picture audioBlob size:', audioBlob.size);
+
+        if (audioBlob.size < 100) {
+          console.error('Picture recording: audio blob is too small, likely empty recording');
+          setSpeechError('Recording captured no audio. Please check your microphone permissions.');
+          setPictureCheckingAnswer(false);
+          return;
+        }
 
         // Convert blob to base64
         const reader = new FileReader();
         reader.onloadend = async () => {
           const base64String = reader.result;
           const base64Audio = base64String.split(',')[1];
+          console.log('Picture base64 audio length:', base64Audio?.length);
 
           // Send to backend for transcription
           await processPictureAudio(base64Audio);
@@ -1137,8 +1420,25 @@ function App() {
         reader.readAsDataURL(audioBlob);
       };
 
-      mediaRecorder.start();
+      mediaRecorder.start(); // no timeslice — single buffer for correct WebM timestamps
       console.log('Picture describe recording started');
+
+      // Start countdown timer
+      setPictureRecordingTime(0);
+      pictureTimerRef.current = setInterval(() => {
+        setPictureRecordingTime(prev => {
+          const next = prev + 1;
+          if (next >= PICTURE_MAX_RECORD_SECONDS) {
+            // Auto-stop at 2 minutes
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+              mediaRecorderRef.current.stop();
+              setPictureRecording(false);
+            }
+            clearInterval(pictureTimerRef.current);
+          }
+          return next;
+        });
+      }, 1000);
     } catch (err) {
       console.error("Start picture recording error:", err);
       setSpeechError("Failed to start recording: " + (err.message || err));
@@ -1148,6 +1448,11 @@ function App() {
 
   const stopPictureRecording = async () => {
     try {
+      // Clear the timer
+      if (pictureTimerRef.current) {
+        clearInterval(pictureTimerRef.current);
+        pictureTimerRef.current = null;
+      }
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
         setPictureRecording(false);
@@ -1164,13 +1469,15 @@ function App() {
   // Process audio and check against vocab
   const processPictureAudio = async (audioBase64) => {
     try {
-      // Call the speech-check edge function (just for transcription)
+      // Single call: transcribe audio + get AI feedback in one Gemini request
       const { data, error } = await supabase.functions.invoke(
         "speech-check",
         {
           body: {
             audioBase64: audioBase64,
-            expectedText: "" // We just want transcription
+            exerciseType: "picture-describe",
+            vocabList: pictureVocab.map(v => v.arabic_text),
+            lessonContext: activePictureLesson?.title || ""
           }
         }
       );
@@ -1208,11 +1515,45 @@ function App() {
       }
 
       setPictureCheckingAnswer(false);
+
+      // AI feedback already included in the response — no second call needed
+      if (parsed?.overallScore !== undefined) {
+        setAiFeedback({
+          overallScore: parsed.overallScore,
+          feedback: parsed.feedback,
+          corrections: parsed.corrections || [],
+          encouragement: parsed.encouragement,
+          missedVocab: parsed.missedVocab || []
+        });
+        setLoadingAiFeedback(false);
+      }
     } catch (err) {
       console.error("Error processing picture audio:", err);
       setSpeechError("Error processing audio");
       setPictureCheckingAnswer(false);
     }
+  };
+
+  // Fetch AI feedback from Gemini via edge function
+  const fetchAiFeedback = async ({ transcript, exerciseType, expectedText, vocabList, lessonContext }) => {
+    setLoadingAiFeedback(true);
+    setAiFeedback(null);
+    try {
+      const { data, error } = await supabase.functions.invoke("ai-feedback", {
+        body: { transcript, exerciseType, expectedText, vocabList, lessonContext }
+      });
+      if (error) {
+        console.error("AI feedback error:", error);
+        setLoadingAiFeedback(false);
+        return;
+      }
+      const parsed = typeof data === "string" ? JSON.parse(data) : data;
+      console.log("AI feedback:", parsed);
+      setAiFeedback(parsed);
+    } catch (err) {
+      console.error("AI feedback exception:", err);
+    }
+    setLoadingAiFeedback(false);
   };
 
   function resetPictureDescribeFlow() {
@@ -1227,6 +1568,13 @@ function App() {
     setShowPictureHint(false);
     setPictureRecording(false);
     setPictureCheckingAnswer(false);
+    setAiFeedback(null);
+    setLoadingAiFeedback(false);
+    setPictureRecordingTime(0);
+    if (pictureTimerRef.current) {
+      clearInterval(pictureTimerRef.current);
+      pictureTimerRef.current = null;
+    }
   }
 
   // ---------- LOAD PROGRESS WHEN USER CHANGES ----------
@@ -1393,17 +1741,26 @@ function App() {
     if (!audioBase64) return;
 
     setSpeechFeedback(null); // Reset feedback
+    setAiFeedback(null);
     setIsCheckingAnswer(true); // Show loading state
 
     try {
       // Use override if provided, otherwise fall back to speakingExercises
       const expectedText = expectedTextOverride ?? speakingExercises[0]?.prompt_ar ?? "";
 
+      // Determine exercise type for merged transcription + feedback
+      const currentSpeakingItem = speakingLessonItems[currentSpeakingItemIndex];
+      const modeType = currentSpeakingModeType;
+      let exType = "reading";
+      if (modeType === "speaking_translate") exType = "translate";
+
+      // Single call: transcribe audio + get AI feedback
       const { data, error } = await supabase.functions.invoke(
         "speech-check",
         {
           body: {
             audioBase64: audioBase64,
+            exerciseType: exType,
             expectedText: expectedText
           }
         }
@@ -1441,6 +1798,19 @@ function App() {
 
         setSpeechFeedback(feedback);
         setSpokenText(transcript); // Show what was transcribed
+
+        // AI feedback already included in the response — no second call needed
+        if (parsed?.overallScore !== undefined) {
+          setAiFeedback({
+            overallScore: parsed.overallScore,
+            feedback: parsed.feedback,
+            corrections: parsed.corrections || [],
+            encouragement: parsed.encouragement,
+            missedVocab: parsed.missedVocab || []
+          });
+          setLoadingAiFeedback(false);
+        }
+
         setIsCheckingAnswer(false);
 
         // Play jingle sounds for speaking practice
@@ -2052,6 +2422,84 @@ function App() {
     );
   }
 
+  // ---------- STREAKS PAGE ----------
+  if (showStreaksPage) {
+    // Generate a simple 30-day view for demo purposes
+    const today = new Date();
+    const daysInMonth = 30; // approx 30 days history
+    const calendarDays = Array.from({ length: daysInMonth }, (_, i) => {
+      const d = new Date(today);
+      d.setDate(today.getDate() - (daysInMonth - 1 - i));
+      return d;
+    });
+
+    return (
+      <div className="streaks-screen swipe-in">
+        <header className="fixed-header" style={{ justifyContent: 'space-between', borderBottom: 'none', background: 'transparent' }}>
+          <button
+            className="btn-nav-arrow"
+            onClick={() => { triggerHaptic(); setShowStreaksPage(false); }}
+            style={{ backgroundColor: 'var(--card)', color: 'var(--text-main)', border: '2px solid var(--border)' }}
+          >
+            <MdArrowBackIosNew />
+          </button>
+          <div style={{ width: 40 }} /> {/* Spacer */}
+        </header>
+
+        <div className="streaks-scroll-content">
+          <div className="streaks-hero">
+            <div className="streaks-icon-wrapper">
+              <Icon icon="solar:flame-bold" className="streaks-main-icon" />
+              <div className="streaks-icon-glow"></div>
+            </div>
+            <h1 className="streaks-main-number">1</h1>
+            <p className="streaks-subtitle">Day Streak!</p>
+            <p className="streaks-motivation">You're on fire! Practice tomorrow to keep it going.</p>
+          </div>
+
+          <div className="streaks-stats-container">
+            <div className="streaks-stat-card">
+              <Icon icon="solar:history-bold" className="streaks-sub-icon" style={{ color: 'var(--blue)' }} />
+              <div className="streaks-stat-info">
+                <span className="streaks-stat-value">3</span>
+                <span className="streaks-stat-label">Longest Streak</span>
+              </div>
+            </div>
+
+            <div className="streaks-stat-card">
+              <Icon icon="solar:calendar-date-bold" className="streaks-sub-icon" style={{ color: 'var(--green)' }} />
+              <div className="streaks-stat-info">
+                <span className="streaks-stat-value">14</span>
+                <span className="streaks-stat-label">Total Days</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="streaks-calendar-card">
+            <div className="streaks-calendar-header">
+              <h3 className="streaks-calendar-title">Last 30 Days</h3>
+            </div>
+            <div className="streaks-calendar-grid">
+              {calendarDays.map((d, i) => {
+                const isToday = i === daysInMonth - 1;
+                // Mock activity data: active today, and random past days
+                const isActive = isToday || Math.random() > 0.75;
+                return (
+                  <div
+                    key={i}
+                    className={`streak-day-cell ${isActive ? 'active' : ''} ${isToday ? 'today' : ''}`}
+                  >
+                    {isActive && <Icon icon="solar:flame-bold" />}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ---------- PRACTICE SELECTION SCREEN ----------
 
   if (user && practiceMode === null && !activeLesson && !activeSpeakingLesson) {
@@ -2063,7 +2511,7 @@ function App() {
         {/* Header with profile */}
         <header className="explorer-header">
           <div className="explorer-header-content">
-            <div className="explorer-profile">
+            <div className="explorer-profile" onClick={() => { triggerHaptic(); setShowSignOutConfirm(true); }} style={{ cursor: 'pointer' }}>
               <div className="explorer-avatar-wrap">
                 <div className="explorer-avatar">
                   <Icon icon="solar:user-circle-bold" className="explorer-avatar-icon" />
@@ -2076,7 +2524,11 @@ function App() {
               </div>
             </div>
             <div className="explorer-stats">
-              <div className="explorer-stat">
+              <div
+                className="explorer-stat"
+                onClick={() => { triggerHaptic(); setShowStreaksPage(true); }}
+                style={{ cursor: 'pointer' }}
+              >
                 <Icon icon="solar:flame-bold" className="explorer-stat-icon flame" />
                 <span className="explorer-stat-value">1</span>
               </div>
@@ -2084,36 +2536,8 @@ function App() {
                 <Icon icon="solar:crown-star-bold" className="explorer-stat-icon crown" />
                 <span className="explorer-stat-value">0</span>
               </div>
-              <button
-                className="explorer-profile-btn"
-                onClick={() => { triggerHaptic(); setShowProfileMenu(!showProfileMenu); }}
-              >
-                <Icon icon="solar:settings-bold" className="explorer-settings-icon" />
-              </button>
             </div>
           </div>
-
-          {/* Profile Menu Dropdown */}
-          {showProfileMenu && (
-            <>
-              <div
-                className="profile-menu-backdrop"
-                onClick={() => { triggerHaptic(); setShowProfileMenu(false); }}
-              />
-              <div className="profile-menu-dropdown">
-                <button
-                  className="profile-menu-item"
-                  onClick={() => {
-                    triggerHaptic();
-                    setShowProfileMenu(false);
-                    setShowSignOutConfirm(true);
-                  }}
-                >
-                  Sign out
-                </button>
-              </div>
-            </>
-          )}
         </header>
 
         {/* Main content */}
@@ -2153,9 +2577,10 @@ function App() {
 
               {/* Speaking Practice Card */}
               <button
-                className="explorer-quest-card"
+                className="explorer-quest-card explorer-quest-active"
                 onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("speaking"); loadSpeakingModes(); }}
               >
+                <div className="explorer-quest-glow" />
                 <div className="explorer-quest-icon-wrap speaking">
                   <Icon icon="solar:microphone-3-bold" className="explorer-quest-icon" />
                 </div>
@@ -2171,9 +2596,10 @@ function App() {
 
               {/* Word of the Day Card */}
               <button
-                className="explorer-quest-card wotd-card"
+                className="explorer-quest-card explorer-quest-active wotd-card"
                 onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("wotd"); loadWordOfTheDay(); }}
               >
+                <div className="explorer-quest-glow" />
                 <div className="explorer-quest-icon-wrap wotd">
                   <Icon icon="solar:sun-bold" className="explorer-quest-icon" />
                 </div>
@@ -2468,6 +2894,54 @@ function App() {
                         You said: "{spokenText}"
                       </div>
                     )
+                  )}
+                </div>
+              )}
+              {/* AI Feedback Card for Speaking Practice */}
+              {loadingAiFeedback && (
+                <div className="ai-feedback-card ai-feedback-loading" style={{ marginTop: '1rem' }}>
+                  <div className="ai-feedback-header">
+                    <span className="ai-feedback-icon">🤖</span>
+                    <span>AI is analyzing your answer...</span>
+                  </div>
+                  <Leapfrog size="24" speed="2.5" color="#f59e0b" />
+                </div>
+              )}
+              {aiFeedback && !loadingAiFeedback && (
+                <div className="ai-feedback-card" style={{ marginTop: '1rem' }}>
+                  <div className="ai-feedback-header">
+                    <span className="ai-feedback-icon">🤖</span>
+                    <span className="ai-feedback-label">AI Tutor Feedback</span>
+                    {aiFeedback.overallScore != null && (
+                      <span className={`ai-feedback-score ${aiFeedback.overallScore >= 70 ? 'score-good' : aiFeedback.overallScore >= 40 ? 'score-ok' : 'score-low'}`}>
+                        {aiFeedback.overallScore}%
+                      </span>
+                    )}
+                  </div>
+                  {aiFeedback.feedback && (
+                    <p className="ai-feedback-text">{aiFeedback.feedback}</p>
+                  )}
+                  {aiFeedback.corrections?.length > 0 && (
+                    <div className="ai-feedback-corrections">
+                      {aiFeedback.corrections.map((c, i) => (
+                        <div key={i} className="ai-correction-item">
+                          <div className="ai-correction-row">
+                            <span className="ai-correction-label">You said:</span>
+                            <span className="ai-correction-arabic">{c.said}</span>
+                          </div>
+                          <div className="ai-correction-row">
+                            <span className="ai-correction-label better-label">Better:</span>
+                            <span className="ai-correction-arabic">{c.better}</span>
+                          </div>
+                          {c.explanation && (
+                            <p className="ai-correction-explanation">{c.explanation}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {aiFeedback.encouragement && (
+                    <p className="ai-feedback-encouragement">{aiFeedback.encouragement}</p>
                   )}
                 </div>
               )}
@@ -2819,7 +3293,7 @@ function App() {
                 className="explorer-back-btn"
                 onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode("speaking"); resetPictureDescribeFlow(); }}
               >
-                <Icon icon="solar:arrow-left-linear" className="explorer-back-icon" />
+                <span className="explorer-back-icon">◀</span>
               </button>
               <div className="explorer-region-title-wrap">
                 <h1 className="explorer-region-title">🖼️ وصف الصورة</h1>
@@ -2969,14 +3443,16 @@ function App() {
               className="picture-back-btn"
               onClick={() => { triggerHaptic(); setPicturePhase("vocab"); setPictureVocabIndex(0); }}
             >
-              <MdArrowBackIosNew />
+              <span style={{ fontSize: '1.1rem' }}>◀</span>
+              <span className="picture-btn-label">Back</span>
             </button>
             <h2 className="picture-describe-title">{activePictureLesson.title}</h2>
             <button
               className="picture-hint-btn"
               onClick={() => { triggerHaptic(); setShowPictureHint(!showPictureHint); }}
             >
-              <Icon icon="solar:lightbulb-bolt-bold" />
+              <span className="picture-hint-emoji">💡</span>
+              <span className="picture-btn-label">Hints</span>
             </button>
           </header>
 
@@ -2987,6 +3463,28 @@ function App() {
               alt={activePictureLesson.title}
               className="picture-display-image"
             />
+            {/* Circle Timer Overlay */}
+            {pictureRecording && (
+              <div className="picture-timer-overlay">
+                <svg className="picture-timer-ring" viewBox="0 0 100 100">
+                  <circle className="picture-timer-bg" cx="50" cy="50" r="44" />
+                  <circle
+                    className="picture-timer-progress"
+                    cx="50" cy="50" r="44"
+                    style={{
+                      strokeDasharray: `${2 * Math.PI * 44}`,
+                      strokeDashoffset: `${2 * Math.PI * 44 * (pictureRecordingTime / PICTURE_MAX_RECORD_SECONDS)}`,
+                    }}
+                  />
+                </svg>
+                <div className="picture-timer-text">
+                  <span className="picture-timer-value">
+                    {Math.floor((PICTURE_MAX_RECORD_SECONDS - pictureRecordingTime) / 60)}:{String((PICTURE_MAX_RECORD_SECONDS - pictureRecordingTime) % 60).padStart(2, '0')}
+                  </span>
+                  <span className="picture-timer-label">remaining</span>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Instruction */}
@@ -3013,11 +3511,18 @@ function App() {
                   }
                 }}
               >
-                <Icon icon={pictureRecording ? "solar:stop-bold" : "solar:microphone-3-bold"} />
+                <span className="picture-mic-icon">{pictureRecording ? '⏹' : '🎙️'}</span>
+                <span className="picture-mic-label">{pictureRecording ? 'Stop' : 'Speak'}</span>
               </button>
             )}
           </div>
 
+          {/* Error display */}
+          {speechError && (
+            <p style={{ color: '#dc2626', textAlign: 'center', fontSize: '0.85rem', margin: '0 1rem 0.5rem', padding: '0.5rem 1rem', background: 'rgba(220,38,38,0.08)', borderRadius: '8px' }}>
+              {speechError}
+            </p>
+          )}
           {/* Hint Overlay */}
           {showPictureHint && (
             <div className="picture-hint-overlay" onClick={() => setShowPictureHint(false)}>
@@ -3082,6 +3587,55 @@ function App() {
             </div>
           )}
 
+          {/* AI Feedback Card */}
+          {loadingAiFeedback && (
+            <div className="ai-feedback-card ai-feedback-loading">
+              <div className="ai-feedback-header">
+                <span className="ai-feedback-icon">🤖</span>
+                <span>AI is analyzing your answer...</span>
+              </div>
+              <Leapfrog size="24" speed="2.5" color="#f59e0b" />
+            </div>
+          )}
+          {aiFeedback && !loadingAiFeedback && (
+            <div className="ai-feedback-card">
+              <div className="ai-feedback-header">
+                <span className="ai-feedback-icon">🤖</span>
+                <span className="ai-feedback-label">AI Tutor Feedback</span>
+                {aiFeedback.overallScore != null && (
+                  <span className={`ai-feedback-score ${aiFeedback.overallScore >= 70 ? 'score-good' : aiFeedback.overallScore >= 40 ? 'score-ok' : 'score-low'}`}>
+                    {aiFeedback.overallScore}%
+                  </span>
+                )}
+              </div>
+              {aiFeedback.feedback && (
+                <p className="ai-feedback-text">{aiFeedback.feedback}</p>
+              )}
+              {aiFeedback.corrections?.length > 0 && (
+                <div className="ai-feedback-corrections">
+                  {aiFeedback.corrections.map((c, i) => (
+                    <div key={i} className="ai-correction-item">
+                      <div className="ai-correction-row">
+                        <span className="ai-correction-label">You said:</span>
+                        <span className="ai-correction-arabic">{c.said}</span>
+                      </div>
+                      <div className="ai-correction-row">
+                        <span className="ai-correction-label better-label">Better:</span>
+                        <span className="ai-correction-arabic">{c.better}</span>
+                      </div>
+                      {c.explanation && (
+                        <p className="ai-correction-explanation">{c.explanation}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {aiFeedback.encouragement && (
+                <p className="ai-feedback-encouragement">{aiFeedback.encouragement}</p>
+              )}
+            </div>
+          )}
+
           <button
             className="btn-picture-home"
             onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode("speaking"); resetPictureDescribeFlow(); }}
@@ -3111,6 +3665,55 @@ function App() {
               </div>
             ))}
           </div>
+
+          {/* AI Feedback Card */}
+          {loadingAiFeedback && (
+            <div className="ai-feedback-card ai-feedback-loading">
+              <div className="ai-feedback-header">
+                <span className="ai-feedback-icon">🤖</span>
+                <span>AI is analyzing your answer...</span>
+              </div>
+              <Leapfrog size="24" speed="2.5" color="#f59e0b" />
+            </div>
+          )}
+          {aiFeedback && !loadingAiFeedback && (
+            <div className="ai-feedback-card">
+              <div className="ai-feedback-header">
+                <span className="ai-feedback-icon">🤖</span>
+                <span className="ai-feedback-label">AI Tutor Feedback</span>
+                {aiFeedback.overallScore != null && (
+                  <span className={`ai-feedback-score ${aiFeedback.overallScore >= 70 ? 'score-good' : aiFeedback.overallScore >= 40 ? 'score-ok' : 'score-low'}`}>
+                    {aiFeedback.overallScore}%
+                  </span>
+                )}
+              </div>
+              {aiFeedback.feedback && (
+                <p className="ai-feedback-text">{aiFeedback.feedback}</p>
+              )}
+              {aiFeedback.corrections?.length > 0 && (
+                <div className="ai-feedback-corrections">
+                  {aiFeedback.corrections.map((c, i) => (
+                    <div key={i} className="ai-correction-item">
+                      <div className="ai-correction-row">
+                        <span className="ai-correction-label">You said:</span>
+                        <span className="ai-correction-arabic">{c.said}</span>
+                      </div>
+                      <div className="ai-correction-row">
+                        <span className="ai-correction-label better-label">Better:</span>
+                        <span className="ai-correction-arabic">{c.better}</span>
+                      </div>
+                      {c.explanation && (
+                        <p className="ai-correction-explanation">{c.explanation}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {aiFeedback.encouragement && (
+                <p className="ai-feedback-encouragement">{aiFeedback.encouragement}</p>
+              )}
+            </div>
+          )}
 
           <div className="picture-retry-buttons">
             <button
@@ -3201,7 +3804,7 @@ function App() {
               className="explorer-back-btn"
               onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); setSelectedSpeakingMode(null); setSpeakingLessons([]); }}
             >
-              <Icon icon="solar:arrow-left-linear" className="explorer-back-icon" />
+              <span className="explorer-back-icon">◀</span>
             </button>
             <div className="explorer-region-title-wrap">
               <h1 className="explorer-region-title">🎤 تمارين النطق</h1>
@@ -3228,57 +3831,39 @@ function App() {
                 <p>No speaking modes found</p>
               </div>
             ) : (
-              <div className="explorer-stages">
-                {/* Describe the Picture - Special Mode */}
-                <div className="explorer-stage-wrap">
-                  <button
-                    onClick={() => { triggerHaptic(); setPracticeMode("picture-describe"); loadPictureDescribeLessons(); }}
-                    className="explorer-stage-card picture-describe-card"
-                    style={{ borderColor: 'var(--yellow)' }}
-                  >
-                    <div className="explorer-stage-icon-wrap" style={{ background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' }}>
-                      <Icon
-                        icon="solar:gallery-bold"
-                        className="explorer-stage-icon"
-                        style={{ color: 'white' }}
-                      />
-                    </div>
-                    <div className="explorer-stage-info">
-                      <h3 className="explorer-stage-name">Describe the Picture</h3>
-                      <p className="explorer-stage-desc">وصف الصورة</p>
-                    </div>
-                    <div className="explorer-stage-arrow">
-                      <Icon icon="solar:arrow-right-linear" />
-                    </div>
-                  </button>
-                </div>
+              <div className="speaking-modes-grid">
+                {/* Describe the Picture */}
+                <button
+                  onClick={() => { triggerHaptic(); setPracticeMode("picture-describe"); loadPictureDescribeLessons(); }}
+                  className="speaking-feature-card"
+                >
+                  <div className="speaking-feature-emoji">🖼️</div>
+                  <h3 className="speaking-feature-title">Describe the Picture</h3>
+                  <p className="speaking-feature-title-ar">وصف الصورة</p>
+                  <p className="speaking-feature-desc">Look at an image and describe what you see in Arabic</p>
+                  <div className="speaking-feature-badge">
+                    <span>🎯 Vocab Matching</span>
+                  </div>
+                </button>
 
                 {/* Database-driven speaking modes */}
                 {speakingModes.map((mode) => {
                   const isSelected = selectedSpeakingMode === mode.id;
+                  // Pick emoji based on mode name
+                  const modeEmoji = mode.name?.toLowerCase().includes('read') ? '📖'
+                    : mode.name?.toLowerCase().includes('translat') ? '🔄'
+                      : '🎤';
 
                   return (
                     <div key={mode.id} className="explorer-stage-wrap">
-                      {/* Mode Card */}
                       <button
                         onClick={() => { triggerHaptic(); loadSpeakingLessons(mode.id); }}
-                        className={`explorer-stage-card ${isSelected ? 'selected' : ''}`}
-                        style={{ borderColor: isSelected ? 'var(--secondary)' : undefined }}
+                        className={`speaking-feature-card ${isSelected ? 'speaking-feature-active' : ''}`}
                       >
-                        <div className="explorer-stage-icon-wrap" style={{ background: isSelected ? 'var(--secondary)' : undefined }}>
-                          <Icon
-                            icon="solar:chat-round-dots-bold"
-                            className="explorer-stage-icon"
-                            style={{ color: isSelected ? 'white' : undefined }}
-                          />
-                        </div>
-                        <div className="explorer-stage-info">
-                          <h3 className="explorer-stage-name">{mode.name || "Mode"}</h3>
-                          <p className="explorer-stage-desc">{mode.description}</p>
-                        </div>
-                        <div className="explorer-stage-arrow">
-                          <Icon icon="solar:alt-arrow-down-linear" className={isSelected ? 'rotated' : ''} />
-                        </div>
+                        <div className="speaking-feature-emoji">{modeEmoji}</div>
+                        <h3 className="speaking-feature-title">{mode.name || "Mode"}</h3>
+                        <p className="speaking-feature-desc">{mode.description}</p>
+                        {isSelected && <div className="speaking-feature-expand-hint">▼</div>}
                       </button>
 
                       {/* Lessons List */}
@@ -3286,7 +3871,7 @@ function App() {
                         <div className="explorer-lessons-wrap">
                           {loadingSpeakingLessons ? (
                             <div className="explorer-lessons-loading">
-                              <Leapfrog size="30" speed="2.5" color="var(--secondary)" />
+                              <Leapfrog size="30" speed="2.5" color="#f59e0b" />
                             </div>
                           ) : speakingLessons.length === 0 ? (
                             <p className="explorer-lessons-empty">No lessons found</p>
@@ -3716,50 +4301,64 @@ function App() {
                                 const wasClicked = clickedParagraphs.has(b.id);
                                 const isThisBlockSlow = isPlaying && isSlowSpeed;
                                 return (
-                                  <div
-                                    key={b.id}
-                                    className={`paragraph-bubble ${isPlaying ? "paragraph-active" : ""} ${wasClicked ? "paragraph-clicked" : ""}`}
-                                    onClick={() => {
-                                      // Hide instruction on first click
-                                      if (!hideInstruction) {
-                                        setHideInstruction(true);
-                                      }
-                                      // Track this paragraph as clicked
-                                      setClickedParagraphs(prev => new Set([...prev, b.id]));
-                                      handleParagraphClick(b);
-                                    }}
-                                    role="button"
-                                    tabIndex={0}
-                                    onKeyDown={(e) => {
-                                      if (e.key === "Enter" || e.key === " ") {
+                                  <div key={b.id} className="paragraph-block-wrap">
+                                    <div
+                                      className={`paragraph-bubble ${isPlaying ? "paragraph-active" : ""} ${wasClicked ? "paragraph-clicked" : ""}`}
+                                      onClick={() => {
+                                        // Hide instruction on first click
                                         if (!hideInstruction) {
                                           setHideInstruction(true);
                                         }
+                                        // Track this paragraph as clicked
                                         setClickedParagraphs(prev => new Set([...prev, b.id]));
                                         handleParagraphClick(b);
-                                      }
-                                    }}
-                                  >
-                                    {/* Audio indicator on the left */}
-                                    <div className="paragraph-audio-indicator">
-                                      {isPlaying ? (
-                                        <span className="audio-playing-icon">
-                                          {isThisBlockSlow ? "🐢" : "🔊"}
-                                        </span>
-                                      ) : (
-                                        <span className="audio-play-icon">▶</span>
-                                      )}
-                                    </div>
-                                    <div className="paragraph-content">
-                                      <div className="paragraph-text" dir="rtl">
-                                        {b.text_ar}
+                                      }}
+                                      role="button"
+                                      tabIndex={0}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter" || e.key === " ") {
+                                          if (!hideInstruction) {
+                                            setHideInstruction(true);
+                                          }
+                                          setClickedParagraphs(prev => new Set([...prev, b.id]));
+                                          handleParagraphClick(b);
+                                        }
+                                      }}
+                                    >
+                                      {/* Audio indicator on the left */}
+                                      <div className="paragraph-audio-indicator">
+                                        {isPlaying ? (
+                                          <span className="audio-playing-icon">
+                                            {isThisBlockSlow ? "🐢" : "🔊"}
+                                          </span>
+                                        ) : (
+                                          <span className="audio-play-icon">▶</span>
+                                        )}
                                       </div>
-                                      {b.text_en && (
-                                        <div className="paragraph-translation">
-                                          {b.text_en}
+                                      <div className="paragraph-content">
+                                        <div className="paragraph-text" dir="rtl">
+                                          {b.text_ar}
                                         </div>
-                                      )}
+                                        {b.text_en && (
+                                          <div className="paragraph-translation">
+                                            {b.text_en}
+                                          </div>
+                                        )}
+                                      </div>
                                     </div>
+                                    <button
+                                      className="ai-block-trigger"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        openAiSheet(b);
+                                      }}
+                                    >
+                                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                                        <path d="M2 17l10 5 10-5" />
+                                        <path d="M2 12l10 5 10-5" />
+                                      </svg>
+                                    </button>
                                   </div>
                                 );
                               })}
@@ -3798,27 +4397,28 @@ function App() {
                                 : "bubble-left";
 
                             return (
-                              <div
-                                key={b.id}
-                                className={`bubble-row ${sideClass}`}
-                              >
-                                <div className="avatar">
-                                  {speaker?.avatar_url ? (
-                                    <img
-                                      src={speaker.avatar_url}
-                                      alt={speaker?.display_name_ar || "Speaker"}
-                                      className="avatar-img"
-                                    />
-                                  ) : (
-                                    <span className="avatar-fallback">
-                                      {speaker?.display_name_ar?.[0] || "؟"}
-                                    </span>
-                                  )}
-                                </div>
+                              <div key={b.id} className="dialogue-block-wrap">
+                                <div
+                                  className={`bubble-row ${sideClass}`}
+                                >
+                                  <div className="avatar">
+                                    {speaker?.avatar_url ? (
+                                      <img
+                                        src={speaker.avatar_url}
+                                        alt={speaker?.display_name_ar || "Speaker"}
+                                        className="avatar-img"
+                                      />
+                                    ) : (
+                                      <span className="avatar-fallback">
+                                        {speaker?.display_name_ar?.[0] || "؟"}
+                                      </span>
+                                    )}
+                                  </div>
 
-                                <div className="bubble">
-                                  <div className="bubble-text" dir="rtl">
-                                    {b.text_ar}
+                                  <div className="bubble">
+                                    <div className="bubble-text" dir="rtl">
+                                      {b.text_ar}
+                                    </div>
                                   </div>
                                 </div>
                               </div>
@@ -3897,6 +4497,125 @@ function App() {
           )
           }
 
+          {/* AI HELPER SLIDE-UP SHEET */}
+          {aiSheetOpen && aiSheetBlock && (
+            <div className="ai-sheet-overlay" ref={aiOverlayRef} onClick={closeAiSheet}>
+              <div
+                ref={aiSheetRef}
+                className="ai-sheet"
+                onClick={(e) => e.stopPropagation()}
+                onTouchStart={(e) => {
+                  aiDragRef.current.startY = e.touches[0].clientY;
+                  aiDragRef.current.dragging = true;
+                  if (aiSheetRef.current) aiSheetRef.current.style.transition = 'none';
+                  if (aiOverlayRef.current) aiOverlayRef.current.style.transition = 'none';
+                }}
+                onTouchMove={(e) => {
+                  if (!aiDragRef.current.dragging) return;
+                  const dy = e.touches[0].clientY - aiDragRef.current.startY;
+                  if (dy < 0) return; // only allow downward drag
+                  aiDragRef.current.currentY = dy;
+
+                  if (aiSheetRef.current) aiSheetRef.current.style.transform = `translateY(${dy}px)`;
+
+                  // Fade overlay based on drag distance (max ~300px drag)
+                  if (aiOverlayRef.current) {
+                    const progress = Math.min(dy / 300, 1);
+                    const opacity = 0.55 * (1 - progress);
+                    aiOverlayRef.current.style.backgroundColor = `rgba(0, 0, 0, ${opacity})`;
+                  }
+                }}
+                onTouchEnd={() => {
+                  if (!aiDragRef.current.dragging) return;
+                  aiDragRef.current.dragging = false;
+                  const dy = aiDragRef.current.currentY;
+
+                  if (dy > 120) {
+                    // Dismiss — animate out
+                    if (aiSheetRef.current) {
+                      aiSheetRef.current.style.transition = 'transform 0.25s cubic-bezier(0.2, 0, 0, 1)';
+                      aiSheetRef.current.style.transform = 'translateY(100%)';
+                    }
+                    if (aiOverlayRef.current) {
+                      aiOverlayRef.current.style.transition = 'background-color 0.25s ease';
+                      aiOverlayRef.current.style.backgroundColor = 'rgba(0,0,0,0)';
+                    }
+                    setTimeout(() => closeAiSheet(), 250);
+                  } else {
+                    // Snap back
+                    if (aiSheetRef.current) {
+                      aiSheetRef.current.style.transition = 'transform 0.2s cubic-bezier(0.2, 0, 0, 1)';
+                      aiSheetRef.current.style.transform = 'translateY(0)';
+                    }
+                    if (aiOverlayRef.current) {
+                      aiOverlayRef.current.style.transition = 'background-color 0.2s ease';
+                      aiOverlayRef.current.style.backgroundColor = 'rgba(0,0,0,0.55)';
+                    }
+                  }
+                  aiDragRef.current.currentY = 0;
+                }}
+              >
+                {/* Drag handle */}
+                <div className="ai-sheet-handle-area">
+                  <div className="ai-sheet-handle" />
+                </div>
+
+                {/* Content — centered */}
+                <div className="ai-sheet-content">
+                  {/* The Arabic text */}
+                  <div className="ai-sheet-arabic-block">
+                    <p className="ai-sheet-arabic" dir="rtl">{aiSheetBlock.text_ar}</p>
+                  </div>
+
+                  {/* Menu: Translate / Key Vocab */}
+                  {aiSheetView === "menu" && (
+                    <div className="ai-sheet-actions">
+                      <button className="ai-sheet-action-btn" onClick={showTranslation}>
+                        Translate
+                      </button>
+                      <button className="ai-sheet-action-btn ai-sheet-action-vocab" onClick={askAiKeyVocab}>
+                        Key Vocab
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Translation view */}
+                  {aiSheetView === "translate" && (
+                    <div className="ai-sheet-result">
+                      <p className="ai-sheet-translation">
+                        {aiTranslationResult}
+                      </p>
+                      <button className="ai-sheet-back" onClick={() => { triggerHaptic(); setAiSheetView("menu"); }}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
+                        Back
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Loading */}
+                  {aiSheetView === "loading" && (
+                    <div className="ai-sheet-loading">
+                      <span className="typing-dot"></span>
+                      <span className="typing-dot"></span>
+                      <span className="typing-dot"></span>
+                    </div>
+                  )}
+
+                  {/* Key Vocab result */}
+                  {aiSheetView === "vocab" && (
+                    <div className="ai-sheet-result">
+                      <p className="ai-sheet-vocab-text">{aiVocabResult}</p>
+                      <button className="ai-sheet-back" onClick={() => { triggerHaptic(); setAiSheetView("menu"); setAiVocabResult(""); }}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
+                        Back
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* PHASE: TRANSITION TO GRAMMAR */}
           {
             lessonPhase === "intro_grammar" && (
@@ -3934,8 +4653,13 @@ function App() {
                     {grammarNotes[grammarIndex].content_en}
                   </div>
 
-                  <div className="arabic-box spotlight-arabic" style={{ borderLeft: '5px solid var(--blue)', padding: '1.5rem' }}>
-                    {grammarNotes[grammarIndex].content_ar}
+                  <div className="arabic-box spotlight-arabic" style={{ borderLeft: '5px solid var(--blue)', padding: '1.5rem', display: 'flex', alignItems: 'flex-start', gap: '0.75rem' }}>
+                    <span style={{ flex: 1 }}>{grammarNotes[grammarIndex].content_ar}</span>
+                    {grammarNotes[grammarIndex].content_ar && (
+                      <button className="speak-btn" onClick={(e) => { e.stopPropagation(); speakArabic(grammarNotes[grammarIndex].content_ar); }} aria-label="Listen">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 8.5v7a4.49 4.49 0 002.5-3.5zM14 3.23v2.06a6.5 6.5 0 010 13.42v2.06A8.5 8.5 0 0014 3.23z" /></svg>
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -4048,6 +4772,9 @@ function App() {
                               </span>
                             )}
                           </div>
+                          <button className="speak-btn" onClick={(e) => { e.stopPropagation(); speakArabic(item.arabic); }} aria-label="Listen" style={{ marginTop: '0.5rem' }}>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 8.5v7a4.49 4.49 0 002.5-3.5zM14 3.23v2.06a6.5 6.5 0 010 13.42v2.06A8.5 8.5 0 0014 3.23z" /></svg>
+                          </button>
                         </div>
 
                         <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
@@ -4463,7 +5190,7 @@ function App() {
             className="explorer-back-btn"
             onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); }}
           >
-            <Icon icon="solar:arrow-left-linear" className="explorer-back-icon" />
+            <span className="explorer-back-icon">◀</span>
           </button>
           <div className="explorer-region-title-wrap">
             <h1 className="explorer-region-title">📚 المراحل</h1>
@@ -4606,6 +5333,37 @@ function App() {
         <div className="transition-overlay">
           <div className="transition-card">
             <Leapfrog size="40" speed="2.5" color="var(--primary)" />
+          </div>
+        </div>
+      )}
+
+      {/* NEW: Android Back Exit Bottom Sheet */}
+      {showExitSheet && (
+        <div className="exit-sheet-overlay" onClick={() => setShowExitSheet(false)}>
+          <div
+            className="exit-sheet-content"
+            onClick={(e) => e.stopPropagation()}
+            style={{ animation: "slideUpSheet 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards" }}
+          >
+            <div className="exit-sheet-handle"></div>
+            <h2 className="exit-sheet-title">Are you sure you want to leave?</h2>
+            <p className="exit-sheet-subtitle">Any unsaved progress may be lost.</p>
+            <div className="exit-sheet-actions">
+              <button
+                className="btn-primary"
+                style={{ flex: 1, backgroundColor: 'var(--muted)', color: 'var(--foreground)', boxShadow: 'none' }}
+                onClick={() => { triggerHaptic(); setShowExitSheet(false); }}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-primary"
+                style={{ flex: 1, backgroundColor: 'var(--destructive)', boxShadow: 'none' }}
+                onClick={() => { triggerHaptic(); CapacitorApp.exitApp(); }}
+              >
+                Exit App
+              </button>
+            </div>
           </div>
         </div>
       )}
