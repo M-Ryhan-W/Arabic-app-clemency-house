@@ -1,22 +1,121 @@
-:root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
+@import "tailwindcss";
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --font-font-sans: var(--font-sans);
+  --font-font-heading: var(--font-heading);
+  --font-font-serif: var(--font-serif);
+  --font-font-mono: var(--font-mono);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --background: #0D1B2A;
+  --foreground: #F8F9FA;
+  --primary: #E09F3E;
+  --primary-foreground: #0D1B2A;
+  --secondary: #E56B6F;
+  --secondary-foreground: #FFFFFF;
+  --muted: #1B2A41;
+  --muted-foreground: #A3B1C6;
+  --accent: #F4A261;
+  --accent-foreground: #0D1B2A;
+  --destructive: #E63946;
+  --card: #142438;
+  --card-foreground: #F8F9FA;
+  --popover: #142438;
+  --popover-foreground: #F8F9FA;
+  --border: #2A3B54;
+  --input: #1B2A41;
+  --ring: #E09F3E;
+  --chart-1: #E09F3E;
+  --chart-2: #E56B6F;
+  --chart-3: #F4A261;
+  --chart-4: #2A9D8F;
+  --chart-5: #E9C46A;
+
+  --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-heading: "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-serif: "Playfair Display", serif;
+  --font-mono: "JetBrains Mono", monospace;
+  --font-arabic: 'Noto Naskh Arabic', 'Noto Sans Arabic', 'Amiri', serif;
+
+  --radius: 1.5rem;
+
+  /* Legacy variables used by App.css — mapped to new dark theme */
+  --primary-light: #F4A261;
+  --secondary-light: #F4A261;
+  --accent-light: #E9C46A;
+  --destructive-foreground: #FFFFFF;
+  --surface-elevated: #1B2A41;
+  --muted-foreground-color: #A3B1C6;
+  --border-light: #2A3B54;
+  --text-primary: #F8F9FA;
+  --text-secondary: #A3B1C6;
+  --text-muted: #7A8BA3;
+  --text-main: #F8F9FA;
+  --text-light: #A3B1C6;
+  --green: #2A9D8F;
+  --green-dark: #1F7A6F;
+  --blue: #4A90E2;
+  --blue-dark: #2563EB;
+  --red: #E63946;
+  --red-dark: #C62828;
+  --yellow: #E09F3E;
+  --yellow-dark: #D97706;
+  --purple: #8B5CF6;
+  --purple-dark: #7C3AED;
+  --success-bg: rgba(42, 157, 143, 0.12);
+  --error-bg: rgba(230, 57, 70, 0.12);
+  --reward-gold: #E09F3E;
+  --white: #F8F9FA;
+  --bg-app: #0D1B2A;
+  --gray-100: #1B2A41;
+  --gray-200: #2A3B54;
+  --gray-300: #3D5270;
+  --font-stack: "Plus Jakarta Sans", system-ui, sans-serif;
+
+  /* Shadows adjusted for dark theme */
+  --shadow-softer: 0 2px 8px rgba(0, 0, 0, 0.3);
+  --shadow-soft: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-medium: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-strong: 0 12px 32px rgba(0, 0, 0, 0.6);
+
+  --header-height: 70px;
+  --radius-lg-legacy: 16px;
+  --radius-xl-legacy: 20px;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
 }
 
 #root {
@@ -29,45 +128,16 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  font-family: var(--font-sans);
+  background-color: var(--background);
+  color: var(--foreground);
 }
 
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
-}
-
+/* Reset default button styles so Tailwind classes work cleanly */
 button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
+  border: none;
+  padding: 0;
   font-family: inherit;
-  background-color: #1a1a1a;
+  background: none;
   cursor: pointer;
-  transition: border-color 0.25s;
-}
-
-button:hover {
-  border-color: #646cff;
-}
-
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-
-  a:hover {
-    color: #747bff;
-  }
-
-  button {
-    background-color: #f9f9f9;
-  }
 }

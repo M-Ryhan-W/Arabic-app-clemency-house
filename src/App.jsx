@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { supabase } from "./supabaseClient";
 import { Leapfrog } from 'ldrs/react';
 import 'ldrs/react/Leapfrog.css';
@@ -10,6 +10,7 @@ import { DotLottieReact } from '@lottiefiles/dotlottie-react';
 import { MdArrowBackIosNew } from "react-icons/md";
 import { Icon } from "@iconify/react";
 import { motion, AnimatePresence } from 'motion/react';
+import { TextToSpeech } from '@capacitor-community/text-to-speech';
 // Web MediaRecorder API used instead of Capacitor plugins (outputs WEBM_OPUS for Google STT)
 import "./App.css";
 
@@ -32,10 +33,26 @@ initStatusBar();
 
 // ===== SOUND SYSTEM — Layered Feedback =====
 
+// Shared AudioContext — reuse to avoid Android throttling
+let _sharedAudioCtx = null;
+const getAudioCtx = () => {
+  if (!_sharedAudioCtx || _sharedAudioCtx.state === 'closed') {
+    _sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (_sharedAudioCtx.state === 'suspended') _sharedAudioCtx.resume();
+  return _sharedAudioCtx;
+};
+
+// Debounce to prevent double-fire
+let _lastClickTime = 0;
+
 // Tap sound (existing bubbly pop — kept)
 const playClickSound = () => {
+  const now = Date.now();
+  if (now - _lastClickTime < 80) return; // debounce 80ms
+  _lastClickTime = now;
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = getAudioCtx();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain); gain.connect(ctx.destination);
@@ -51,7 +68,7 @@ const playClickSound = () => {
 // Selection sound (slightly higher pitch for quiz picks)
 const playSelectSound = () => {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = getAudioCtx();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain); gain.connect(ctx.destination);
@@ -67,7 +84,7 @@ const playSelectSound = () => {
 // Success chime (rising C5 → E5 two-tone)
 const playSuccessSound = () => {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = getAudioCtx();
     const o1 = ctx.createOscillator(); const g1 = ctx.createGain();
     o1.connect(g1); g1.connect(ctx.destination);
     o1.frequency.value = 523; o1.type = 'sine';
@@ -86,7 +103,7 @@ const playSuccessSound = () => {
 // Error tone (descending low)
 const playErrorSound = () => {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = getAudioCtx();
     const osc = ctx.createOscillator(); const gain = ctx.createGain();
     osc.connect(gain); gain.connect(ctx.destination);
     osc.frequency.setValueAtTime(250, ctx.currentTime);
@@ -101,7 +118,7 @@ const playErrorSound = () => {
 // Reward arpeggio (C5-E5-G5-C6 ascending sparkle)
 const playRewardSound = () => {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = getAudioCtx();
     [523, 659, 784, 1047].forEach((freq, i) => {
       const osc = ctx.createOscillator(); const gain = ctx.createGain();
       osc.connect(gain); gain.connect(ctx.destination);
@@ -149,6 +166,49 @@ const triggerHeavyHaptic = async () => {
       try { await Haptics.impact({ style: ImpactStyle.Heavy }); } catch (e) { }
     }, 100);
   } catch (e) { }
+};
+
+// ✅ TEXT-TO-SPEECH HELPER
+let ttsVoices = [];
+
+// Pre-load voices (they load asynchronously on many platforms)
+if (typeof window !== 'undefined' && window.speechSynthesis) {
+  const loadVoices = () => { ttsVoices = window.speechSynthesis.getVoices(); };
+  loadVoices();
+  window.speechSynthesis.onvoiceschanged = loadVoices;
+}
+
+const speakText = (text, lang = 'ar-SA') => {
+  if (!text) return;
+  const synth = window.speechSynthesis;
+  if (!synth) return;
+
+  synth.cancel();
+
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = lang;
+  utterance.volume = 1.0;
+
+  // Arabic: slower rate + slightly lower pitch for more natural sound
+  utterance.rate = 0.75;
+  utterance.pitch = 1.0;
+
+  // Pick the best Arabic voice — strongly prefer FEMALE voices
+  const voices = synth.getVoices();
+  const langPrefix = lang.split('-')[0];
+  const langVoices = voices.filter(v => v.lang.startsWith(langPrefix));
+  // Female name hints (common female Arabic TTS voice names)
+  const femaleHints = ['female', 'laila', 'maryam', 'fatima', 'amira', 'zineb', 'samira', 'zeina', 'noura', 'hoda'];
+  const maleHints = ['male', 'maged', 'tarik', 'mansour', 'ahmed'];
+  // Filter out male voices first
+  const nonMale = langVoices.filter(v => !maleHints.some(h => v.name.toLowerCase().includes(h)));
+  // Find explicitly female
+  const femaleVoice = langVoices.find(v => femaleHints.some(h => v.name.toLowerCase().includes(h)));
+  // Google female preferred
+  const googleFemale = nonMale.find(v => v.name.toLowerCase().includes('google'));
+  utterance.voice = femaleVoice || googleFemale || nonMale[0] || langVoices[0] || null;
+
+  synth.speak(utterance);
 };
 
 // Convert number to Arabic numerals (٠١٢٣٤٥)
@@ -277,6 +337,8 @@ if (typeof navigator !== 'undefined') {
 function App() {
   // ============ SPLASH SCREEN STATE ============
   const [showSplash, setShowSplash] = useState(true);
+  const [activeTab, setActiveTab] = useState("home"); // "home" | "courses" | "speaking" | "profile"
+  const [expandedStageId, setExpandedStageId] = useState(null); // which stage card is expanded
 
   const [stages, setStages] = useState([]);
   const [loadingStages, setLoadingStages] = useState(true);
@@ -290,6 +352,12 @@ function App() {
 
   // NEW: Dedicated Streaks Page state
   const [showStreaksPage, setShowStreaksPage] = useState(false);
+
+  // ✅ DAILY GOAL STATE
+  const [dailyGoalMinutes, setDailyGoalMinutes] = useState(20);
+  const [showGoalPicker, setShowGoalPicker] = useState(false);
+  const [dailySecondsSpent, setDailySecondsSpent] = useState(0);
+  const [activeDatesHistory, setActiveDatesHistory] = useState([]);
 
   const [questions, setQuestions] = useState([]);
   const [loadingQuestions, setLoadingQuestions] = useState(false);
@@ -361,6 +429,8 @@ function App() {
   const [clickedParagraphs, setClickedParagraphs] = useState(new Set());
   const [hideInstruction, setHideInstruction] = useState(false);
   const [isSlowSpeed, setIsSlowSpeed] = useState(false);
+  const scenarioTtsCache = useRef({});
+  const aiHelperCache = useRef(new Map()); // Map<blockId, { translation?: string, vocab?: string }>
 
   // AUTH STATE
   const [user, setUser] = useState(null);
@@ -368,6 +438,60 @@ function App() {
   const [authPassword, setAuthPassword] = useState("");
   const [authMode, setAuthMode] = useState("signin"); // "signin" | "signup"
   const [authError, setAuthError] = useState("");
+
+  // Sync Daily Stats from Supabase on Login
+  useEffect(() => {
+    if (!user) return;
+    const fetchDailyStats = async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      const { data, error } = await supabase.from('user_daily_stats')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('date', today)
+        .single();
+
+      if (data) {
+        setDailyGoalMinutes(data.daily_goal_minutes);
+        setDailySecondsSpent(data.total_minutes_spent * 60);
+        setScenarioCompleted(data.scenario_completed);
+      } else if (error?.code === 'PGRST116') {
+        // Not found, create it
+        await supabase.from('user_daily_stats').insert({ user_id: user.id, date: today, daily_goal_minutes: 20 });
+        setDailyGoalMinutes(20);
+        setDailySecondsSpent(0);
+        setScenarioCompleted(false);
+      }
+
+      // Fetch all historical dates for the Streaks page
+      const { data: historyData } = await supabase.from('user_daily_stats').select('date').eq('user_id', user.id);
+      if (historyData) {
+        setActiveDatesHistory(historyData.map(d => d.date));
+      } else {
+        setActiveDatesHistory([today]);
+      }
+    };
+    fetchDailyStats();
+  }, [user]);
+
+  // ✅ TRACK TIME SPENT ON APP — ticks every 15 seconds
+  useEffect(() => {
+    if (!user) return;
+    const interval = setInterval(() => {
+      setDailySecondsSpent(prev => {
+        const updated = prev + 15;
+        // Sync to cloud every 60s
+        if (updated % 60 === 0) {
+          const mins = Math.floor(updated / 60);
+          const today = new Date().toISOString().slice(0, 10);
+          supabase.from('user_daily_stats').update({ total_minutes_spent: mins })
+            .eq('user_id', user.id).eq('date', today)
+            .then(({ error }) => { if (error) console.error(error) });
+        }
+        return updated;
+      });
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [user]);
 
   // LESSON PROGRESS STATE
   const [lessonProgress, setLessonProgress] = useState([]); // [{lesson_id, hearts_left}, ...]
@@ -404,6 +528,7 @@ function App() {
   // ✅ SPEAKING PRACTICE MODE STATE
   const [practiceMode, setPracticeMode] = useState(null); // null = selection, 'book' | 'speaking'
   const [speakingModes, setSpeakingModes] = useState([]);
+  const [expandedSpeakingCard, setExpandedSpeakingCard] = useState(null); // 'repeat' | 'translate' | null
   const [loadingSpeakingModes, setLoadingSpeakingModes] = useState(false);
   const [selectedSpeakingMode, setSelectedSpeakingMode] = useState(null);
   const [speakingLessons, setSpeakingLessons] = useState([]);
@@ -422,6 +547,13 @@ function App() {
   const [wotdExamples, setWotdExamples] = useState([]);
   const [wotdExampleIndex, setWotdExampleIndex] = useState(0);
   const [loadingWotd, setLoadingWotd] = useState(false);
+
+  useEffect(() => {
+    if (wotdPhase === "complete") {
+      playCelebrationSound();
+      triggerHeavyHaptic();
+    }
+  }, [wotdPhase]);
 
   // ✅ PICTURE DESCRIBE STATE
   const [pictureDescribeLessons, setPictureDescribeLessons] = useState([]);
@@ -445,7 +577,108 @@ function App() {
   // AI Feedback state
   const [aiFeedback, setAiFeedback] = useState(null);
   const [loadingAiFeedback, setLoadingAiFeedback] = useState(false);
+  const [pictureFeedbackSteps, setPictureFeedbackSteps] = useState([]);
+  const [pictureFeedbackIndex, setPictureFeedbackIndex] = useState(0);
+  const [pictureScore, setPictureScore] = useState(null);
+  const [pictureVocabStats, setPictureVocabStats] = useState(null); // { vocabUsed, vocabTotal }
+  const [challengeRecording, setChallengeRecording] = useState(false);
+  const [challengeCompleted, setChallengeCompleted] = useState({}); // { [stepIndex]: true }
+  const [challengeResult, setChallengeResult] = useState({}); // { [stepIndex]: { good: bool, feedback: string } }
+  const [challengeChecking, setChallengeChecking] = useState(false);
+  const [analysisStep, setAnalysisStep] = useState(0); // for animated loading messages
+  const analysisTimerRef = useRef(null);
   const pictureAudioRef = useRef(null);
+  const challengeRecorderRef = useRef(null);
+  const challengeStreamRef = useRef(null);
+
+  // ✅ SCENARIO CHAT STATE
+  const [scenarioData, setScenarioData] = useState(null); // { id, emoji, title, titleAr }
+  const [scenarioPhase, setScenarioPhase] = useState(null); // null | "difficulty" | "chat" | "summary"
+  const [scenarioDifficulty, setScenarioDifficulty] = useState(null); // "easy" | "intermediate" | "advanced"
+  const [scenarioMessages, setScenarioMessages] = useState([]); // [{ role: "ai"|"user", text, translation?, hint?, keyPhrase? }]
+  const [scenarioRecording, setScenarioRecording] = useState(false);
+  const [scenarioLoading, setScenarioLoading] = useState(false); // AI thinking
+  const [scenarioCompleted, setScenarioCompleted] = useState(false); // completed today
+  const [scenarioKeyPhrases, setScenarioKeyPhrases] = useState([]); // collected key phrases
+  const [showScenarioHelp, setShowScenarioHelp] = useState(false); // help panel
+  const [showScenarioMoreHelp, setShowScenarioMoreHelp] = useState(false); // expanded help text
+  const [scenarioTurnCount, setScenarioTurnCount] = useState(0);
+  const scenarioRecorderRef = useRef(null);
+  const scenarioStreamRef = useRef(null);
+  const scenarioChunksRef = useRef([]);
+  const scenarioChatEndRef = useRef(null);
+  const scenarioMessagesRef = useRef([]);
+  const scenarioAudioRef = useRef(null);
+  const scenarioStartTimeRef = useRef(null);
+  const scenarioCountdownRef = useRef(null);
+  const [scenarioRecordingSeconds, setScenarioRecordingSeconds] = useState(0);
+
+  // ✅ DYNAMIC STREAKS & STATS CALCULATION
+  const { currentStreak, longestStreak, totalDays, activeDaysSet } = useMemo(() => {
+    const activeSet = new Set(activeDatesHistory);
+    lessonProgress.forEach(lp => {
+      if (lp.completed_at) {
+        activeSet.add(new Date(lp.completed_at).toISOString().split('T')[0]);
+      }
+    });
+    speakingLessonProgress.forEach(sp => {
+      if (sp.completed_at) {
+        activeSet.add(new Date(sp.completed_at).toISOString().split('T')[0]);
+      }
+    });
+
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+    let current = 0;
+    const startOffset = activeSet.has(todayStr) ? 0 : (activeSet.has(yesterdayStr) ? 1 : 0);
+    for (let i = startOffset; i < 365; i++) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - i);
+      const dateStr = d.toISOString().split('T')[0];
+      if (activeSet.has(dateStr)) {
+        current++;
+      } else {
+        break;
+      }
+    }
+
+    const sortedDays = [...activeSet].sort();
+    let longest = 0;
+    let runLength = 0;
+    for (let i = 0; i < sortedDays.length; i++) {
+      if (i === 0) {
+        runLength = 1;
+      } else {
+        const prev = new Date(sortedDays[i - 1]);
+        const curr = new Date(sortedDays[i]);
+        const diffMs = curr - prev;
+        if (diffMs <= 86400000 * 1.5) {
+          runLength++;
+        } else {
+          runLength = 1;
+        }
+      }
+      longest = Math.max(longest, runLength);
+    }
+
+    return {
+      currentStreak: current,
+      longestStreak: longest,
+      totalDays: activeSet.size,
+      activeDaysSet: activeSet,
+    };
+  }, [activeDatesHistory, lessonProgress, speakingLessonProgress]);
+
+  // Auto-scroll scenario chat
+  useEffect(() => {
+    if (scenarioChatEndRef.current) {
+      scenarioChatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [scenarioMessages, scenarioLoading]);
 
   // AI HELPER STATE (FAB + slide-up sheet)
   const [aiSheetOpen, setAiSheetOpen] = useState(false);
@@ -459,19 +692,90 @@ function App() {
 
   // ---------- TTS (Web Speech API) ----------
 
-  const speakArabic = (text) => {
+  const speakAiAudio = async (text, onComplete) => {
     if (!text) return;
     try {
-      window.speechSynthesis.cancel();
-      const utter = new SpeechSynthesisUtterance(text);
-      utter.lang = "ar";
-      utter.rate = 0.85;
-      // Try to find an Arabic voice
-      const voices = window.speechSynthesis.getVoices();
-      const arVoice = voices.find(v => v.lang.startsWith("ar"));
-      if (arVoice) utter.voice = arVoice;
-      window.speechSynthesis.speak(utter);
-    } catch (e) { /* TTS not available */ }
+      // Check cache first
+      if (scenarioTtsCache.current[text]) {
+        if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
+        const audio = new Audio(`data:audio/mp3;base64,${scenarioTtsCache.current[text]}`);
+        scenarioAudioRef.current = audio;
+        if (onComplete) audio.onended = onComplete;
+        audio.play().catch(e => console.error("Cached audio play failed:", e));
+        return;
+      }
+
+      const { data, error } = await supabase.functions.invoke("scenario-chat", {
+        body: { action: "generate-tts", text }
+      });
+      if (error) throw error;
+      const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+      if (parsed.audioBase64) {
+        scenarioTtsCache.current[text] = parsed.audioBase64;
+        if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
+        const audio = new Audio(`data:audio/mp3;base64,${parsed.audioBase64}`);
+        scenarioAudioRef.current = audio;
+        if (onComplete) {
+          audio.onended = onComplete;
+        }
+        audio.play().catch(e => {
+          console.error("Audio playback failed:", e);
+        });
+      } else {
+        throw new Error("No audio returned");
+      }
+    } catch (e) {
+      console.error("High-quality TTS failed:", e);
+    }
+  };
+
+  const speakArabic = async (text) => {
+    if (!text) return;
+    if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
+    try {
+      await TextToSpeech.speak({
+        text,
+        lang: 'ar',
+        rate: 0.85,
+        volume: 1.0,
+      });
+    } catch (e) {
+      // Fallback to Web Speech API
+      try {
+        window.speechSynthesis?.cancel();
+        const utter = new SpeechSynthesisUtterance(text);
+        utter.lang = 'ar';
+        utter.rate = 0.85;
+        const voices = window.speechSynthesis?.getVoices() || [];
+        const arVoice = voices.find(v => v.lang.startsWith('ar'));
+        if (arVoice) utter.voice = arVoice;
+        window.speechSynthesis?.speak(utter);
+      } catch (e2) { /* TTS not available */ }
+    }
+  };
+
+  const speakEnglish = async (text) => {
+    if (!text) return;
+    try {
+      await TextToSpeech.speak({
+        text,
+        lang: 'en-US',
+        rate: 0.95,
+        volume: 1.0,
+      });
+    } catch (e) {
+      // Fallback to Web Speech API
+      try {
+        window.speechSynthesis?.cancel();
+        const utter = new SpeechSynthesisUtterance(text);
+        utter.lang = 'en-US';
+        utter.rate = 0.95;
+        const voices = window.speechSynthesis?.getVoices() || [];
+        const enVoice = voices.find(v => v.lang.startsWith('en'));
+        if (enVoice) utter.voice = enVoice;
+        window.speechSynthesis?.speak(utter);
+      } catch (e2) { /* TTS not available */ }
+    }
   };
 
   // ---------- AI HELPER (FAB + Sheet) ----------
@@ -496,13 +800,24 @@ function App() {
   const showTranslation = async () => {
     if (!aiSheetBlock) return;
     triggerHaptic();
-    // If text_en exists, show it instantly
+
+    // Check cache first
+    const cached = aiHelperCache.current.get(aiSheetBlock.id);
+    if (cached?.translation) {
+      setAiTranslationResult(cached.translation);
+      setAiSheetView("translate");
+      return;
+    }
+
+    // If text_en exists, still cache it for consistency
     if (aiSheetBlock.text_en) {
+      const current = aiHelperCache.current.get(aiSheetBlock.id) || {};
+      aiHelperCache.current.set(aiSheetBlock.id, { ...current, translation: aiSheetBlock.text_en });
       setAiTranslationResult(aiSheetBlock.text_en);
       setAiSheetView("translate");
       return;
     }
-    // Otherwise, ask AI to translate
+
     setAiSheetView("loading");
     try {
       const question = `Translate the following Arabic text to English. Give ONLY the translation, nothing else. No commentary, no greetings.\n\nArabic: ${aiSheetBlock.text_ar}`;
@@ -515,7 +830,13 @@ function App() {
           grammarNotes: []
         }
       });
-      setAiTranslationResult(data?.answer || "Translation unavailable.");
+      const answer = data?.answer || "Translation unavailable.";
+
+      // Cache user result
+      const current = aiHelperCache.current.get(aiSheetBlock.id) || {};
+      aiHelperCache.current.set(aiSheetBlock.id, { ...current, translation: answer });
+
+      setAiTranslationResult(answer);
       setAiSheetView("translate");
     } catch (err) {
       console.error("AI translate error:", err);
@@ -527,6 +848,15 @@ function App() {
   const askAiKeyVocab = async () => {
     if (!aiSheetBlock) return;
     triggerHaptic();
+
+    // Check cache
+    const cached = aiHelperCache.current.get(aiSheetBlock.id);
+    if (cached?.vocab) {
+      setAiVocabResult(cached.vocab);
+      setAiSheetView("vocab");
+      return;
+    }
+
     setAiSheetView("loading");
     try {
       const question = `From this Arabic text, pick only the 2-3 hardest or most useful words/phrases for a learner. For each, give:\n- The Arabic word\n- Transliteration\n- Brief English meaning (one line max)\n\nDo NOT add any encouragement, greetings, or filler. Just the words.\n\nText: ${aiSheetBlock.text_ar}`;
@@ -541,7 +871,13 @@ function App() {
         }
       });
 
-      setAiVocabResult(data?.answer || "Could not get a response.");
+      const answer = data?.answer || "Could not get a response.";
+
+      // Cache result
+      const current = aiHelperCache.current.get(aiSheetBlock.id) || {};
+      aiHelperCache.current.set(aiSheetBlock.id, { ...current, vocab: answer });
+
+      setAiVocabResult(answer);
       setAiSheetView("vocab");
     } catch (err) {
       console.error("AI vocab error:", err);
@@ -757,9 +1093,10 @@ function App() {
       selectedStage,
       showStreaksPage,
       activePictureLesson,
+      activeSpeakingLesson,
       user
     };
-  }, [activeLesson, currentWotd, practiceMode, selectedStage, showStreaksPage, activePictureLesson, user]);
+  }, [activeLesson, currentWotd, practiceMode, selectedStage, showStreaksPage, activePictureLesson, activeSpeakingLesson, user]);
 
   // Native Android hardware back button handling via Capacitor
   useEffect(() => {
@@ -784,9 +1121,51 @@ function App() {
           return;
         }
 
+        // 2.5. Inside Scenario Chat
+        if (scenarioPhase) {
+          resetScenarioChat();
+          return;
+        }
+
         // 3. Inside Picture Describe Lesson
         if (state.activePictureLesson) {
+          setPicturePhase("lessons");
           setActivePictureLesson(null);
+          setPictureVocab([]);
+          setPictureVocabIndex(0);
+          setPictureTranscript("");
+          setPictureMatchPercent(0);
+          setPictureMatchedWords([]);
+          setPictureMissedWords([]);
+          setShowPictureHint(false);
+          setPictureRecording(false);
+          setPictureCheckingAnswer(false);
+          setAiFeedback(null);
+          setLoadingAiFeedback(false);
+          setPictureFeedbackSteps([]);
+          setPictureFeedbackIndex(0);
+          setPictureScore(null);
+          setPictureVocabStats(null);
+          setChallengeRecording(false);
+          setChallengeCompleted({});
+          setChallengeResult({});
+          setChallengeChecking(false);
+          setAnalysisStep(0);
+          if (analysisTimerRef.current) { clearInterval(analysisTimerRef.current); analysisTimerRef.current = null; }
+          if (challengeRecorderRef.current) {
+            try { challengeRecorderRef.current.stop(); } catch { }
+            challengeRecorderRef.current = null;
+          }
+          if (challengeStreamRef.current) {
+            challengeStreamRef.current.getTracks().forEach(t => t.stop());
+            challengeStreamRef.current = null;
+          }
+          return;
+        }
+
+        // 3.5. Inside Speaking Lesson
+        if (state.activeSpeakingLesson) {
+          backToSpeakingLessons();
           return;
         }
 
@@ -1027,6 +1406,23 @@ function App() {
   // ---------- LOAD LESSONS FOR A STAGE ----------
 
   function resetAudio() {
+    // Stop any active recording and release microphone
+    if (mediaRecorderRef.current) {
+      try {
+        if (mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
+        // Release all mic tracks to free the audio hardware
+        if (mediaRecorderRef.current.stream) {
+          mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+        }
+      } catch (e) {
+        console.warn('Error cleaning up MediaRecorder:', e);
+      }
+      mediaRecorderRef.current = null;
+    }
+    setIsRecording(false);
+    setRecordedAudio(null);
     setAudioPlaying(false);
     setAudioCompleted(false);
     setAudioProgress(0);
@@ -1047,6 +1443,7 @@ function App() {
     setDialogueFinished(false);
     setShowDialogueReview(false);
     blockRefs.current = {};
+    aiHelperCache.current.clear();
   }
 
   function loadLessons(stageId) {
@@ -1186,6 +1583,7 @@ function App() {
   }
 
   function resetSpeakingFlow() {
+    resetAudio(); // Stop recording & release microphone
     setActiveSpeakingLesson(null);
     setSpeakingLessonItems([]);
     setCurrentSpeakingItemIndex(0);
@@ -1268,6 +1666,244 @@ function App() {
     setWotdExamples([]);
     setWotdExampleIndex(0);
     setLoadingWotd(false);
+  }
+
+  // ---------- SCENARIO CHAT FUNCTIONS ----------
+
+  async function loadTodayScenario() {
+    try {
+      const { data, error } = await supabase.functions.invoke("scenario-chat", {
+        body: { action: "get-scenario" }
+      });
+      if (!error && data) {
+        const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+        console.log('Scenario loaded:', parsed);
+        setScenarioData(parsed);
+      } else {
+        console.error('Scenario load error:', error);
+      }
+      // scenarioCompleted is now tracked via user_daily_stats sync on login.
+    } catch (e) {
+      console.error("Error loading scenario:", e);
+    }
+  }
+
+  async function startScenarioChat(difficulty) {
+    setScenarioDifficulty(difficulty);
+    setScenarioPhase("briefing");
+    setScenarioMessages([]);
+    setScenarioKeyPhrases([]);
+    setScenarioLoading(true);
+    setScenarioTurnCount(0);
+    scenarioStartTimeRef.current = Date.now();
+
+    try {
+      const { data, error } = await supabase.functions.invoke("scenario-chat", {
+        body: { action: "start", difficulty }
+      });
+      console.log('Scenario start raw:', { data, error });
+      if (!error && data) {
+        const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+        console.log('Scenario start parsed:', parsed);
+        if (parsed.message) {
+          const aiMsg = {
+            role: "ai",
+            text: parsed.message,
+            translation: parsed.translation || '',
+            hint: parsed.hint || '',
+            audioHelp: parsed.audioHelp || '',
+            suggestedResponse: parsed.suggestedResponse || '',
+            suggestedResponseTranslation: parsed.suggestedResponseTranslation || '',
+            keyPhrase: parsed.keyPhrase || null,
+            isTranslationVisible: false,
+          };
+          setScenarioMessages([aiMsg]);
+          scenarioMessagesRef.current = [aiMsg];
+          if (parsed.keyPhrase) {
+            setScenarioKeyPhrases(prev => [...prev, parsed.keyPhrase]);
+          }
+          setShowScenarioMoreHelp(false);
+          // Audio playback is now delayed until the user clicks "Ready" on the briefing page
+        } else {
+          // AI returned empty message
+          const fallbackMsg = { role: 'ai', text: 'مرحباً! أهلاً وسهلاً', translation: 'Hello! Welcome!', hint: 'Try greeting back with مرحباً or السلام عليكم', keyPhrase: { arabic: 'أهلاً وسهلاً', english: 'Welcome' }, isTranslationVisible: false };
+          setScenarioMessages([fallbackMsg]);
+          scenarioMessagesRef.current = [fallbackMsg];
+        }
+      } else {
+        console.error('Scenario start error:', error);
+        const fallbackMsg = { role: 'ai', text: 'مرحباً! كيف حالك؟', translation: 'Hello! How are you?', hint: 'Try saying مرحباً (Hello) or بخير (Fine)', keyPhrase: { arabic: 'كيف حالك', english: 'How are you?' }, isTranslationVisible: false };
+        setScenarioMessages([fallbackMsg]);
+        scenarioMessagesRef.current = [fallbackMsg];
+      }
+    } catch (e) {
+      console.error("Error starting scenario:", e);
+    }
+    setScenarioLoading(false);
+  }
+
+  async function startScenarioRecording() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      scenarioChunksRef.current = [];
+      scenarioStreamRef.current = stream;
+
+      const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+      let selectedMime = '';
+      for (const m of mimeTypes) {
+        if (MediaRecorder.isTypeSupported(m)) { selectedMime = m; break; }
+      }
+
+      const recorder = new MediaRecorder(stream, selectedMime ? { mimeType: selectedMime } : {});
+      scenarioRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) scenarioChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        const blobType = selectedMime || 'audio/webm;codecs=opus';
+        const blob = new Blob(scenarioChunksRef.current, { type: blobType });
+        if (blob.size < 100) {
+          setScenarioRecording(false);
+          return;
+        }
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          const base64 = reader.result.split(',')[1];
+          await sendScenarioAudio(base64, blobType);
+        };
+        reader.readAsDataURL(blob);
+      };
+
+      recorder.start();
+      setScenarioRecording(true);
+      triggerHaptic();
+
+      if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
+      window.speechSynthesis?.cancel();
+
+      setScenarioRecordingSeconds(0);
+      scenarioCountdownRef.current = setInterval(() => {
+        setScenarioRecordingSeconds(prev => {
+          if (prev >= 44) {
+            clearInterval(scenarioCountdownRef.current);
+            if (scenarioRecorderRef.current?.state === 'recording') {
+              scenarioRecorderRef.current.stop();
+              setScenarioRecording(false);
+            }
+            return 45;
+          }
+          return prev + 1;
+        });
+      }, 1000);
+    } catch (e) {
+      console.error("Scenario recording error:", e);
+      setScenarioRecording(false);
+    }
+  }
+
+  function stopScenarioRecording() {
+    if (scenarioRecorderRef.current?.state === 'recording') {
+      scenarioRecorderRef.current.stop();
+      setScenarioRecording(false);
+      clearInterval(scenarioCountdownRef.current);
+      triggerHaptic();
+    }
+  }
+
+  async function sendScenarioAudio(base64, mimeType) {
+    setScenarioLoading(true);
+    try {
+      // Use ref for current messages to avoid stale closure
+      const history = scenarioMessagesRef.current.map(m => ({
+        role: m.role,
+        text: m.text,
+      }));
+
+      const elapsedSeconds = scenarioStartTimeRef.current ? Math.floor((Date.now() - scenarioStartTimeRef.current) / 1000) : 0;
+
+      const { data, error } = await supabase.functions.invoke("scenario-chat", {
+        body: {
+          action: "reply",
+          difficulty: scenarioDifficulty,
+          conversationHistory: history,
+          audioBase64: base64,
+          mimeType: mimeType,
+          elapsedSeconds
+        }
+      });
+
+      if (!error && data) {
+        const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+        console.log('Scenario reply:', parsed);
+        const userMsg = { role: "user", text: parsed.transcript || "..." };
+        const aiMsg = {
+          role: "ai",
+          text: parsed.message,
+          translation: parsed.translation,
+          hint: parsed.hint,
+          audioHelp: parsed.audioHelp,
+          suggestedResponse: parsed.suggestedResponse || '',
+          suggestedResponseTranslation: parsed.suggestedResponseTranslation || '',
+          keyPhrase: parsed.keyPhrase,
+          isTranslationVisible: false,
+        };
+        setScenarioMessages(prev => {
+          const updated = [...prev, userMsg, aiMsg];
+          scenarioMessagesRef.current = updated;
+          return updated;
+        });
+        setScenarioTurnCount(prev => prev + 1);
+
+        if (parsed.keyPhrase) {
+          setScenarioKeyPhrases(prev => [...prev, parsed.keyPhrase]);
+        }
+
+        // Auto TTS the AI response only (help is text-only now)
+        setShowScenarioMoreHelp(false);
+        setTimeout(() => speakAiAudio(parsed.message), 300);
+
+        // Check if conversation is ending
+        if (parsed.isEnding) {
+          setTimeout(() => {
+            setScenarioPhase("summary");
+            setScenarioCompleted(true);
+            const today = new Date().toISOString().slice(0, 10);
+            supabase.from('user_daily_stats').update({ scenario_completed: true })
+              .eq('user_id', user.id).eq('date', today)
+              .then(({ error }) => { if (error) console.error('Error updating scenario completion in DB', error) });
+            triggerHeavyHaptic();
+          }, 3000);
+        }
+      } else {
+        console.error('Scenario reply error:', error);
+      }
+    } catch (e) {
+      console.error("Scenario reply error:", e);
+    }
+    setScenarioLoading(false);
+  }
+
+  function resetScenarioChat() {
+    setScenarioPhase(null);
+    setScenarioDifficulty(null);
+    setScenarioMessages([]);
+    setScenarioKeyPhrases([]);
+    setScenarioRecording(false);
+    setScenarioLoading(false);
+    setShowScenarioHelp(false);
+    setScenarioTurnCount(0);
+    if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
+    if (scenarioCountdownRef.current) clearInterval(scenarioCountdownRef.current);
+    if (scenarioRecorderRef.current?.state === 'recording') {
+      try { scenarioRecorderRef.current.stop(); } catch { }
+    }
+    if (scenarioStreamRef.current) {
+      scenarioStreamRef.current.getTracks().forEach(t => t.stop());
+      scenarioStreamRef.current = null;
+    }
   }
 
   // ---------- PICTURE DESCRIBE FUNCTIONS ----------
@@ -1469,6 +2105,12 @@ function App() {
   // Process audio and check against vocab
   const processPictureAudio = async (audioBase64) => {
     try {
+      // Start animated analysis steps
+      setAnalysisStep(0);
+      analysisTimerRef.current = setInterval(() => {
+        setAnalysisStep(prev => prev + 1);
+      }, 2000);
+
       // Single call: transcribe audio + get AI feedback in one Gemini request
       const { data, error } = await supabase.functions.invoke(
         "speech-check",
@@ -1477,10 +2119,14 @@ function App() {
             audioBase64: audioBase64,
             exerciseType: "picture-describe",
             vocabList: pictureVocab.map(v => v.arabic_text),
-            lessonContext: activePictureLesson?.title || ""
+            lessonContext: activePictureLesson?.title || "",
+            imageUrl: activePictureLesson?.image_url || ""
           }
         }
       );
+
+      // Clear analysis timer
+      if (analysisTimerRef.current) { clearInterval(analysisTimerRef.current); analysisTimerRef.current = null; }
 
       if (error) {
         console.error("Picture speech check error:", error);
@@ -1504,28 +2150,36 @@ function App() {
       // Check if passed (use lesson threshold or default 70%)
       const threshold = activePictureLesson?.pass_threshold || 70;
 
-      if (percent >= threshold) {
-        playCelebrationSound();
-        triggerHeavyHaptic();
-        setPicturePhase("success");
-      } else {
-        playSpeakingIncorrectSound();
-        triggerHaptic();
-        setPicturePhase("retry");
-      }
+      // Always go to feedback phase — no more pass/fail
+      setPicturePhase("feedback");
+      setPictureFeedbackIndex(0);
+      triggerHaptic();
 
       setPictureCheckingAnswer(false);
 
-      // AI feedback already included in the response — no second call needed
-      if (parsed?.overallScore !== undefined) {
-        setAiFeedback({
-          overallScore: parsed.overallScore,
-          feedback: parsed.feedback,
-          corrections: parsed.corrections || [],
-          encouragement: parsed.encouragement,
-          missedVocab: parsed.missedVocab || []
-        });
-        setLoadingAiFeedback(false);
+      // Process AI feedback steps from the response
+      if (parsed?.steps && Array.isArray(parsed.steps)) {
+        setPictureFeedbackSteps(parsed.steps);
+        setPictureScore(parsed.score ?? null);
+        // Store vocab stats separately (keep score as a number)
+        if (parsed.vocabUsed != null) {
+          setPictureVocabStats({ vocabUsed: parsed.vocabUsed, vocabTotal: parsed.vocabTotal });
+        }
+      } else {
+        // Fallback: create basic feedback from old format
+        const fallbackSteps = [];
+        if (parsed?.feedback) {
+          fallbackSteps.push({ type: 'segment', snippet: transcript, analysis: parsed.feedback, tip: null });
+        }
+        if (parsed?.corrections?.length > 0) {
+          parsed.corrections.forEach(c => {
+            fallbackSteps.push({ type: 'segment', snippet: c.said, analysis: c.explanation, tip: `Better: ${c.better}` });
+          });
+        }
+        fallbackSteps.push({ type: 'vocab_check', used: matched.map(w => w.arabic), missed: missed.map(w => w.arabic), analysis: `You used ${percent}% of the target vocabulary.` });
+        fallbackSteps.push({ type: 'summary', message: parsed?.encouragement || 'Keep practicing! Every attempt makes you stronger. 💪' });
+        setPictureFeedbackSteps(fallbackSteps);
+        setPictureScore(parsed?.overallScore ? (parsed.overallScore / 10) : (percent / 10));
       }
     } catch (err) {
       console.error("Error processing picture audio:", err);
@@ -1570,12 +2224,116 @@ function App() {
     setPictureCheckingAnswer(false);
     setAiFeedback(null);
     setLoadingAiFeedback(false);
+    setPictureFeedbackSteps([]);
+    setPictureFeedbackIndex(0);
+    setPictureScore(null);
+    setPictureVocabStats(null);
+    setChallengeRecording(false);
+    setChallengeCompleted({});
+    setChallengeResult({});
+    setChallengeChecking(false);
+    setAnalysisStep(0);
+    if (analysisTimerRef.current) { clearInterval(analysisTimerRef.current); analysisTimerRef.current = null; }
+    if (challengeRecorderRef.current) {
+      try { challengeRecorderRef.current.stop(); } catch { }
+      challengeRecorderRef.current = null;
+    }
+    if (challengeStreamRef.current) {
+      challengeStreamRef.current.getTracks().forEach(t => t.stop());
+      challengeStreamRef.current = null;
+    }
     setPictureRecordingTime(0);
     if (pictureTimerRef.current) {
       clearInterval(pictureTimerRef.current);
       pictureTimerRef.current = null;
     }
   }
+
+  // Challenge mic helpers — actually evaluate via Gemini
+  const startChallengeRecording = async (stepIdx) => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      challengeStreamRef.current = stream;
+      const recorder = new MediaRecorder(stream);
+      challengeRecorderRef.current = recorder;
+      const chunks = [];
+      recorder.ondataavailable = (e) => chunks.push(e.data);
+      recorder.onstop = async () => {
+        // Convert to base64 and send to edge function
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          const base64 = reader.result;
+          setChallengeChecking(true);
+          try {
+            const step = pictureFeedbackSteps[stepIdx];
+            const isSpeakChallenge = step.type === 'speak_challenge';
+            const expectedText = step.type === 'correction_challenge'
+              ? step.corrected
+              : (step.prompt || step.hint || "");
+            const { data, error } = await supabase.functions.invoke("speech-check", {
+              body: {
+                audioBase64: base64,
+                exerciseType: isSpeakChallenge ? "speak-check" : "challenge-check",
+                expectedText: expectedText
+              }
+            });
+            if (!error && data) {
+              const parsed = typeof data === "string" ? JSON.parse(data) : data;
+              const pass = parsed?.pass === true;
+              const feedback = parsed?.feedback || (pass ? "Good!" : "That wasn't quite right.");
+              setChallengeResult(prev => ({
+                ...prev,
+                [stepIdx]: { good: pass, feedback }
+              }));
+
+              if (pass) {
+                triggerSuccessFeedback();
+                setChallengeCompleted(prev => ({ ...prev, [stepIdx]: true }));
+              } else {
+                triggerHaptic();
+                // Don't mark as completed — allow retry
+              }
+            } else {
+              // Network/edge error — be honest
+              setChallengeResult(prev => ({ ...prev, [stepIdx]: { good: false, feedback: "Couldn't evaluate — please try again." } }));
+            }
+          } catch {
+            setChallengeResult(prev => ({ ...prev, [stepIdx]: { good: false, feedback: "Couldn't evaluate — please try again." } }));
+          }
+          setChallengeChecking(false);
+        };
+        reader.readAsDataURL(blob);
+      };
+      recorder.start();
+      setChallengeRecording(true);
+
+      // Auto-stop: 20s for speak_challenge, 10s for correction
+      const step = pictureFeedbackSteps[stepIdx];
+      const timeout = step?.type === 'speak_challenge' ? 30000 : 10000;
+      setTimeout(() => {
+        if (challengeRecorderRef.current?.state === 'recording') {
+          stopChallengeRecording(stepIdx);
+        }
+      }, timeout);
+    } catch (err) {
+      console.error("Challenge mic error:", err);
+      setChallengeCompleted(prev => ({ ...prev, [stepIdx]: true }));
+      setChallengeResult(prev => ({ ...prev, [stepIdx]: { good: false, feedback: "Couldn't access mic." } }));
+    }
+  };
+
+  const stopChallengeRecording = (stepIdx) => {
+    if (challengeRecorderRef.current?.state === 'recording') {
+      challengeRecorderRef.current.stop();
+    }
+    if (challengeStreamRef.current) {
+      challengeStreamRef.current.getTracks().forEach(t => t.stop());
+      challengeStreamRef.current = null;
+    }
+    challengeRecorderRef.current = null;
+    setChallengeRecording(false);
+  };
 
   // ---------- LOAD PROGRESS WHEN USER CHANGES ----------
 
@@ -1590,7 +2348,7 @@ function App() {
       // Load book lesson progress
       const { data, error } = await supabase
         .from("lesson_progress")
-        .select("lesson_id, hearts_left");
+        .select("lesson_id, hearts_left, completed_at");
 
       if (error) {
         console.error("Error loading lesson progress:", error);
@@ -1602,7 +2360,7 @@ function App() {
       // Load speaking lesson progress
       const { data: speakingData, error: speakingError } = await supabase
         .from("speaking_lesson_progress")
-        .select("speaking_lesson_id");
+        .select("speaking_lesson_id, completed_at");
 
       if (speakingError) {
         console.error("Error loading speaking lesson progress:", speakingError);
@@ -1613,6 +2371,7 @@ function App() {
     }
 
     fetchProgress();
+    loadTodayScenario();
   }, [user]);
 
   // Reset quiz state
@@ -1672,11 +2431,23 @@ function App() {
       setSpeechError("");
       audioChunksRef.current = [];
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Request microphone permission explicitly first
+      try {
+        const permResult = await navigator.permissions.query({ name: 'microphone' });
+        if (permResult.state === 'denied') {
+          setSpeechError("Microphone permission denied. Please enable it in your device settings.");
+          return;
+        }
+      } catch (permErr) {
+        // permissions.query may not be supported — continue anyway
+        console.log('Permissions API not supported, will request via getUserMedia');
+      }
 
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'audio/webm;codecs=opus',
-      });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+
+      // Check if audio/webm is supported, fall back to default
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : '';
+      const mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
 
       mediaRecorderRef.current = mediaRecorder;
 
@@ -1690,21 +2461,20 @@ function App() {
         // Stop all tracks to release the microphone
         stream.getTracks().forEach(track => track.stop());
 
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm;codecs=opus' });
+        const recordedMime = mediaRecorder.mimeType || 'audio/webm;codecs=opus';
+        const audioBlob = new Blob(audioChunksRef.current, { type: recordedMime });
 
         // Convert blob to base64
         const reader = new FileReader();
         reader.onloadend = () => {
           const base64String = reader.result;
-          // Strip the data URL prefix (e.g., "data:audio/webm;codecs=opus;base64,")
           const base64Audio = base64String.split(',')[1];
           setRecordedAudio(base64Audio);
-          console.log('Audio recorded (WEBM_OPUS base64), length:', base64Audio.length);
+          console.log('Audio recorded (' + recordedMime + ' base64), length:', base64Audio.length);
 
           // For Speaking Practice mode, pass the current item's arabic_text
           const currentSpeakingItem = speakingLessonItems[currentSpeakingItemIndex];
           const expectedText = currentSpeakingItem?.arabic_text || null;
-          // Pass isSpeakingPractice flag when in speaking lesson mode
           const isSpeakingPractice = !!currentSpeakingItem;
           sendAudioToBackend(base64Audio, expectedText, isSpeakingPractice);
         };
@@ -1713,10 +2483,26 @@ function App() {
 
       mediaRecorder.start();
       setIsRecording(true);
-      console.log('Recording started (WEBM_OPUS)');
+      console.log('Recording started (' + (mimeType || 'default') + ')');
+
+      if (practiceMode === 'speaking') {
+        setTimeout(() => {
+          if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+            stopRecording();
+          }
+        }, 10000);
+      }
     } catch (err) {
       console.error("Start recording error:", err);
-      setSpeechError("Failed to start recording: " + (err.message || err));
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setSpeechError("Microphone access denied. Please allow microphone permission in your device settings.");
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setSpeechError("No microphone found on this device.");
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        setSpeechError("Microphone is in use by another app. Please close it and try again.");
+      } else {
+        setSpeechError("Failed to start recording: " + (err.message || err));
+      }
     }
   };
 
@@ -1791,10 +2577,10 @@ function App() {
         let feedback;
         // If no expected text, show success for any transcription
         if (!expected) {
-          feedback = transcript ? "Good ✅" : "Try again 🔁";
-        } else if (score >= 0.55) feedback = "Good ✅";
-        else if (score >= 0.3) feedback = "Almost 👍";
-        else feedback = "Try again 🔁";
+          feedback = transcript ? "Good" : "Try again";
+        } else if (score >= 0.55) feedback = "Good";
+        else if (score >= 0.3) feedback = "Almost";
+        else feedback = "Try again";
 
         setSpeechFeedback(feedback);
         setSpokenText(transcript); // Show what was transcribed
@@ -1815,7 +2601,7 @@ function App() {
 
         // Play jingle sounds for speaking practice
         if (isSpeakingPractice) {
-          if (feedback === "Good ✅") {
+          if (feedback === "Good") {
             playSpeakingCorrectSound();
           } else {
             playSpeakingIncorrectSound();
@@ -1823,7 +2609,7 @@ function App() {
         }
 
         // Update speakingItemCorrect for Speaking Practice mode
-        if (feedback === "Good ✅") {
+        if (feedback === "Good") {
           setSpeakingItemCorrect(true);
         }
       }
@@ -2050,6 +2836,8 @@ function App() {
     resetAudio();
     resetLessonFlow();
     setQuestions([]);
+    setPracticeMode(null);
+    setActiveTab("home");
 
     endTransition();
   }
@@ -2103,7 +2891,7 @@ function App() {
       setShowJumpToCurrent(false);
     }
 
-    // Instant playback - no delays
+    // Instant playback - with retry on failure
     audioRef.current.currentTime = 0;
     audioRef.current.play()
       .then(() => {
@@ -2111,7 +2899,21 @@ function App() {
         setAudioCompleted(false);
       })
       .catch((err) => {
-        console.error("Audio play failed:", err);
+        console.warn("Audio play failed, retrying after reload:", err);
+        // Retry: reload the source and try again
+        audioRef.current.src = activeLesson.audio_url;
+        audioRef.current.load();
+        audioRef.current.oncanplaythrough = () => {
+          audioRef.current.oncanplaythrough = null;
+          audioRef.current.play()
+            .then(() => {
+              setAudioPlaying(true);
+              setAudioCompleted(false);
+            })
+            .catch((retryErr) => {
+              console.error("Audio retry also failed:", retryErr);
+            });
+        };
       });
   }
 
@@ -2323,100 +3125,143 @@ function App() {
 
   if (!user) {
     return (
-      <div className="auth-page">
-        <div className="auth-overlay" />
-        <div className="auth-content">
-          <div className="auth-left">
-            <div className="auth-logo animate-slide-up">
+      <div className="min-h-screen bg-background text-foreground flex flex-col items-center justify-center p-6 relative overflow-hidden font-sans">
+        {/* Background Decorative Elements */}
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/10 rounded-full blur-[120px]" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-secondary/10 rounded-full blur-[120px]" />
+        
+        <div className="w-full max-w-md z-10 space-y-8 animate-in fade-in zoom-in duration-500">
+          {/* Logo & Header */}
+          <div className="flex flex-col items-center text-center space-y-4">
+            <div className="w-24 h-24 bg-card rounded-[2rem] border border-border/50 shadow-xl flex items-center justify-center p-4 active:scale-95 transition-transform duration-300">
               <img
                 src="/clemency-icon.png"
                 alt="Ihya Institute Logo"
-                style={{ width: "120px", height: "auto" }}
+                className="w-full h-full object-contain"
               />
             </div>
-            <h1 className="text-display animate-slide-up delay-100">
-              Welcome to the Iyha Arabic App!
-            </h1>
-
-            {/* Auth Card - Moved here between title and description */}
-            <div className="auth-card-inline animate-slide-up delay-150">
-              <h2>{authMode === "signin" ? "Welcome back" : "Create account"}</h2>
-              <p className="auth-subtitle">
-                {authMode === "signin"
-                  ? "Sign in to continue your Arabic journey."
-                  : "Sign up to start learning Arabic."}
+            <div>
+              <h1 className="font-heading text-3xl font-bold tracking-tight">Ihya Arabic</h1>
+              <p className="text-muted-foreground mt-2 text-sm font-medium tracking-wide">
+                Start your journey towards mastering Arabic
               </p>
+            </div>
+          </div>
 
-              <form
-                onSubmit={authMode === "signin" ? handleSignIn : handleSignUp}
-                className="auth-form"
-              >
-                <label className="auth-label">
-                  Email
+          {/* Auth Card */}
+          <div className="bg-card/40 backdrop-blur-2xl border border-border/50 rounded-[2.5rem] p-8 shadow-2xl relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-primary via-secondary to-primary" />
+            
+            <div className="mb-8">
+              <h2 className="font-heading text-xl font-bold">
+                {authMode === "signin" ? "Welcome back" : "Join the adventure"}
+              </h2>
+              <p className="text-muted-foreground text-sm mt-1">
+                {authMode === "signin"
+                  ? "Sign in to continue your progress"
+                  : "Create an account to start learning"}
+              </p>
+            </div>
+
+            <form
+              onSubmit={authMode === "signin" ? handleSignIn : handleSignUp}
+              className="space-y-5"
+            >
+              <div className="space-y-2">
+                <label className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground ml-1">
+                  Email Address
+                </label>
+                <div className="relative group">
+                  <div className="absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground group-focus-within:text-primary transition-colors">
+                    <Icon icon="solar:letter-bold" className="text-xl" />
+                  </div>
                   <input
                     type="email"
                     value={authEmail}
                     onChange={(e) => setAuthEmail(e.target.value)}
                     required
-                    className="auth-input"
-                    placeholder="you@example.com"
+                    className="w-full bg-background/50 border border-border/50 rounded-2xl py-4 pl-12 pr-4 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
+                    placeholder="explorer@arabic.id"
                   />
-                </label>
-                <label className="auth-label">
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground ml-1">
                   Password
+                </label>
+                <div className="relative group">
+                  <div className="absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground group-focus-within:text-primary transition-colors">
+                    <Icon icon="solar:lock-password-bold" className="text-xl" />
+                  </div>
                   <input
                     type="password"
                     value={authPassword}
                     onChange={(e) => setAuthPassword(e.target.value)}
                     required
-                    className="auth-input"
+                    className="w-full bg-background/50 border border-border/50 rounded-2xl py-4 pl-12 pr-4 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
                     placeholder="••••••••"
                   />
-                </label>
+                </div>
+              </div>
 
-                {authError && <div className="auth-error">{authError}</div>}
-
-                <button type="submit" className="auth-primary-btn">
-                  {authMode === "signin" ? "Sign in" : "Sign up"}
-                </button>
-              </form>
+              {authError && (
+                <div className="bg-destructive/10 border border-destructive/20 text-destructive text-xs font-bold p-4 rounded-2xl flex items-center gap-3 animate-in fade-in slide-in-from-top-2">
+                  <Icon icon="solar:danger-bold" className="text-lg flex-shrink-0" />
+                  <span>{authError}</span>
+                </div>
+              )}
 
               <button
+                type="submit"
+                className="w-full bg-primary text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-2 shadow-[0_8px_24px_rgba(224,159,62,0.3)] active:scale-[0.98] transition-all mt-4 text-sm uppercase tracking-wider"
+              >
+                {authMode === "signin" ? (
+                  <>
+                    <Icon icon="solar:login-bold" className="text-lg" />
+                    Sign In
+                  </>
+                ) : (
+                  <>
+                    <Icon icon="solar:user-plus-bold" className="text-lg" />
+                    Create Account
+                  </>
+                )}
+              </button>
+            </form>
+
+            <div className="mt-8 pt-6 border-t border-border/30 text-center">
+              <button
                 type="button"
-                className="auth-secondary-link"
+                className="text-sm font-bold text-muted-foreground hover:text-primary transition-colors flex items-center justify-center gap-2 mx-auto"
                 onClick={() => {
                   triggerHaptic();
                   setAuthMode(authMode === "signin" ? "signup" : "signin");
                 }}
               >
                 {authMode === "signin"
-                  ? "Need an account? Create one"
-                  : "Already have an account? Sign in"}
+                  ? "Don't have an account? Sign up"
+                  : "Already a member? Sign in"}
+                <Icon icon="solar:alt-arrow-right-bold" className="text-xs" />
               </button>
-            </div>
-
-            <p
-              className="animate-slide-up delay-200"
-              style={{
-                fontSize: "1.2rem",
-                lineHeight: "1.6",
-                maxWidth: "500px",
-                marginTop: "1.5rem",
-              }}
-            >
-              Designed by students for students, to aid your journey towards
-              mastering Arabic.
-            </p>
-            <div className="auth-badge-row animate-slide-up delay-300">
-              <span className="auth-badge">Using العربية للناشئين books</span>
-              <span className="auth-badge">
-                Dialogue based to aid listening skills
-              </span>
-              <span className="auth-badge">Progress saved with quizzes</span>
             </div>
           </div>
 
-
+          {/* Features Row */}
+          <div className="grid grid-cols-2 gap-3 pb-8">
+            <div className="bg-card/30 backdrop-blur-md border border-border/30 rounded-2.5xl p-4 flex flex-col items-center text-center gap-2">
+              <div className="bg-primary/20 w-8 h-8 rounded-lg flex items-center justify-center border border-primary/20">
+                <Icon icon="solar:book-bookmark-bold" className="text-primary text-sm" />
+              </div>
+              <span className="text-[10px] font-bold text-muted-foreground tracking-tight uppercase">Dialogue Lessons</span>
+            </div>
+            <div className="bg-card/30 backdrop-blur-md border border-border/30 rounded-2.5xl p-4 flex flex-col items-center text-center gap-2">
+              <div className="bg-secondary/20 w-8 h-8 rounded-lg flex items-center justify-center border border-secondary/20">
+                <Icon icon="solar:medal-star-bold" className="text-secondary text-sm" />
+              </div>
+              <span className="text-[10px] font-bold text-muted-foreground tracking-tight uppercase">Track Progress</span>
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -2424,9 +3269,10 @@ function App() {
 
   // ---------- STREAKS PAGE ----------
   if (showStreaksPage) {
-    // Generate a simple 30-day view for demo purposes
+    // Generate last 30 days
     const today = new Date();
-    const daysInMonth = 30; // approx 30 days history
+    const todayStr = today.toISOString().split('T')[0];
+    const daysInMonth = 30;
     const calendarDays = Array.from({ length: daysInMonth }, (_, i) => {
       const d = new Date(today);
       d.setDate(today.getDate() - (daysInMonth - 1 - i));
@@ -2434,216 +3280,850 @@ function App() {
     });
 
     return (
-      <div className="streaks-screen swipe-in">
-        <header className="fixed-header" style={{ justifyContent: 'space-between', borderBottom: 'none', background: 'transparent' }}>
+      <div className="min-h-screen bg-background text-foreground font-sans">
+        {/* Header */}
+        <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
           <button
-            className="btn-nav-arrow"
+            className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center"
             onClick={() => { triggerHaptic(); setShowStreaksPage(false); }}
-            style={{ backgroundColor: 'var(--card)', color: 'var(--text-main)', border: '2px solid var(--border)' }}
           >
-            <MdArrowBackIosNew />
+            <MdArrowBackIosNew className="text-foreground" />
           </button>
-          <div style={{ width: 40 }} /> {/* Spacer */}
+          <h1 className="font-heading text-lg font-bold">Streaks</h1>
+          <div className="w-10" />
         </header>
 
-        <div className="streaks-scroll-content">
-          <div className="streaks-hero">
-            <div className="streaks-icon-wrapper">
-              <Icon icon="solar:flame-bold" className="streaks-main-icon" />
-              <div className="streaks-icon-glow"></div>
+        <main className="px-6 space-y-8 pb-12">
+          {/* Hero */}
+          <section className="flex flex-col items-center text-center py-6">
+            <div className="relative mb-4">
+              <div className="w-24 h-24 rounded-full bg-primary/20 flex items-center justify-center border-2 border-primary/30">
+                <Icon icon="solar:flame-bold" className="text-primary text-5xl" />
+              </div>
+              <div className="absolute inset-0 rounded-full bg-primary/10 blur-xl -z-10" />
             </div>
-            <h1 className="streaks-main-number">1</h1>
-            <p className="streaks-subtitle">Day Streak!</p>
-            <p className="streaks-motivation">You're on fire! Practice tomorrow to keep it going.</p>
-          </div>
+            <h1 className="font-heading text-6xl font-bold text-primary">{currentStreak}</h1>
+            <p className="font-heading text-xl font-bold mt-1">Day Streak!</p>
+            <p className="text-sm text-muted-foreground mt-2">
+              {currentStreak > 0 ? "You're on fire! Practice tomorrow to keep it going." : "Start a lesson today to begin your streak!"}
+            </p>
+          </section>
 
-          <div className="streaks-stats-container">
-            <div className="streaks-stat-card">
-              <Icon icon="solar:history-bold" className="streaks-sub-icon" style={{ color: 'var(--blue)' }} />
-              <div className="streaks-stat-info">
-                <span className="streaks-stat-value">3</span>
-                <span className="streaks-stat-label">Longest Streak</span>
+          {/* Stats */}
+          <section className="grid grid-cols-2 gap-4">
+            <div className="bg-card rounded-3xl p-5 border border-border/50 flex items-center gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-blue/10 flex items-center justify-center">
+                <Icon icon="solar:history-bold" className="text-blue text-2xl" />
+              </div>
+              <div>
+                <span className="text-2xl font-bold">{longestStreak}</span>
+                <p className="text-xs text-muted-foreground font-medium">Longest Streak</p>
               </div>
             </div>
-
-            <div className="streaks-stat-card">
-              <Icon icon="solar:calendar-date-bold" className="streaks-sub-icon" style={{ color: 'var(--green)' }} />
-              <div className="streaks-stat-info">
-                <span className="streaks-stat-value">14</span>
-                <span className="streaks-stat-label">Total Days</span>
+            <div className="bg-card rounded-3xl p-5 border border-border/50 flex items-center gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-green/10 flex items-center justify-center">
+                <Icon icon="solar:calendar-date-bold" className="text-green text-2xl" />
+              </div>
+              <div>
+                <span className="text-2xl font-bold">{totalDays}</span>
+                <p className="text-xs text-muted-foreground font-medium">Total Days</p>
               </div>
             </div>
-          </div>
+          </section>
 
-          <div className="streaks-calendar-card">
-            <div className="streaks-calendar-header">
-              <h3 className="streaks-calendar-title">Last 30 Days</h3>
-            </div>
-            <div className="streaks-calendar-grid">
+          {/* Calendar */}
+          <section className="bg-card rounded-3xl p-6 border border-border/50">
+            <h3 className="font-heading text-lg font-bold mb-4">Last 30 Days</h3>
+            <div className="grid grid-cols-7 gap-2">
               {calendarDays.map((d, i) => {
-                const isToday = i === daysInMonth - 1;
-                // Mock activity data: active today, and random past days
-                const isActive = isToday || Math.random() > 0.75;
+                const dateStr = d.toISOString().split('T')[0];
+                const isToday = dateStr === todayStr;
+                const isActive = activeDaysSet.has(dateStr);
                 return (
                   <div
                     key={i}
-                    className={`streak-day-cell ${isActive ? 'active' : ''} ${isToday ? 'today' : ''}`}
+                    className={`aspect-square rounded-xl flex items-center justify-center text-xs font-bold transition-all ${isActive
+                      ? 'bg-primary/20 text-primary border border-primary/30'
+                      : 'bg-muted/30 text-muted-foreground border border-border/30'
+                      } ${isToday ? 'ring-2 ring-primary' : ''}`}
                   >
-                    {isActive && <Icon icon="solar:flame-bold" />}
+                    {isActive ? (
+                      <Icon icon="solar:flame-bold" className="text-lg" />
+                    ) : (
+                      <span>{d.getDate()}</span>
+                    )}
                   </div>
                 );
               })}
             </div>
-          </div>
-        </div>
+          </section>
+        </main>
       </div>
     );
   }
 
-  // ---------- PRACTICE SELECTION SCREEN ----------
+  // ---------- MAIN TAB-BASED HOME SCREEN ----------
 
-  if (user && practiceMode === null && !activeLesson && !activeSpeakingLesson) {
+  if (user && practiceMode === null && !activeLesson && !activeSpeakingLesson && !scenarioPhase) {
+
+    // Helper: find next incomplete lesson
+    const nextLesson = (() => {
+      if (!allLessons || allLessons.length === 0) return null;
+      for (const lesson of allLessons) {
+        if (!isLessonCompleted(lesson.id)) return lesson;
+      }
+      return null;
+    })();
+
+    // Helper: find which stage the next lesson belongs to
+    const nextLessonStage = nextLesson ? stages.find(s => s.id === nextLesson.stage_id) : null;
+
+    // Completed lesson count
+    const completedLessonCount = lessonProgress.length;
+
     return (
-      <div className="explorer-shell">
-        {/* Aged paper texture overlay */}
-        <div className="texture-overlay" />
+      <div className="min-h-screen bg-background text-foreground pb-40 font-sans selection:bg-primary/30">
 
-        {/* Header with profile */}
-        <header className="explorer-header">
-          <div className="explorer-header-content">
-            <div className="explorer-profile" onClick={() => { triggerHaptic(); setShowSignOutConfirm(true); }} style={{ cursor: 'pointer' }}>
-              <div className="explorer-avatar-wrap">
-                <div className="explorer-avatar">
-                  <Icon icon="solar:user-circle-bold" className="explorer-avatar-icon" />
-                </div>
-                <div className="explorer-level-badge">LVL 1</div>
+        {/* ========== HOME TAB ========== */}
+        {activeTab === "home" && (
+          <>
+            <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+              <div className="flex flex-col items-start">
+                <p className="text-base font-medium text-muted-foreground font-arabic tracking-wide" dir="rtl">مرحباً</p>
+                <h1 className="font-heading text-xl font-bold">{user.email?.split("@")[0] || "Explorer"}</h1>
               </div>
-              <div className="explorer-user-info">
-                <h2 className="explorer-username">Explorer</h2>
-                <p className="explorer-title">Scholar of the Sands</p>
-              </div>
-            </div>
-            <div className="explorer-stats">
               <div
-                className="explorer-stat"
+                className="flex items-center gap-2 bg-secondary/10 px-3 py-1.5 rounded-full border border-secondary/20 shadow-[0_0_12px_rgba(229,107,111,0.15)] cursor-pointer"
                 onClick={() => { triggerHaptic(); setShowStreaksPage(true); }}
-                style={{ cursor: 'pointer' }}
               >
-                <Icon icon="solar:flame-bold" className="explorer-stat-icon flame" />
-                <span className="explorer-stat-value">1</span>
+                <Icon icon="solar:fire-bold" className="text-secondary text-lg" />
+                <span className="text-secondary font-bold text-sm tracking-wide">{currentStreak}</span>
               </div>
-              <div className="explorer-stat">
-                <Icon icon="solar:crown-star-bold" className="explorer-stat-icon crown" />
-                <span className="explorer-stat-value">0</span>
+            </header>
+
+            <main className="px-6 space-y-8 mt-4">
+              {/* Stats Grid */}
+              <section className="grid grid-cols-2 gap-3">
+                <div className="bg-card p-4 rounded-3xl flex flex-col items-center justify-center gap-1 border border-border/50 shadow-sm">
+                  <Icon icon="solar:star-fall-bold" className="text-primary text-2xl mb-1" />
+                  <span className="text-2xl font-heading font-bold">{stages.length > 0 ? `${stages.length}` : "—"}</span>
+                  <span className="text-xs text-muted-foreground font-medium">Stages</span>
+                </div>
+                <div className="bg-card p-4 rounded-3xl flex flex-col items-center justify-center gap-1 border border-border/50 shadow-sm">
+                  <Icon icon="solar:book-bookmark-bold" className="text-accent text-2xl mb-1" />
+                  <span className="text-2xl font-heading font-bold">{completedLessonCount}/{allLessons.length}</span>
+                  <span className="text-xs text-muted-foreground font-medium text-center">Lessons Completed</span>
+                </div>
+              </section>
+
+              {/* Up Next Card */}
+              {nextLesson && (
+                <section className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h2 className="font-heading text-xl font-bold">Up Next</h2>
+                  </div>
+                  <div className="group relative overflow-hidden rounded-[2rem] bg-card border border-border/50 shadow-lg">
+                    {nextLesson.cover_image_url && (
+                      <div className="absolute inset-0 z-0">
+                        <img src={nextLesson.cover_image_url} alt="Lesson Cover" className="w-full h-full object-cover opacity-40 mix-blend-overlay" />
+                        <div className="absolute inset-0 bg-gradient-to-t from-card via-card/80 to-transparent" />
+                      </div>
+                    )}
+                    <div className="relative z-10 p-6 flex flex-col h-full justify-end min-h-[180px]">
+                      {nextLessonStage && (
+                        <div className="flex items-center gap-2 mb-3">
+                          <span className="bg-primary/20 text-primary px-3 py-1 rounded-full text-xs font-bold tracking-wider uppercase border border-primary/20">
+                            {nextLessonStage.title}
+                          </span>
+                        </div>
+                      )}
+                      <h3 className="font-heading text-2xl font-bold mb-1">{nextLesson.title}</h3>
+                      <p className="text-muted-foreground text-sm mb-6">
+                        {nextLesson.format === "dialogue" ? "Interactive dialogue lesson" : "Reading comprehension lesson"}
+                      </p>
+                      <button
+                        className="w-full bg-primary text-primary-foreground font-bold py-4 rounded-2xl flex items-center justify-center gap-2 shadow-[0_4px_16px_rgba(224,159,62,0.3)] active:scale-[0.98] transition-all"
+                        onClick={() => { triggerHaptic(); setPracticeMode("book"); openLesson(nextLesson); }}
+                      >
+                        <Icon icon="solar:play-circle-bold" className="text-xl" />
+                        Continue Learning
+                      </button>
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {/* Word of the Day */}
+              <section>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="font-heading text-xl font-bold">Word of the Day</h2>
+                  <button
+                    className="text-muted-foreground hover:text-primary transition-colors"
+                    onClick={() => { triggerHaptic(); setPracticeMode("wotd"); loadWordOfTheDay(); }}
+                  >
+                    <Icon icon="solar:arrow-right-bold" className="text-xl" />
+                  </button>
+                </div>
+                <div
+                  className="bg-card rounded-[2rem] p-6 border border-border/50 shadow-md relative overflow-hidden flex flex-col cursor-pointer active:scale-[0.98] transition-transform"
+                  onClick={() => { triggerHaptic(); setPracticeMode("wotd"); loadWordOfTheDay(); }}
+                >
+                  <div className="absolute top-0 right-0 w-2 h-full bg-primary rounded-r-3xl" />
+                  <div dir="rtl" className="text-right mb-4">
+                    <h3 className="font-heading text-5xl text-primary leading-tight font-medium" style={{ fontFamily: "'Noto Naskh Arabic', serif" }}>
+                      كلمة
+                    </h3>
+                    <p className="text-muted-foreground text-sm mt-2 font-medium" dir="ltr">kalima</p>
+                  </div>
+                  <div className="h-px bg-border/50 w-full my-4" />
+                  <div>
+                    <p className="text-lg font-bold mb-1">Word</p>
+                    <p className="text-sm text-muted-foreground italic">noun — Tap to explore today's word</p>
+                  </div>
+                </div>
+              </section>
+
+              {/* Daily Goal */}
+              <section>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="font-heading text-xl font-bold">Daily Goal</h2>
+                  <button
+                    className="text-primary text-xs font-bold uppercase tracking-widest"
+                    onClick={() => { triggerHaptic(); setShowGoalPicker(!showGoalPicker); }}
+                  >
+                    {showGoalPicker ? "Done" : "Edit"}
+                  </button>
+                </div>
+
+                {showGoalPicker ? (
+                  <div className="bg-card rounded-3xl p-6 border border-border/50 space-y-4">
+                    <p className="text-sm text-muted-foreground font-medium">Choose your daily goal:</p>
+                    <div className="grid grid-cols-5 gap-2">
+                      {[5, 10, 15, 20, 30].map(mins => (
+                        <button
+                          key={mins}
+                          className={`py-3 rounded-2xl font-bold text-sm transition-all active:scale-95 ${dailyGoalMinutes === mins
+                            ? 'bg-primary text-white border-2 border-primary shadow-[0_2px_12px_rgba(224,159,62,0.3)]'
+                            : 'bg-muted/30 text-muted-foreground border border-border/50'
+                            }`}
+                          onClick={() => {
+                            triggerHaptic();
+                            setDailyGoalMinutes(mins);
+                            const today = new Date().toISOString().slice(0, 10);
+                            supabase.from('user_daily_stats').update({ daily_goal_minutes: mins })
+                              .eq('user_id', user.id).eq('date', today)
+                              .then(({ error }) => { if (error) console.error('Error updating daily goal in DB', error) });
+                          }}
+                        >
+                          {mins}m
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : (() => {
+                  // Use tracked time spent on app today
+                  const minutesSpent = Math.floor(dailySecondsSpent / 60);
+                  const progress = Math.min(minutesSpent / dailyGoalMinutes, 1);
+                  const circumference = 2 * Math.PI * 44;
+                  const dashOffset = circumference - (progress * circumference);
+                  const remaining = Math.max(0, dailyGoalMinutes - minutesSpent);
+
+                  return (
+                    <div className="bg-card rounded-3xl p-6 border border-border/50 flex items-center gap-6">
+                      {/* Circular Progress */}
+                      <div className="relative flex-shrink-0">
+                        <svg width="96" height="96" viewBox="0 0 100 100" className="-rotate-90">
+                          <circle cx="50" cy="50" r="44" fill="none" stroke="var(--muted)" strokeWidth="6" />
+                          <circle
+                            cx="50" cy="50" r="44" fill="none"
+                            stroke={progress >= 1 ? "var(--green)" : "var(--primary)"}
+                            strokeWidth="6" strokeLinecap="round"
+                            strokeDasharray={circumference}
+                            strokeDashoffset={dashOffset}
+                            style={{ transition: 'stroke-dashoffset 0.5s ease' }}
+                          />
+                        </svg>
+                        <div className="absolute inset-0 flex flex-col items-center justify-center">
+                          {progress >= 1 ? (
+                            <Icon icon="solar:check-circle-bold" className="text-green text-3xl" />
+                          ) : (
+                            <>
+                              <span className="text-xl font-bold">{minutesSpent}</span>
+                              <span className="text-[10px] text-muted-foreground font-medium">/ {dailyGoalMinutes}m</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Text */}
+                      <div className="flex-1">
+                        <h3 className="font-heading font-bold text-lg mb-1">
+                          {progress >= 1 ? "Goal Complete! 🎉" : `${Math.round(progress * 100)}% done`}
+                        </h3>
+                        <p className="text-sm text-muted-foreground leading-relaxed">
+                          {progress >= 1
+                            ? "Amazing work today! Keep the momentum going."
+                            : `${remaining} min${remaining === 1 ? '' : 's'} left to reach your goal.`
+                          }
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </section>
+
+              {/* Daily Scenario */}
+              {scenarioData && (
+                <section>
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="font-heading text-xl font-bold">Daily Scenario</h2>
+                    {scenarioCompleted && (
+                      <span className="text-xs font-bold text-green-500 bg-green-500/10 px-3 py-1 rounded-full">✓ Done</span>
+                    )}
+                  </div>
+                  <div
+                    className="bg-card rounded-[2rem] p-6 border border-border/50 shadow-md relative overflow-hidden cursor-pointer active:scale-[0.98] transition-transform"
+                    onClick={() => {
+                      triggerHaptic();
+                      if (scenarioCompleted) {
+                        // Show "come back tomorrow" toast
+                        setSpeechError("Come back tomorrow for a new scenario! 🌙");
+                        setTimeout(() => setSpeechError(""), 3000);
+                        return;
+                      }
+                      setScenarioPhase("difficulty");
+                    }}
+                  >
+                    <div className="absolute top-0 left-0 w-2 h-full rounded-l-3xl" style={{ background: 'linear-gradient(to bottom, #8b5cf6, #6366f1)' }} />
+                    <div className="flex items-center gap-4">
+                      <div className="text-4xl">{scenarioData.emoji}</div>
+                      <div className="flex-1">
+                        <h3 className="font-heading font-bold text-lg mb-0.5">{scenarioData.title}</h3>
+                        <p dir="rtl" className="text-muted-foreground text-sm" style={{ fontFamily: "'Noto Sans Arabic', sans-serif" }}>{scenarioData.titleAr}</p>
+                      </div>
+                      <div className="text-muted-foreground">
+                        {scenarioCompleted
+                          ? <Icon icon="solar:check-circle-bold" className="text-green-500 text-2xl" />
+                          : <Icon icon="solar:chat-round-dots-bold" className="text-violet-500 text-2xl" />
+                        }
+                      </div>
+                    </div>
+                    {!scenarioCompleted && (
+                      <div className="mt-3 pt-3 border-t border-border/30">
+                        <p className="text-xs text-muted-foreground">🎭 Practice Arabic in a real-life conversation</p>
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )}
+
+              {/* Quick Actions */}
+              <section className="grid grid-cols-2 gap-4">
+                <button
+                  className="bg-card p-5 rounded-[2rem] border border-border/50 shadow-sm flex flex-col items-start gap-4 active:scale-95 transition-transform text-left"
+                  onClick={() => { triggerHaptic(); setActiveTab("speaking"); loadSpeakingModes(); }}
+                >
+                  <div className="bg-chart-4/10 p-3 rounded-2xl border border-chart-4/20">
+                    <Icon icon="solar:microphone-3-bold" className="text-chart-4 text-2xl" />
+                  </div>
+                  <div>
+                    <h3 className="font-heading font-bold text-base mb-1">Speaking</h3>
+                    <p className="text-xs text-muted-foreground">Practice pronunciation</p>
+                  </div>
+                </button>
+                <button
+                  className="bg-card p-5 rounded-[2rem] border border-border/50 shadow-sm flex flex-col items-start gap-4 active:scale-95 transition-transform text-left"
+                  onClick={() => { triggerHaptic(); setPracticeMode("picture-describe"); loadPictureDescribeLessons(); }}
+                >
+                  <div className="bg-chart-2/10 p-3 rounded-2xl border border-chart-2/20">
+                    <Icon icon="solar:gallery-bold" className="text-chart-2 text-2xl" />
+                  </div>
+                  <div>
+                    <h3 className="font-heading font-bold text-base mb-1">Visuals</h3>
+                    <p className="text-xs text-muted-foreground">Describe pictures</p>
+                  </div>
+                </button>
+              </section>
+            </main>
+          </>
+        )}
+
+        {/* ========== COURSES TAB ========== */}
+        {activeTab === "courses" && (
+          <>
+            <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+              <div className="flex items-center gap-3">
+                <div className="bg-primary/20 p-2 rounded-xl border border-primary/30">
+                  <Icon icon="solar:book-bookmark-bold" className="text-primary text-2xl" />
+                </div>
+                <h1 className="font-heading text-xl font-bold">Your Courses</h1>
               </div>
-            </div>
+              {/* Current stage badge */}
+              {(() => {
+                const activeStage = stages.find(s => {
+                  const p = getStageProgress(s.id);
+                  return p.completed < p.total;
+                });
+                if (!activeStage) return null;
+                const idx = stages.indexOf(activeStage) + 1;
+                return (
+                  <div className="flex items-center gap-2 bg-muted/50 px-3 py-1.5 rounded-full border border-border/50">
+                    <Icon icon="solar:star-bold" className="text-primary text-sm" />
+                    <span className="text-xs font-bold tracking-tight">Stage {idx}</span>
+                  </div>
+                );
+              })()}
+            </header>
+            <main className="px-6 space-y-8">
+              {loadingStages ? (
+                <div className="flex justify-center py-16">
+                  <Leapfrog size="40" speed="2.5" color="var(--primary)" />
+                </div>
+              ) : (
+                stages.map((stage, stageIndex) => {
+                  const progress = getStageProgress(stage.id);
+                  const isCompleted = progress.completed === progress.total && progress.total > 0;
+                  const isActive = progress.completed < progress.total && (stageIndex === 0 || (() => {
+                    const prevProgress = getStageProgress(stages[stageIndex - 1].id);
+                    return prevProgress.completed === prevProgress.total && prevProgress.total > 0;
+                  })());
+                  const isLocked = !isCompleted && !isActive;
+                  const progressPercent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+
+                  // Get lessons for this stage
+                  const stageLessons = allLessons.filter(l => l.stage_id === stage.id);
+
+                  // Fallback cover images for stages without a database image
+                  const stageCoverFallbacks = ['/stage-cover-1.png', '/stage-cover-2.png', '/stage-cover-3.png'];
+                  const stageCoverImage = stage.cover_image_url || stageCoverFallbacks[stageIndex] || stageCoverFallbacks[0];
+
+                  return (
+                    <section key={stage.id} className="space-y-4">
+                      <div
+                        className={`relative overflow-hidden rounded-[2rem] border shadow-md group active:scale-[0.98] transition-all cursor-pointer ${isActive
+                          ? 'border-2 border-primary/50 shadow-[0_0_24px_rgba(224,159,62,0.15)]'
+                          : isLocked
+                            ? 'border-border/50 opacity-70 grayscale-[30%]'
+                            : expandedStageId === stage.id
+                              ? 'border-2 border-primary/30'
+                              : 'border-border/50'
+                          }`}
+                        onClick={() => { triggerHaptic(); setExpandedStageId(expandedStageId === stage.id ? null : stage.id); }}
+                      >
+                        <div className="h-32 w-full overflow-hidden">
+                          <img src={stageCoverImage} alt={stage.title} className="w-full h-full object-cover" />
+                          <div className="absolute inset-0 bg-gradient-to-t from-card via-card/40 to-transparent" />
+                        </div>
+                        <div className="p-6 bg-card relative">
+                          <div className="flex justify-between items-start mb-2">
+                            <div>
+                              {isActive && (
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="bg-primary/20 text-primary px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border border-primary/20">Active</span>
+                                </div>
+                              )}
+                              <h3 className="font-heading text-xl font-bold">{stage.title}</h3>
+                              {stage.description && <p className="text-sm text-muted-foreground mt-1 leading-relaxed">{stage.description}</p>}
+                            </div>
+                            {isCompleted && (
+                              <div className="bg-green-500/20 text-green-500 p-2 rounded-full border border-green-500/20">
+                                <Icon icon="solar:check-circle-bold" className="text-xl" />
+                              </div>
+                            )}
+                            {isLocked && (
+                              <div className="bg-muted p-2 rounded-full border border-border">
+                                <Icon icon="solar:lock-password-bold" className="text-xl text-muted-foreground" />
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Progress bar */}
+                          <div className="mt-6 flex items-center gap-3">
+                            <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
+                              <div
+                                className={`h-full rounded-full ${isCompleted ? 'bg-green-500' : isLocked ? 'bg-primary/20' : 'bg-primary'}`}
+                                style={{ width: `${progressPercent}%`, boxShadow: isActive ? '0 0 8px rgba(224,159,62,0.5)' : 'none' }}
+                              />
+                            </div>
+                            <span className={`text-xs font-bold uppercase ${isCompleted ? 'text-green-500' : isLocked ? 'text-muted-foreground' : 'text-primary'}`}>
+                              {isCompleted ? 'Completed' : isLocked ? 'Locked' : `${progressPercent}%`}
+                            </span>
+                          </div>
+
+                          {/* Lesson list — shown for active stage or any expanded stage */}
+                          {(isActive || expandedStageId === stage.id) && stageLessons.length > 0 && (
+                            <div className="mt-6 space-y-4">
+                              <div className="space-y-3 pt-4 border-t border-border/50">
+                                {stageLessons.map((lesson) => {
+                                  const completed = isLessonCompleted(lesson.id);
+                                  const isNext = nextLesson && nextLesson.id === lesson.id;
+                                  const locked = !completed && !isNext;
+                                  return (
+                                    <div
+                                      key={lesson.id}
+                                      className={`flex items-center justify-between p-4 bg-muted/30 rounded-2xl border cursor-pointer active:scale-[0.97] transition-all ${isNext
+                                        ? 'border-border/30 ring-1 ring-primary/30'
+                                        : locked
+                                          ? 'border-border/30 opacity-60'
+                                          : 'border-border/30'
+                                        }`}
+                                      onClick={(e) => { e.stopPropagation(); triggerHaptic(); setPracticeMode("book"); openLesson(lesson); }}
+                                    >
+                                      <div className="flex items-center gap-4">
+                                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${completed
+                                          ? 'bg-green-500/10 border border-green-500/20 text-green-500'
+                                          : isNext
+                                            ? 'bg-primary/10 border border-primary/20 text-primary'
+                                            : 'bg-muted border border-border text-muted-foreground'
+                                          }`}>
+                                          <Icon icon={completed ? "solar:check-circle-bold" : isNext ? "solar:play-circle-bold" : "solar:lock-password-bold"} className="text-xl" />
+                                        </div>
+                                        <div>
+                                          <h4 className={`text-sm font-bold ${locked ? 'text-muted-foreground' : ''}`}>{lesson.title}</h4>
+                                          <p className={`text-[10px] font-medium uppercase tracking-tight ${isNext ? 'text-primary font-bold' : 'text-muted-foreground'}`}>
+                                            {lesson.format}{isNext ? ' • Next' : ''}
+                                          </p>
+                                        </div>
+                                      </div>
+                                      <Icon icon="solar:alt-arrow-right-linear" className={completed ? "text-muted-foreground" : isNext ? "text-primary" : "text-muted-foreground/30"} />
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </section>
+                  );
+                })
+              )}
+            </main>
+          </>
+        )}
+
+        {/* ========== SPEAKING TAB ========== */}
+        {activeTab === "speaking" && (
+          <>
+            <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+              <div className="flex items-center gap-3">
+                <div className="bg-chart-4/20 p-2 rounded-xl border border-chart-4/30">
+                  <Icon icon="solar:microphone-3-bold" className="text-chart-4 text-2xl" />
+                </div>
+                <h1 className="font-heading text-xl font-bold">Speaking Lab</h1>
+              </div>
+              <div className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center">
+                <Icon icon="solar:tuning-square-bold" className="text-muted-foreground" />
+              </div>
+            </header>
+            <main className="px-6 space-y-8">
+              {/* Hero banner */}
+              <section>
+                <div className="bg-gradient-to-br from-chart-4/20 to-transparent p-6 rounded-[2rem] border border-chart-4/20">
+                  <h2 className="font-heading text-lg font-bold mb-2">Refine your accent</h2>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    Practice your pronunciation with AI feedback powered by Gemini.
+                  </p>
+                </div>
+              </section>
+
+              {/* Practice Modes */}
+              <section className="space-y-6">
+                <h2 className="font-heading text-xl font-bold px-1 mb-2">Practice Modes</h2>
+                <div className="space-y-8">
+
+                  {/* Repeat After Me — course-style card */}
+                  <section className="space-y-4">
+                    <div
+                      className={`relative overflow-hidden rounded-[2rem] border shadow-md group active:scale-[0.98] transition-all cursor-pointer ${expandedSpeakingCard === 'repeat'
+                        ? 'border-2 border-chart-4/40'
+                        : 'border-border/50'
+                        }`}
+                      onClick={async () => {
+                        triggerHaptic();
+                        if (expandedSpeakingCard === 'repeat') {
+                          setExpandedSpeakingCard(null);
+                          setSpeakingLessons([]);
+                          setSelectedSpeakingMode(null);
+                          return;
+                        }
+                        setExpandedSpeakingCard('repeat');
+                        if (speakingModes.length === 0) await loadSpeakingModes();
+                        const modes = speakingModes.length > 0 ? speakingModes : (await supabase.from("speaking_modes").select("*")).data || [];
+                        const repeatMode = modes.find(m => m.name?.toLowerCase().includes('read')) || modes[0];
+                        if (repeatMode) loadSpeakingLessons(repeatMode.id);
+                      }}
+                    >
+                      <div className="h-32 w-full overflow-hidden">
+                        <img src="/speaking-repeat-cover.png" alt="Repeat After Me" className="w-full h-full object-cover" />
+                        <div className="absolute inset-0 bg-gradient-to-t from-card via-card/40 to-transparent" />
+                      </div>
+                      <div className="p-6 bg-card relative">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <h3 className="font-heading text-xl font-bold">Repeat After Me</h3>
+                            <p className="text-sm text-muted-foreground mt-1 leading-relaxed">Listen to native speakers and match their rhythm and tone.</p>
+                          </div>
+                          <div className={`bg-chart-4/20 p-2 rounded-full border border-chart-4/20 transition-transform ${expandedSpeakingCard === 'repeat' ? 'rotate-180' : ''}`}>
+                            <Icon icon="solar:alt-arrow-down-bold" className="text-chart-4" />
+                          </div>
+                        </div>
+
+                        {/* Expanded lesson list */}
+                        {expandedSpeakingCard === 'repeat' && (
+                          <div className="mt-6 space-y-4">
+                            <div className="space-y-3 pt-4 border-t border-border/50">
+                              {loadingSpeakingLessons ? (
+                                <div className="flex justify-center py-4"><Leapfrog size="30" speed="2.5" color="var(--chart-4)" /></div>
+                              ) : speakingLessons.length === 0 ? (
+                                <p className="text-sm text-muted-foreground py-3">No lessons found</p>
+                              ) : speakingLessons.map((lesson) => {
+                                const completed = isSpeakingLessonCompleted(lesson.id);
+                                return (
+                                  <div
+                                    key={lesson.id}
+                                    className="flex items-center justify-between p-4 bg-muted/30 rounded-2xl border border-border/30 cursor-pointer active:scale-[0.97] transition-all"
+                                    onClick={(e) => { e.stopPropagation(); triggerHaptic(); openSpeakingLesson(lesson); }}
+                                  >
+                                    <div className="flex items-center gap-4">
+                                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${completed
+                                        ? 'bg-green-500/10 border border-green-500/20 text-green-500'
+                                        : 'bg-chart-4/10 border border-chart-4/20 text-chart-4'
+                                        }`}>
+                                        <Icon icon={completed ? "solar:check-circle-bold" : "solar:microphone-3-bold"} className="text-xl" />
+                                      </div>
+                                      <div>
+                                        <h4 className="text-sm font-bold">{lesson.title}</h4>
+                                        {lesson.prompt_text && <p className="text-[10px] text-muted-foreground truncate max-w-[200px]">{lesson.prompt_text}</p>}
+                                      </div>
+                                    </div>
+                                    <Icon icon="solar:alt-arrow-right-linear" className={completed ? "text-muted-foreground" : "text-chart-4"} />
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </section>
+
+                  {/* Translate & Speak — course-style card */}
+                  <section className="space-y-4">
+                    <div
+                      className={`relative overflow-hidden rounded-[2rem] border shadow-md group active:scale-[0.98] transition-all cursor-pointer ${expandedSpeakingCard === 'translate'
+                        ? 'border-2 border-chart-3/40'
+                        : 'border-border/50'
+                        }`}
+                      onClick={async () => {
+                        triggerHaptic();
+                        if (expandedSpeakingCard === 'translate') {
+                          setExpandedSpeakingCard(null);
+                          setSpeakingLessons([]);
+                          setSelectedSpeakingMode(null);
+                          return;
+                        }
+                        setExpandedSpeakingCard('translate');
+                        if (speakingModes.length === 0) await loadSpeakingModes();
+                        const modes = speakingModes.length > 0 ? speakingModes : (await supabase.from("speaking_modes").select("*")).data || [];
+                        const translateMode = modes.find(m => m.name?.toLowerCase().includes('translat')) || modes[1] || modes[0];
+                        if (translateMode) loadSpeakingLessons(translateMode.id);
+                      }}
+                    >
+                      <div className="h-32 w-full overflow-hidden">
+                        <img src="/speaking-translate-cover.png" alt="Translate & Speak" className="w-full h-full object-cover" />
+                        <div className="absolute inset-0 bg-gradient-to-t from-card via-card/40 to-transparent" />
+                      </div>
+                      <div className="p-6 bg-card relative">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <h3 className="font-heading text-xl font-bold">Translate & Speak</h3>
+                            <p className="text-sm text-muted-foreground mt-1 leading-relaxed">Translate the English phrase into Arabic and speak it out loud.</p>
+                          </div>
+                          <div className={`bg-chart-3/20 p-2 rounded-full border border-chart-3/20 transition-transform ${expandedSpeakingCard === 'translate' ? 'rotate-180' : ''}`}>
+                            <Icon icon="solar:alt-arrow-down-bold" className="text-chart-3" />
+                          </div>
+                        </div>
+
+                        {expandedSpeakingCard === 'translate' && (
+                          <div className="mt-6 space-y-4">
+                            <div className="space-y-3 pt-4 border-t border-border/50">
+                              {loadingSpeakingLessons ? (
+                                <div className="flex justify-center py-4"><Leapfrog size="30" speed="2.5" color="var(--chart-3)" /></div>
+                              ) : speakingLessons.length === 0 ? (
+                                <p className="text-sm text-muted-foreground py-3">No lessons found</p>
+                              ) : speakingLessons.map((lesson) => {
+                                const completed = isSpeakingLessonCompleted(lesson.id);
+                                return (
+                                  <div
+                                    key={lesson.id}
+                                    className="flex items-center justify-between p-4 bg-muted/30 rounded-2xl border border-border/30 cursor-pointer active:scale-[0.97] transition-all"
+                                    onClick={(e) => { e.stopPropagation(); triggerHaptic(); openSpeakingLesson(lesson); }}
+                                  >
+                                    <div className="flex items-center gap-4">
+                                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${completed
+                                        ? 'bg-green-500/10 border border-green-500/20 text-green-500'
+                                        : 'bg-chart-3/10 border border-chart-3/20 text-chart-3'
+                                        }`}>
+                                        <Icon icon={completed ? "solar:check-circle-bold" : "solar:microphone-3-bold"} className="text-xl" />
+                                      </div>
+                                      <div>
+                                        <h4 className="text-sm font-bold">{lesson.title}</h4>
+                                        {lesson.prompt_text && <p className="text-[10px] text-muted-foreground truncate max-w-[200px]">{lesson.prompt_text}</p>}
+                                      </div>
+                                    </div>
+                                    <Icon icon="solar:alt-arrow-right-linear" className={completed ? "text-muted-foreground" : "text-chart-3"} />
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </section>
+
+                  {/* Picture Describe — course-style card, navigates to its own page */}
+                  <section className="space-y-4">
+                    <div
+                      className="relative overflow-hidden rounded-[2rem] border border-border/50 shadow-md group active:scale-[0.98] transition-all cursor-pointer"
+                      onClick={() => { triggerHaptic(); setPracticeMode("picture-describe"); loadPictureDescribeLessons(); }}
+                    >
+                      <div className="h-32 w-full overflow-hidden">
+                        <img src="/speaking-picture-cover.png" alt="Picture Describe" className="w-full h-full object-cover" />
+                        <div className="absolute inset-0 bg-gradient-to-t from-card via-card/40 to-transparent" />
+                      </div>
+                      <div className="p-6 bg-card relative">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <h3 className="font-heading text-xl font-bold">Picture Describe</h3>
+                            <p className="text-sm text-muted-foreground mt-1 leading-relaxed">Look at images and describe them in Arabic.</p>
+                          </div>
+                          <div className="bg-primary/20 p-2 rounded-full border border-primary/20">
+                            <Icon icon="solar:alt-arrow-right-bold" className="text-primary" />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+              </section>
+            </main>
+          </>
+        )}
+
+        {/* ========== PROFILE TAB ========== */}
+        {activeTab === "profile" && (
+          <>
+            <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+              <div className="flex items-center gap-3">
+                <div className="bg-muted p-2 rounded-xl border border-border">
+                  <Icon icon="solar:user-circle-bold" className="text-foreground text-2xl" />
+                </div>
+                <h1 className="font-heading text-xl font-bold">Profile</h1>
+              </div>
+            </header>
+            <main className="px-6 space-y-8">
+              {/* Profile Card */}
+              <section>
+                <div className="bg-card rounded-[2rem] p-6 border border-border/50 shadow-md flex flex-col items-center text-center">
+                  <div className="w-20 h-20 rounded-full bg-muted border-2 border-border flex items-center justify-center mb-4">
+                    <Icon icon="solar:user-circle-bold" className="text-muted-foreground text-5xl" />
+                  </div>
+                  <h2 className="font-heading text-xl font-bold">{user.email?.split("@")[0] || "Student"}</h2>
+                  <p className="text-sm text-muted-foreground">{user.email}</p>
+                </div>
+              </section>
+
+              {/* Stats */}
+              <section className="grid grid-cols-2 gap-4">
+                <div className="bg-card p-5 rounded-[2rem] border border-border/50 flex flex-col items-center gap-2">
+                  <Icon icon="solar:book-bookmark-bold" className="text-primary text-2xl" />
+                  <span className="text-2xl font-heading font-bold">{completedLessonCount}/{allLessons.length}</span>
+                  <span className="text-xs text-muted-foreground font-medium text-center">Lessons completed</span>
+                </div>
+                <div
+                  className="bg-card p-5 rounded-[2rem] border border-border/50 flex flex-col items-center gap-2 cursor-pointer active:scale-95 transition-transform"
+                  onClick={() => { triggerHaptic(); setShowStreaksPage(true); }}
+                >
+                  <Icon icon="solar:fire-bold" className="text-secondary text-2xl" />
+                  <span className="text-2xl font-heading font-bold">{currentStreak}</span>
+                  <span className="text-xs text-muted-foreground font-medium text-center">Day Streak</span>
+                </div>
+              </section>
+
+              {/* Actions */}
+              <section className="space-y-3">
+                <button
+                  className="w-full bg-card p-4 rounded-2xl border border-border/50 flex items-center gap-4 text-left active:scale-[0.98] transition-all"
+                  onClick={() => { triggerHaptic(); setShowStreaksPage(true); }}
+                >
+                  <Icon icon="solar:fire-bold" className="text-secondary text-xl" />
+                  <span className="font-medium text-sm">View Streaks Calendar</span>
+                  <Icon icon="solar:alt-arrow-right-linear" className="text-muted-foreground ml-auto" />
+                </button>
+                <button
+                  className="w-full bg-destructive/10 p-4 rounded-2xl border border-destructive/20 flex items-center gap-4 text-left active:scale-[0.98] transition-all"
+                  onClick={() => { triggerHaptic(); setShowSignOutConfirm(true); }}
+                >
+                  <Icon icon="solar:logout-3-bold" className="text-destructive text-xl" />
+                  <span className="font-medium text-sm text-destructive">Sign Out</span>
+                </button>
+              </section>
+            </main>
+          </>
+        )}
+
+        {/* ========== BOTTOM TAB BAR ========== */}
+        <nav className="fixed left-6 right-6 z-50" style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.75rem)' }}>
+          <div className="bg-background/80 backdrop-blur-2xl border border-border/50 rounded-full px-6 py-4 flex items-center justify-between shadow-[0_8px_32px_rgba(0,0,0,0.4)]">
+            <button
+              className={`flex flex-col items-center gap-1 w-16 ${activeTab === "home" ? "text-primary" : "text-muted-foreground"}`}
+              onClick={() => { triggerHaptic(); setActiveTab("home"); }}
+            >
+              <Icon icon={activeTab === "home" ? "solar:home-2-bold" : "solar:home-2-linear"} className="text-2xl" />
+              <span className={`text-[10px] ${activeTab === "home" ? "font-bold" : "font-medium"}`}>Home</span>
+            </button>
+            <button
+              className={`flex flex-col items-center gap-1 w-16 ${activeTab === "courses" ? "text-primary" : "text-muted-foreground"}`}
+              onClick={() => { triggerHaptic(); setActiveTab("courses"); }}
+            >
+              <Icon icon={activeTab === "courses" ? "solar:book-bookmark-bold" : "solar:book-bookmark-linear"} className="text-2xl" />
+              <span className={`text-[10px] ${activeTab === "courses" ? "font-bold" : "font-medium"}`}>Courses</span>
+            </button>
+            <button
+              className={`flex flex-col items-center gap-1 w-16 ${activeTab === "speaking" ? "text-chart-4" : "text-muted-foreground"}`}
+              onClick={() => { triggerHaptic(); setActiveTab("speaking"); loadSpeakingModes(); }}
+            >
+              <Icon icon={activeTab === "speaking" ? "solar:microphone-3-bold" : "solar:microphone-3-linear"} className="text-2xl" />
+              <span className={`text-[10px] ${activeTab === "speaking" ? "font-bold" : "font-medium"}`}>Speaking</span>
+            </button>
+            <button
+              className={`flex flex-col items-center gap-1 w-16 ${activeTab === "profile" ? "text-primary" : "text-muted-foreground"}`}
+              onClick={() => { triggerHaptic(); setActiveTab("profile"); }}
+            >
+              <Icon icon={activeTab === "profile" ? "solar:user-circle-bold" : "solar:user-circle-linear"} className="text-2xl" />
+              <span className={`text-[10px] ${activeTab === "profile" ? "font-bold" : "font-medium"}`}>Profile</span>
+            </button>
           </div>
-        </header>
-
-        {/* Main content */}
-        <main className="explorer-main">
-          {/* Decorative blurs */}
-          <div className="explorer-blur explorer-blur-1" />
-          <div className="explorer-blur explorer-blur-2" />
-
-          <div className="explorer-content">
-            {/* Section title */}
-            <div className="explorer-section-header">
-              <div className="explorer-section-line" />
-              <h3 className="explorer-section-title">Begin Your Journey</h3>
-              <div className="explorer-section-line" />
-            </div>
-
-            {/* Practice Mode Cards */}
-            <div className="explorer-cards">
-              {/* Book Lessons Card */}
-              <button
-                className="explorer-quest-card explorer-quest-active"
-                onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("book"); }}
-              >
-                <div className="explorer-quest-glow" />
-                <div className="explorer-quest-icon-wrap">
-                  <Icon icon="solar:notebook-bookmark-bold" className="explorer-quest-icon" />
-                </div>
-                <div className="explorer-quest-info">
-                  <h3 className="explorer-quest-name">Book Lessons</h3>
-                  <p className="explorer-quest-desc">المراحل والدروس</p>
-                  <p className="explorer-quest-detail">Learn with dialogues, vocab & quizzes</p>
-                </div>
-                <div className="explorer-quest-arrow">
-                  <Icon icon="solar:arrow-right-linear" />
-                </div>
-              </button>
-
-              {/* Speaking Practice Card */}
-              <button
-                className="explorer-quest-card explorer-quest-active"
-                onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("speaking"); loadSpeakingModes(); }}
-              >
-                <div className="explorer-quest-glow" />
-                <div className="explorer-quest-icon-wrap speaking">
-                  <Icon icon="solar:microphone-3-bold" className="explorer-quest-icon" />
-                </div>
-                <div className="explorer-quest-info">
-                  <h3 className="explorer-quest-name">Speaking Practice</h3>
-                  <p className="explorer-quest-desc">تمارين النطق</p>
-                  <p className="explorer-quest-detail">Practice pronunciation & speaking</p>
-                </div>
-                <div className="explorer-quest-arrow">
-                  <Icon icon="solar:arrow-right-linear" />
-                </div>
-              </button>
-
-              {/* Word of the Day Card */}
-              <button
-                className="explorer-quest-card explorer-quest-active wotd-card"
-                onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("wotd"); loadWordOfTheDay(); }}
-              >
-                <div className="explorer-quest-glow" />
-                <div className="explorer-quest-icon-wrap wotd">
-                  <Icon icon="solar:sun-bold" className="explorer-quest-icon" />
-                </div>
-                <div className="explorer-quest-info">
-                  <h3 className="explorer-quest-name">Word of the Day</h3>
-                  <p className="explorer-quest-desc">كلمة اليوم</p>
-                  <p className="explorer-quest-detail">Learn a new phrase daily</p>
-                </div>
-                <div className="explorer-quest-arrow">
-                  <Icon icon="solar:arrow-right-linear" />
-                </div>
-              </button>
-            </div>
-
-            {/* Decorative compass */}
-            <div className="explorer-compass-wrap">
-              <Icon icon="solar:compass-bold" className="explorer-compass" />
-            </div>
-          </div>
-        </main>
+        </nav>
 
         {/* Sign Out Confirmation Modal */}
         {showSignOutConfirm && (
-          <div className="modal-overlay" onClick={() => { triggerHaptic(); setShowSignOutConfirm(false); }}>
-            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-              <h3 className="modal-title">Sign out?</h3>
-              <p style={{ color: "var(--text-light)", marginBottom: "1.5rem" }}>
-                Are you sure you want to sign out?
-              </p>
-              <div className="modal-actions">
+          <div className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-6" onClick={() => { triggerHaptic(); setShowSignOutConfirm(false); }}>
+            <div className="bg-card rounded-3xl p-6 max-w-sm w-full border border-border shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <h3 className="font-heading text-lg font-bold mb-2">Sign out?</h3>
+              <p className="text-sm text-muted-foreground mb-6">Are you sure you want to sign out?</p>
+              <div className="flex gap-3">
                 <button
-                  className="btn-outline"
+                  className="flex-1 py-3 rounded-xl border border-border font-bold text-sm text-foreground bg-muted active:scale-[0.97] transition-all"
                   onClick={() => { triggerHaptic(); setShowSignOutConfirm(false); }}
-                  style={{ flex: 1 }}
                 >
                   Cancel
                 </button>
                 <button
-                  className="btn-primary"
-                  onClick={() => {
-                    setShowSignOutConfirm(false);
-                    handleSignOut();
-                  }}
-                  style={{ flex: 1, background: "var(--red)", boxShadow: "0 4px 0 var(--red-dark)" }}
+                  className="flex-1 py-3 rounded-xl font-bold text-sm text-white bg-destructive active:scale-[0.97] transition-all"
+                  onClick={() => { setShowSignOutConfirm(false); handleSignOut(); }}
                 >
                   Sign out
                 </button>
@@ -2741,60 +4221,18 @@ function App() {
                   </h2>
                 </>
               ) : (
-                <>
-                  <p style={{ fontSize: '0.9rem', color: 'var(--text-light)', marginBottom: '0.5rem' }}>
+                <div style={{ padding: '0 20px', textAlign: 'center' }}>
+                  <p style={{ fontSize: '0.9rem', color: 'var(--text-light)', marginBottom: '1.5rem' }}>
                     Speak this phrase:
                   </p>
-                  <h2 className="quiz-question" dir="rtl" style={{ fontSize: '1.8rem', lineHeight: 1.8 }}>
+                  <h2 className="quiz-question" dir="rtl" style={{ fontSize: '2rem', lineHeight: 1.8, marginBottom: '1.5rem', fontWeight: 800 }}>
                     {currentItem.arabic_text}
                   </h2>
-                </>
+                  <p style={{ fontSize: '1.1rem', color: 'var(--text-primary)', marginBottom: '1rem', fontWeight: 600 }}>
+                    {currentItem.english_text}
+                  </p>
+                </div>
               )}
-
-              {/* Recording Button with Lottie */}
-              <div style={{ marginTop: '2rem', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                {isCheckingAnswer ? (
-                  <>
-                    {/* Sleek checking answer loading state */}
-                    <div className="checking-answer-container">
-                      <div className="checking-answer-pulse"></div>
-                      <div className="checking-answer-icon">🎧</div>
-                    </div>
-                    <p className="checking-answer-text">
-                      Checking your answer<span className="checking-dots"></span>
-                    </p>
-                  </>
-                ) : isRecording ? (
-                  <>
-                    <div
-                      onClick={() => { triggerHaptic(); stopRecording(); }}
-                      style={{ cursor: 'pointer' }}
-                    >
-                      <DotLottieReact
-                        src="/animations/Audio wave micro interaction.json"
-                        loop
-                        autoplay
-                        style={{ width: '120px', height: '120px' }}
-                      />
-                    </div>
-                    <p style={{ marginTop: '0.5rem', color: 'var(--red)', fontWeight: 600, fontSize: '0.9rem' }}>
-                      Tap to stop
-                    </p>
-                  </>
-                ) : (
-                  <button
-                    className="btn-record"
-                    onClick={() => {
-                      triggerHaptic();
-                      setSpeechFeedback(null);
-                      setSpeakingItemCorrect(false);
-                      startRecording();
-                    }}
-                  >
-                    🎤 Record
-                  </button>
-                )}
-              </div>
 
               {speechError && (
                 <p style={{ color: 'red', marginTop: '1rem', textAlign: 'center' }}>
@@ -2809,13 +4247,12 @@ function App() {
                   padding: '16px 24px',
                   borderRadius: 12,
                   textAlign: 'center',
-                  background: speechFeedback.includes('Good') ? 'rgba(34, 197, 94, 0.15)'
-                    : speechFeedback.includes('Almost') ? 'rgba(251, 191, 36, 0.15)'
-                      : 'rgba(239, 68, 68, 0.15)',
-                  border: `2px solid ${speechFeedback.includes('Good') ? '#22c55e'
-                    : speechFeedback.includes('Almost') ? '#fbbf24'
-                      : '#ef4444'
-                    }`
+                  background: 'var(--card)',
+                  border: `1px solid ${speechFeedback.includes('Good') ? 'rgba(34, 197, 94, 0.5)'
+                    : speechFeedback.includes('Almost') ? 'rgba(251, 191, 36, 0.5)'
+                      : 'rgba(239, 68, 68, 0.5)'
+                    }`,
+                  boxShadow: 'var(--shadow-soft)'
                 }}>
                   <div style={{
                     fontSize: '1.5rem',
@@ -2827,35 +4264,38 @@ function App() {
                     {speechFeedback}
                   </div>
 
-                  {/* Mode 2 (translate): Show "You said" and "Expected" format */}
-                  {currentSpeakingModeType === 'speaking_translate' ? (
-                    <div style={{ marginTop: 16, textAlign: 'left' }}>
-                      {spokenText && (
-                        <div style={{
-                          marginBottom: 12,
-                          padding: '10px 14px',
-                          borderRadius: 10,
-                          background: 'rgba(0,0,0,0.03)'
+                  {/* Show "You said" format for both modes */}
+                  <div style={{ marginTop: 16, textAlign: 'left' }}>
+                    {spokenText && (
+                      <div style={{
+                        marginBottom: 12,
+                        padding: '10px 14px',
+                        borderRadius: 10,
+                        background: 'rgba(255,255,255,0.03)'
+                      }}>
+                        <span style={{
+                          fontSize: '0.75rem',
+                          color: 'var(--text-light)',
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.05em',
+                          display: 'block',
+                          marginBottom: '8px',
+                          fontFamily: 'var(--font-sans)',
+                          textAlign: 'left'
                         }}>
-                          <span style={{
-                            fontSize: '0.75rem',
-                            color: 'var(--text-light)',
-                            textTransform: 'uppercase',
-                            letterSpacing: '0.05em',
-                            display: 'block',
-                            marginBottom: '4px'
-                          }}>
-                            You said:
-                          </span>
-                          <div dir="rtl" style={{
-                            fontSize: '1.2rem',
-                            color: 'var(--text-primary)',
-                            lineHeight: 1.5
-                          }}>
-                            {spokenText}
-                          </div>
+                          You said:
+                        </span>
+                        <div dir="rtl" style={{
+                          fontSize: '1.2rem',
+                          color: 'var(--text-primary)',
+                          lineHeight: 1.5,
+                          textAlign: 'right'
+                        }}>
+                          {spokenText}
                         </div>
-                      )}
+                      </div>
+                    )}
+                    {currentSpeakingModeType === 'speaking_translate' && (
                       <div style={{
                         padding: '10px 14px',
                         borderRadius: 10,
@@ -2868,7 +4308,8 @@ function App() {
                           textTransform: 'uppercase',
                           letterSpacing: '0.05em',
                           display: 'block',
-                          marginBottom: '4px'
+                          marginBottom: '8px',
+                          textAlign: 'left'
                         }}>
                           Expected:
                         </span>
@@ -2876,32 +4317,20 @@ function App() {
                           fontSize: '1.2rem',
                           fontWeight: 600,
                           color: 'var(--purple)',
-                          lineHeight: 1.5
+                          lineHeight: 1.5,
+                          textAlign: 'right'
                         }}>
                           {currentItem.arabic_text}
                         </div>
                       </div>
-                    </div>
-                  ) : (
-                    /* Mode 1 (repeat): Original "You said" format */
-                    spokenText && (
-                      <div dir="rtl" style={{
-                        marginTop: 12,
-                        fontSize: '1.1rem',
-                        color: 'var(--text-secondary)',
-                        fontStyle: 'italic'
-                      }}>
-                        You said: "{spokenText}"
-                      </div>
-                    )
-                  )}
+                    )}
+                  </div>
                 </div>
               )}
               {/* AI Feedback Card for Speaking Practice */}
               {loadingAiFeedback && (
                 <div className="ai-feedback-card ai-feedback-loading" style={{ marginTop: '1rem' }}>
                   <div className="ai-feedback-header">
-                    <span className="ai-feedback-icon">🤖</span>
                     <span>AI is analyzing your answer...</span>
                   </div>
                   <Leapfrog size="24" speed="2.5" color="#f59e0b" />
@@ -2910,13 +4339,7 @@ function App() {
               {aiFeedback && !loadingAiFeedback && (
                 <div className="ai-feedback-card" style={{ marginTop: '1rem' }}>
                   <div className="ai-feedback-header">
-                    <span className="ai-feedback-icon">🤖</span>
                     <span className="ai-feedback-label">AI Tutor Feedback</span>
-                    {aiFeedback.overallScore != null && (
-                      <span className={`ai-feedback-score ${aiFeedback.overallScore >= 70 ? 'score-good' : aiFeedback.overallScore >= 40 ? 'score-ok' : 'score-low'}`}>
-                        {aiFeedback.overallScore}%
-                      </span>
-                    )}
                   </div>
                   {aiFeedback.feedback && (
                     <p className="ai-feedback-text">{aiFeedback.feedback}</p>
@@ -2946,29 +4369,92 @@ function App() {
                 </div>
               )}
 
-              {/* Continue Button - only after correct */}
-              <div className="quiz-actions" style={{ marginTop: '2rem' }}>
-                <button
-                  className="btn-primary"
-                  disabled={!speakingItemCorrect}
-                  style={{ opacity: speakingItemCorrect ? 1 : 0.5 }}
-                  onClick={() => {
-                    triggerHaptic();
-                    if (isLastItem) {
-                      setSpeakingLessonComplete(true);
-                      playCelebrationSound();
-                      // Save speaking lesson progress
-                      saveSpeakingLessonProgress(activeSpeakingLesson.id);
-                    } else {
-                      setCurrentSpeakingItemIndex(i => i + 1);
-                      setSpeakingItemCorrect(false);
-                      setSpeechFeedback(null);
-                      setSpokenText("");
-                    }
-                  }}
-                >
-                  {isLastItem ? "Finish" : "Continue"}
-                </button>
+              {/* Pad Bottom Space */}
+              <div style={{ height: '140px' }} />
+
+              {/* Fixed Bottom UI */}
+              <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, padding: '1rem', paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 1rem)', background: 'var(--card)', borderTop: '1px solid var(--border)', zIndex: 10 }}>
+                {isCheckingAnswer ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '56px' }}>
+                    <div className="checking-answer-pulse" style={{ marginBottom: '8px' }}></div>
+                    <p className="checking-answer-text" style={{ margin: 0 }}>Checking<span className="checking-dots"></span></p>
+                  </div>
+                ) : isRecording ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                    <div onClick={() => { triggerHaptic(); stopRecording(); }} style={{ cursor: 'pointer' }}>
+                      <DotLottieReact src="/animations/Audio wave micro interaction.json" loop autoplay style={{ width: '80px', height: '80px', margin: '-10px' }} />
+                    </div>
+                    <p style={{ color: 'var(--red)', fontWeight: 600, fontSize: '0.9rem', margin: 0 }}>Tap to stop</p>
+                  </div>
+                ) : speakingItemCorrect ? (
+                  <button
+                    className="btn-primary"
+                    style={{ width: '100%', padding: '1rem', height: '56px', fontSize: '1.1rem' }}
+                    onClick={() => {
+                      triggerHaptic();
+                      if (isLastItem) {
+                        setSpeakingLessonComplete(true);
+                        playCelebrationSound();
+                        saveSpeakingLessonProgress(activeSpeakingLesson.id);
+                      } else {
+                        setCurrentSpeakingItemIndex(i => i + 1);
+                        setSpeakingItemCorrect(false);
+                        setSpeechFeedback(null);
+                        setSpokenText("");
+                        setAiFeedback(null);
+                      }
+                    }}
+                  >
+                    {isLastItem ? "Finish" : "Continue"}
+                  </button>
+                ) : speechFeedback ? (
+                  <div style={{ display: 'flex', gap: '1rem' }}>
+                    <button
+                      className="btn-outline"
+                      style={{ flex: 1, padding: '1rem', height: '56px', fontSize: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                      onClick={() => { triggerHaptic(); setSpeechFeedback(null); setSpokenText(""); setAiFeedback(null); }}
+                    >
+                      Retry
+                    </button>
+                    <button
+                      className="btn-primary"
+                      style={{ flex: 1, padding: '1rem', height: '56px', fontSize: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                      onClick={() => {
+                        triggerHaptic();
+                        if (isLastItem) {
+                          setSpeakingLessonComplete(true);
+                          playCelebrationSound();
+                          saveSpeakingLessonProgress(activeSpeakingLesson.id);
+                        } else {
+                          setCurrentSpeakingItemIndex(i => i + 1);
+                          setSpeakingItemCorrect(false);
+                          setSpeechFeedback(null);
+                          setSpokenText("");
+                          setAiFeedback(null);
+                        }
+                      }}
+                    >
+                      Skip
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', gap: '1rem' }}>
+                    <button
+                      className="btn-outline"
+                      style={{ flex: 1, padding: '1rem', height: '56px', fontSize: '1.2rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                      onClick={() => { triggerHaptic(); /* Logic for hearing audio later */ }}
+                    >
+                      <Icon icon="solar:volume-loud-bold" /> Hear
+                    </button>
+                    <button
+                      className="btn-primary"
+                      style={{ flex: 1, padding: '1rem', height: '56px', fontSize: '1.2rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                      onClick={() => { triggerHaptic(); setSpeechFeedback(null); setSpeakingItemCorrect(false); setAiFeedback(null); startRecording(); }}
+                    >
+                      <Icon icon="solar:microphone-3-bold" /> Record
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -2993,20 +4479,471 @@ function App() {
     );
   }
 
+  // ---------- SCENARIO CHAT SCREEN ----------
+
+  if (scenarioPhase) {
+    // DIFFICULTY SELECTION
+    if (scenarioPhase === "difficulty") {
+      return (
+        <div className="min-h-screen bg-background text-foreground font-sans" style={{ background: 'linear-gradient(180deg, rgba(139,92,246,0.08) 0%, var(--background) 40%)' }}>
+          <header className="px-6 pt-12 pb-6 flex items-center gap-4">
+            <button onClick={() => { triggerHaptic(); resetScenarioChat(); }} className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center">
+              <MdArrowBackIosNew className="text-foreground" />
+            </button>
+            <div className="flex-1 text-center">
+              <h1 className="font-heading text-lg font-bold">Daily Scenario</h1>
+            </div>
+            <div className="w-10" />
+          </header>
+
+          <main className="px-6 space-y-6">
+            <div className="text-center py-6">
+              <div className="text-6xl mb-4">{scenarioData?.emoji}</div>
+              <h2 className="font-heading text-2xl font-bold mb-2">{scenarioData?.title}</h2>
+              <p dir="rtl" className="text-lg text-muted-foreground" style={{ fontFamily: "'Noto Sans Arabic', sans-serif" }}>{scenarioData?.titleAr}</p>
+              <p className="text-sm text-muted-foreground mt-3">Choose your difficulty level to begin:</p>
+            </div>
+
+            {[
+              { key: "easy", label: "🟢 Easy", desc: "Simple words, translations provided, hints given proactively", color: "#22c55e" },
+              { key: "intermediate", label: "🟡 Intermediate", desc: "Natural Arabic, moderate vocabulary, hints on request", color: "#eab308" },
+              { key: "advanced", label: "🔴 Advanced", desc: "Rich vocabulary, idioms, minimal English, challenging", color: "#ef4444" },
+            ].map(d => (
+              <button
+                key={d.key}
+                className="w-full bg-card rounded-2xl p-5 border border-border/50 shadow-sm flex items-center gap-4 active:scale-[0.97] transition-transform text-left"
+                onClick={() => { triggerHaptic(); startScenarioChat(d.key); }}
+              >
+                <div className="text-2xl">{d.label.split(' ')[0]}</div>
+                <div className="flex-1">
+                  <h3 className="font-bold text-base mb-0.5">{d.label.split(' ').slice(1).join(' ')}</h3>
+                  <p className="text-xs text-muted-foreground">{d.desc}</p>
+                </div>
+                <Icon icon="solar:arrow-right-bold" className="text-muted-foreground text-lg" />
+              </button>
+            ))}
+          </main>
+        </div>
+      );
+    }
+
+    // BRIEFING SCREEN
+    if (scenarioPhase === "briefing") {
+      const scenarioContext = {
+        cafe: "You are visiting an Arabic café. Order your favorite drink and a snack from the waiter.",
+        restaurant: "You are dining at an Arabic restaurant. Browse the menu and order food from the waiter.",
+        groceries: "You are at a local grocery store. Pick up fruits, vegetables, and household items from the shopkeeper.",
+        hotel: "You are checking into a hotel. Talk to the receptionist about your reservation and get your room key.",
+        airport: "You are at the airport check-in counter. Present your passport and check in for your flight.",
+        directions: "You are lost in a new city. Ask a local on the street for directions to the mosque, library, or market.",
+        market: "You are exploring a traditional market. Negotiate the price of spices and goods with the vendor.",
+        clothes: "You are at a clothing store. Ask the assistant to help you find the right sizes and colors.",
+        bookstore: "You are visiting a bookstore. Ask the clerk to help you find an Arabic book suited to your level.",
+        meeting: "You are at a social gathering. Introduce yourself to a friendly new person and have a casual chat.",
+        invitation: "You are talking to a friend. Invite them to a dinner or a party, and discuss the details.",
+        family: "You are at a family gathering. Chat with your relative about life, work, and family news.",
+        pharmacy: "You are feeling unwell. Explain your symptoms to the pharmacist and ask for recommendations.",
+        taxi: "You are taking a taxi. Tell the driver where you want to go, and ask about the route and fare.",
+        bank: "You are at the bank. Speak to the teller to open an account or exchange money.",
+        school: "It's your first day at school. Meet your teacher, introduce yourself, and talk about your favorite subjects.",
+        gym: "You are at a fitness club. Talk to the gym trainer about signing up and your fitness goals.",
+        doctor: "You have a doctor's appointment. Explain your symptoms to the doctor to get advice and treatment.",
+        library: "You are at the public library. Ask the librarian about borrowing books or finding a quiet study spot.",
+        bakery: "You are at a local bakery. Buy fresh bread, pastries, and sweets from the baker.",
+        phone: "You are at a phone store. Talk to the employee about buying a new phone or repairing your broken one.",
+        park: "You are relaxing on a bench at the park. Have a friendly chat with someone sitting next to you.",
+        post_office: "You are at the post office. Speak to the clerk to send a package or buy stamps.",
+        barber: "You are at the barber shop. Explain to the barber how you want your hair cut.",
+        neighbor: "You just moved in. Meet your new neighbor, introduce yourself, and chat about the area.",
+        travel_agent: "You are at a travel agency. Talk to the agent about planning a trip and suggest activities.",
+        mechanic: "Your car has a problem. Explain the issue to the mechanic and ask what needs to be fixed.",
+        birthday: "You're at a friend's birthday party. Chat with other guests and celebrate.",
+        rent: "You are looking to rent an apartment. Talk to the landlord, ask for a tour, and discuss the price.",
+        wedding: "You are a guest at a wedding. Celebrate and chat with the other guests about the ceremony.",
+      };
+
+      const scenarioVocab = {
+        "cafe": [{ ar: "قهوة", en: "Coffee" }, { ar: "شاي", en: "Tea" }, { ar: "حليب", en: "Milk" }, { ar: "حساب", en: "Bill" }, { ar: "سكر", en: "Sugar" }, { ar: "كعكة", en: "Cake" }],
+        "restaurant": [{ ar: "طاولة", en: "Table" }, { ar: "قائمة", en: "Menu" }, { ar: "لذيذ", en: "Delicious" }, { ar: "دجاج", en: "Chicken" }, { ar: "ماء", en: "Water" }, { ar: "لحم", en: "Meat" }],
+        "groceries": [{ ar: "فواكه", en: "Fruits" }, { ar: "خضار", en: "Vegetables" }, { ar: "كم السعر", en: "How much?" }, { ar: "خبز", en: "Bread" }, { ar: "طماطم", en: "Tomato" }, { ar: "بيض", en: "Eggs" }],
+        "hotel": [{ ar: "غرفة", en: "Room" }, { ar: "حجز", en: "Reservation" }, { ar: "ليلة", en: "Night" }, { ar: "مفتاح", en: "Key" }, { ar: "جواز سفر", en: "Passport" }, { ar: "سرير", en: "Bed" }],
+        "airport": [{ ar: "جواز سفر", en: "Passport" }, { ar: "تذكرة", en: "Ticket" }, { ar: "حقيبة", en: "Bag" }, { ar: "رحلة", en: "Flight" }, { ar: "طائرة", en: "Airplane" }, { ar: "بوابة", en: "Gate" }],
+        "directions": [{ ar: "أين", en: "Where" }, { ar: "يمين", en: "Right" }, { ar: "يسار", en: "Left" }, { ar: "طريق", en: "Road" }, { ar: "مسجد", en: "Mosque" }, { ar: "قريب", en: "Near" }],
+        "market": [{ ar: "سعر", en: "Price" }, { ar: "غالي", en: "Expensive" }, { ar: "رخيص", en: "Cheap" }, { ar: "أريد", en: "I want" }, { ar: "ممكن", en: "Is it possible" }, { ar: "تفضل", en: "Here you go" }],
+        "clothes": [{ ar: "قميص", en: "Shirt" }, { ar: "سروال", en: "Pants" }, { ar: "مقاس", en: "Size" }, { ar: "لون", en: "Color" }, { ar: "حذاء", en: "Shoes" }, { ar: "أكبر", en: "Larger" }],
+        "bookstore": [{ ar: "كتاب", en: "Book" }, { ar: "قصة", en: "Story" }, { ar: "قراءة", en: "Reading" }, { ar: "قاموس", en: "Dictionary" }, { ar: "عربي", en: "Arabic" }, { ar: "لغة", en: "Language" }],
+        "meeting": [{ ar: "اسمي", en: "My name" }, { ar: "تشرفنا", en: "Nice to meet you" }, { ar: "طالب", en: "Student" }, { ar: "من أين", en: "From where" }, { ar: "عمل", en: "Work" }, { ar: "جامعة", en: "University" }],
+        "invitation": [{ ar: "دعوة", en: "Invitation" }, { ar: "متى", en: "When" }, { ar: "وقت", en: "Time" }, { ar: "موعد", en: "Appointment" }, { ar: "غداً", en: "Tomorrow" }, { ar: "عشاء", en: "Dinner" }],
+        "family": [{ ar: "عائلة", en: "Family" }, { ar: "أخ", en: "Brother" }, { ar: "أخت", en: "Sister" }, { ar: "كيف حال", en: "How is..." }, { ar: "أب", en: "Father" }, { ar: "أم", en: "Mother" }],
+        "pharmacy": [{ ar: "صيدلية", en: "Pharmacy" }, { ar: "دواء", en: "Medicine" }, { ar: "مريض", en: "Sick" }, { ar: "ألم", en: "Pain" }, { ar: "صداع", en: "Headache" }, { ar: "طبيب", en: "Doctor" }],
+        "taxi": [{ ar: "سيارة أجرة", en: "Taxi" }, { ar: "إلى أين", en: "Where to" }, { ar: "مطار", en: "Airport" }, { ar: "توقف", en: "Stop" }, { ar: "عنوان", en: "Address" }, { ar: "هنا", en: "Here" }],
+        "bank": [{ ar: "بنك", en: "Bank" }, { ar: "نقود", en: "Money" }, { ar: "حساب", en: "Account" }, { ar: "صرف", en: "Exchange" }, { ar: "دولار", en: "Dollar" }, { ar: "بطاقة", en: "Card" }],
+        "school": [{ ar: "مدرسة", en: "School" }, { ar: "معلم", en: "Teacher" }, { ar: "صف", en: "Class" }, { ar: "درس", en: "Lesson" }, { ar: "كتاب", en: "Book" }, { ar: "سؤال", en: "Question" }],
+        "gym": [{ ar: "نادي", en: "Gym" }, { ar: "رياضة", en: "Sport" }, { ar: "وزن", en: "Weight" }, { ar: "تدريب", en: "Training" }, { ar: "صحة", en: "Health" }, { ar: "اشتراك", en: "Subscription" }],
+        "doctor": [{ ar: "طبيب", en: "Doctor" }, { ar: "مستشفى", en: "Hospital" }, { ar: "موعد", en: "Appointment" }, { ar: "علاج", en: "Treatment" }, { ar: "ألم", en: "Pain" }, { ar: "مريض", en: "Sick" }],
+        "library": [{ ar: "مكتبة", en: "Library" }, { ar: "استعارة", en: "Borrow" }, { ar: "هدوء", en: "Quiet" }, { ar: "بطاقة", en: "Card" }, { ar: "كتاب", en: "Book" }, { ar: "قراءة", en: "Read" }],
+        "bakery": [{ ar: "مخبز", en: "Bakery" }, { ar: "خبز", en: "Bread" }, { ar: "حلوى", en: "Sweets" }, { ar: "طازج", en: "Fresh" }, { ar: "كعكة", en: "Cake" }, { ar: "لذيذ", en: "Delicious" }],
+        "phone": [{ ar: "هاتف", en: "Phone" }, { ar: "شاشة", en: "Screen" }, { ar: "تصليح", en: "Repair" }, { ar: "شاحن", en: "Charger" }, { ar: "جديد", en: "New" }, { ar: "مشكلة", en: "Problem" }],
+        "park": [{ ar: "حديقة", en: "Park" }, { ar: "طقس", en: "Weather" }, { ar: "جميل", en: "Beautiful" }, { ar: "جلوس", en: "Sitting" }, { ar: "أشجار", en: "Trees" }, { ar: "مشمس", en: "Sunny" }],
+        "post_office": [{ ar: "بريد", en: "Post" }, { ar: "رسالة", en: "Letter" }, { ar: "طابع", en: "Stamp" }, { ar: "عنوان", en: "Address" }, { ar: "طرد", en: "Package" }, { ar: "إرسال", en: "Send" }],
+        "barber": [{ ar: "حلاق", en: "Barber" }, { ar: "شعر", en: "Hair" }, { ar: "قص", en: "Cut" }, { ar: "قصير", en: "Short" }, { ar: "طويل", en: "Long" }, { ar: "لحية", en: "Beard" }],
+        "neighbor": [{ ar: "جار", en: "Neighbor" }, { ar: "بيت", en: "House" }, { ar: "جديد", en: "New" }, { ar: "منطقة", en: "Area" }, { ar: "أهلاً", en: "Welcome" }, { ar: "مساعدة", en: "Help" }],
+        "travel_agent": [{ ar: "سفر", en: "Travel" }, { ar: "طائرة", en: "Airplane" }, { ar: "فندق", en: "Hotel" }, { ar: "عطلة", en: "Holiday" }, { ar: "دولار", en: "Dollar" }, { ar: "تذكرة", en: "Ticket" }],
+        "mechanic": [{ ar: "ميكانيكي", en: "Mechanic" }, { ar: "سيارة", en: "Car" }, { ar: "مشكلة", en: "Problem" }, { ar: "إصلاح", en: "Fix" }, { ar: "محرك", en: "Engine" }, { ar: "زيت", en: "Oil" }],
+        "birthday": [{ ar: "عيد ميلاد", en: "Birthday" }, { ar: "هدية", en: "Gift" }, { ar: "عمر", en: "Age" }, { ar: "مبروك", en: "Congratulations" }, { ar: "سنة", en: "Year" }, { ar: "حفلة", en: "Party" }],
+        "rent": [{ ar: "شقة", en: "Apartment" }, { ar: "إيجار", en: "Rent" }, { ar: "شهر", en: "Month" }, { ar: "عقد", en: "Contract" }, { ar: "غرفة", en: "Room" }, { ar: "مفتاح", en: "Key" }],
+        "wedding": [{ ar: "زفاف", en: "Wedding" }, { ar: "عروس", en: "Bride" }, { ar: "عريس", en: "Groom" }, { ar: "احتفال", en: "Celebration" }, { ar: "مبروك", en: "Congratulations" }, { ar: "جميل", en: "Beautiful" }],
+      };
+
+      const words = scenarioData?.id ? (scenarioVocab[scenarioData.id] || []) : [];
+      const userSetting = scenarioData?.id ? (scenarioContext[scenarioData.id] || scenarioData?.setting) : scenarioData?.setting;
+
+      return (
+        <div className="min-h-screen bg-background text-foreground font-sans relative flex flex-col pt-12">
+          <header className="px-6 pb-6 flex items-center justify-between z-10 w-full flex-shrink-0">
+            <button onClick={() => { triggerHaptic(); resetScenarioChat(); }} className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center animate-in fade-in duration-300">
+              <MdArrowBackIosNew className="text-foreground" />
+            </button>
+            {scenarioLoading && (
+              <div className="bg-primary/10 rounded-full px-4 py-1.5 border border-primary/20 flex flex-row items-center gap-2 animate-in fade-in duration-300">
+                <Leapfrog size="20" speed="2.5" color="var(--primary)" />
+                <span className="text-primary text-xs font-bold uppercase tracking-widest">Connecting</span>
+              </div>
+            )}
+            {!scenarioLoading && (
+              <div className="bg-green-500/10 rounded-full px-4 py-1.5 border border-green-500/20 flex flex-row items-center gap-2 animate-in fade-in duration-300">
+                <Icon icon="solar:check-circle-bold" className="text-green-500 text-lg" />
+                <span className="text-green-500 text-xs font-bold uppercase tracking-widest">Ready</span>
+              </div>
+            )}
+          </header>
+
+          <div className="flex-1 overflow-y-auto px-6 pb-6 z-10 animate-in fade-in slide-in-from-bottom-8 duration-700 delay-150 fill-mode-both">
+            <div className="flex flex-col items-center justify-center text-center mt-2 mb-8">
+              <div className="text-7xl mb-6 relative">
+                <div className="absolute inset-0 bg-primary/20 blur-3xl rounded-full scale-150 -z-10" />
+                {scenarioData?.emoji}
+              </div>
+              <h1 className="font-heading text-3xl font-bold mb-2 text-foreground">{scenarioData?.title}</h1>
+              <p dir="rtl" className="text-lg text-primary font-medium" style={{ fontFamily: "'Noto Sans Arabic', sans-serif" }}>{scenarioData?.titleAr}</p>
+            </div>
+
+            <div className="bg-card/40 backdrop-blur-xl border border-border/50 rounded-3xl p-6 shadow-2xl mb-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-8 h-8 rounded-xl bg-violet-500/10 flex items-center justify-center text-violet-400">
+                  <Icon icon="solar:info-square-bold" className="text-xl" />
+                </div>
+                <h3 className="font-heading text-lg font-bold">Situation Overview</h3>
+              </div>
+              <p className="text-muted-foreground leading-relaxed text-sm">{userSetting || "Get ready to practice your Arabic in this real-life scenario."}</p>
+            </div>
+
+            {words.length > 0 && (
+              <div className="bg-card/40 backdrop-blur-xl border border-border/50 rounded-3xl p-6 shadow-2xl mb-8">
+                <div className="flex items-center gap-3 mb-4">
+                   <div className="w-8 h-8 rounded-xl bg-green-500/10 flex items-center justify-center text-green-500">
+                    <Icon icon="solar:book-bookmark-bold" className="text-xl" />
+                  </div>
+                  <h3 className="font-heading text-lg font-bold">Useful Words</h3>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  {words.map((w, idx) => (
+                    <button key={idx} className="bg-background/50 border border-border/50 rounded-2xl p-3 flex flex-col items-center justify-center text-center gap-1 active:scale-95 transition-transform w-full hover:border-primary/50" onClick={() => { triggerHaptic(); speakAiAudio(w.ar); }}>
+                      <span dir="rtl" className="text-lg font-bold text-primary" style={{ fontFamily: "'Noto Sans Arabic', sans-serif" }}>{w.ar}</span>
+                      <span className="text-xs text-muted-foreground font-medium">{w.en}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="px-6 pb-8 z-10 w-full bg-gradient-to-t from-background via-background to-transparent pt-4">
+            <button
+              disabled={scenarioLoading}
+              onClick={() => {
+                triggerHaptic();
+                setScenarioPhase("chat");
+                if (scenarioMessages.length > 0) {
+                  setTimeout(() => speakAiAudio(scenarioMessages[0].text), 300);
+                }
+              }}
+              className="w-full h-14 rounded-[1.5rem] font-bold text-sm uppercase tracking-wider flex items-center justify-center gap-2 transition-all active:scale-[0.97]"
+              style={{
+                background: scenarioLoading ? 'var(--muted)' : 'var(--primary)',
+                color: scenarioLoading ? 'var(--muted-foreground)' : 'white',
+                boxShadow: scenarioLoading ? 'none' : '0 8px 32px rgba(224,159,62,0.3)',
+              }}
+            >
+              {scenarioLoading ? (
+                <>
+                  <Leapfrog size="20" speed="2.5" color="var(--primary)" />
+                  <span>Preparing...</span>
+                </>
+              ) : (
+                <>
+                  <span>Ready to Practice!</span>
+                  <Icon icon="solar:arrow-right-bold" className="text-xl" />
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // CHAT SCREEN
+    if (scenarioPhase === "chat") {
+      const lastAi = [...scenarioMessages].reverse().find(m => m.role === 'ai');
+      const elapsedSec = scenarioStartTimeRef.current ? Math.floor((Date.now() - scenarioStartTimeRef.current) / 1000) : 0;
+      const timeRemaining = Math.max(0, 300 - elapsedSec);
+      const showTimeWarning = timeRemaining > 0 && timeRemaining <= 60 && !scenarioLoading;
+      return (
+        <div className="bg-background text-foreground font-sans flex flex-col" style={{ height: '100vh', overflow: 'hidden' }}>
+          {/* Header — compact */}
+          <header className="px-4 pt-12 pb-2 flex items-center gap-3 border-b border-border/30 flex-shrink-0" style={{ background: 'linear-gradient(180deg, rgba(139,92,246,0.08) 0%, transparent 100%)' }}>
+            <button onClick={() => { triggerHaptic(); resetScenarioChat(); }} className="w-8 h-8 rounded-full bg-card border border-border/50 flex items-center justify-center">
+              <MdArrowBackIosNew className="text-foreground text-xs" />
+            </button>
+            <div className="flex-1 flex items-center gap-2">
+              <span className="text-lg">{scenarioData?.emoji}</span>
+              <h1 className="font-heading text-sm font-bold">{scenarioData?.title}</h1>
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold px-2 py-0.5 rounded-full border border-border/50" style={{
+                color: scenarioDifficulty === 'easy' ? '#22c55e' : scenarioDifficulty === 'intermediate' ? '#eab308' : '#ef4444',
+                borderColor: scenarioDifficulty === 'easy' ? 'rgba(34,197,94,0.3)' : scenarioDifficulty === 'intermediate' ? 'rgba(234,179,8,0.3)' : 'rgba(239,68,68,0.3)',
+              }}>{scenarioDifficulty === 'intermediate' ? 'Medium' : scenarioDifficulty === 'easy' ? 'Easy' : 'Hard'}</span>
+            </div>
+            {/* Time warning indicator */}
+            {showTimeWarning && (
+              <div className="flex items-center gap-1 px-2 py-1 rounded-full animate-in fade-in duration-500" style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)' }}>
+                <div className="w-1.5 h-1.5 rounded-full bg-red-400" style={{ animation: 'pulse 1.5s ease-in-out infinite' }} />
+                <span className="text-[10px] text-red-400 font-bold">{Math.floor(timeRemaining / 60)}:{String(timeRemaining % 60).padStart(2, '0')}</span>
+              </div>
+            )}
+          </header>
+
+          {/* Messages — top portion, scrollable */}
+          <div className="overflow-y-auto px-3 py-2 space-y-2" style={{ maxHeight: '30vh', minHeight: '15vh', flexShrink: 0 }}>
+            {scenarioMessages.map((msg, i) => (
+              <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div
+                  style={{
+                    maxWidth: '88%',
+                    padding: '0.5rem 0.75rem',
+                    borderRadius: msg.role === 'user' ? '1rem 1rem 0.2rem 1rem' : '1rem 1rem 1rem 0.2rem',
+                    background: msg.role === 'user' ? 'var(--primary)' : 'var(--card)',
+                    color: msg.role === 'user' ? 'white' : 'var(--foreground)',
+                    border: msg.role === 'user' ? 'none' : '1px solid var(--border)',
+                  }}
+                >
+                  <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '0.9rem', lineHeight: 1.7, fontWeight: 500 }}>
+                    {msg.text}
+                  </div>
+                  {msg.role === 'ai' && (
+                    <div className="flex items-center gap-2 mt-1 pt-1 border-t" style={{ borderColor: 'var(--border)' }}>
+                      {msg.translation && (
+                        msg.isTranslationVisible ? (
+                          <p className="text-[11px] text-muted-foreground italic flex-1">{msg.translation}</p>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              triggerHaptic();
+                              setScenarioMessages(prev => prev.map((m, idx) => idx === i ? { ...m, isTranslationVisible: true } : m));
+                            }}
+                            className="text-[11px] text-violet-400 font-medium flex-1 text-left"
+                          >
+                            Show translation
+                          </button>
+                        )
+                      )}
+                      <button
+                        onClick={() => { triggerHaptic(); speakAiAudio(msg.text); }}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: 'var(--muted-foreground)' }}
+                      >
+                        <Icon icon="solar:volume-loud-bold" className="text-base" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            {scenarioLoading && (
+              <div className="flex justify-start">
+                <div style={{ padding: '0.5rem 0.75rem', borderRadius: '1rem 1rem 1rem 0.2rem', background: 'var(--card)', border: '1px solid var(--border)' }}>
+                  <div className="flex gap-1">
+                    <div className="w-1.5 h-1.5 rounded-full bg-violet-400" style={{ animation: 'pulse 1s ease-in-out infinite' }} />
+                    <div className="w-1.5 h-1.5 rounded-full bg-violet-400" style={{ animation: 'pulse 1s ease-in-out 0.2s infinite' }} />
+                    <div className="w-1.5 h-1.5 rounded-full bg-violet-400" style={{ animation: 'pulse 1s ease-in-out 0.4s infinite' }} />
+                  </div>
+                </div>
+              </div>
+            )}
+            <div ref={scenarioChatEndRef} />
+          </div>
+
+          {/* Bottom Panel — takes most of the screen */}
+          <div className="flex-1 flex flex-col border-t border-border/50 overflow-y-auto" style={{ background: 'var(--card)', borderTopLeftRadius: '1.5rem', borderTopRightRadius: '1.5rem', paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.5rem)' }}>
+
+            {/* Suggested Response Card */}
+            {lastAi && !scenarioLoading && (lastAi.suggestedResponse || lastAi.hint) && (
+              <div className="px-5 pt-4 pb-2 flex-shrink-0 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                {/* Written hint */}
+                {lastAi.hint && (
+                  <p className="text-xs text-muted-foreground text-center mb-3">
+                    <Icon icon="solar:chat-round-dots-bold" className="inline mr-1 text-sm" style={{ verticalAlign: '-2px' }} />
+                    {lastAi.hint}
+                  </p>
+                )}
+
+                {/* Suggested response */}
+                {lastAi.suggestedResponse && (
+                  <div style={{ background: 'var(--background)', border: '1px solid var(--border)', borderRadius: '1rem', padding: '0.75rem 1rem' }}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground">Try saying</span>
+                      <button
+                        onClick={() => { triggerHaptic(); speakAiAudio(lastAi.suggestedResponse); }}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2 }}
+                      >
+                        <Icon icon="solar:volume-loud-bold" className="text-base text-primary" />
+                      </button>
+                    </div>
+                    <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.05rem', lineHeight: 1.8, fontWeight: 600, color: 'var(--primary)', textAlign: 'right' }}>
+                      {lastAi.suggestedResponse}
+                    </div>
+                    {lastAi.suggestedResponseTranslation && (
+                      <p className="text-xs text-muted-foreground mt-1 italic">{lastAi.suggestedResponseTranslation}</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* More Help — toggle button + expanded content */}
+            {lastAi?.audioHelp && !scenarioLoading && (
+              <div className="px-5 pt-1 pb-1 flex-shrink-0">
+                <button
+                  onClick={() => { triggerHaptic(); setShowScenarioMoreHelp(prev => !prev); }}
+                  className="w-full flex items-center justify-center gap-2 py-2 rounded-xl transition-all active:scale-[0.98]"
+                  style={{ background: showScenarioMoreHelp ? 'rgba(139,92,246,0.08)' : 'transparent', border: '1px solid var(--border)' }}
+                >
+                  <Icon icon={showScenarioMoreHelp ? "solar:alt-arrow-up-bold" : "solar:lightbulb-bold"} className="text-sm" style={{ color: 'var(--primary)' }} />
+                  <span className="text-xs font-semibold" style={{ color: 'var(--primary)' }}>
+                    {showScenarioMoreHelp ? 'Hide Help' : 'Need More Help?'}
+                  </span>
+                </button>
+
+                {showScenarioMoreHelp && (
+                  <div className="mt-2 px-4 py-3 rounded-xl animate-in fade-in slide-in-from-top-1 duration-200" style={{ background: 'var(--background)', border: '1px solid var(--border)' }}>
+                    <p className="text-sm leading-relaxed text-foreground" style={{ lineHeight: 1.7 }}>
+                      {lastAi.audioHelp}
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+
+
+
+            {/* Spacer */}
+            <div className="flex-1" style={{ minHeight: '1rem' }} />
+
+            {/* Mic Button — pill shaped */}
+            <div className="px-6 pb-1 flex-shrink-0">
+              <button
+                onClick={() => {
+                  if (scenarioRecording) {
+                    stopScenarioRecording();
+                  } else if (!scenarioLoading) {
+                    startScenarioRecording();
+                  }
+                }}
+                disabled={scenarioLoading}
+                className="w-full active:scale-[0.97] transition-transform"
+                style={{
+                  height: 56, borderRadius: '1.5rem',
+                  background: scenarioRecording ? 'linear-gradient(135deg, #ef4444, #dc2626)' : scenarioLoading ? 'var(--muted)' : 'var(--primary)',
+                  border: 'none', cursor: scenarioLoading ? 'not-allowed' : 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.6rem',
+                  boxShadow: scenarioRecording ? '0 0 25px rgba(239,68,68,0.4)' : '0 4px 16px rgba(0,0,0,0.12)',
+                  color: 'white',
+                  fontSize: '0.9rem', fontWeight: 700,
+                  letterSpacing: '0.02em'
+                }}
+              >
+                <Icon icon={scenarioRecording ? "solar:stop-bold" : "solar:microphone-bold"} className="text-xl" />
+                <span>{scenarioRecording ? `Recording... ${scenarioRecordingSeconds}s` : scenarioLoading ? 'Thinking...' : 'Tap to Speak'}</span>
+              </button>
+            </div>
+
+            <p className="text-center text-[10px] text-muted-foreground opacity-40 pb-1 pt-1">
+              Hold to record your response
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // SUMMARY SCREEN
+    if (scenarioPhase === "summary") {
+      return (
+        <div className="min-h-screen bg-background text-foreground font-sans" style={{ background: 'linear-gradient(180deg, rgba(139,92,246,0.1) 0%, var(--background) 50%)' }}>
+          <main className="px-6 pt-16 pb-12 space-y-8">
+            <div className="text-center">
+              <div className="text-6xl mb-4">🎉</div>
+              <h1 className="font-heading text-3xl font-bold mb-2">Conversation Complete!</h1>
+              <p className="text-muted-foreground">Great job practicing your Arabic!</p>
+              <div className="flex items-center justify-center gap-2 mt-3">
+                <span className="text-sm">{scenarioData?.emoji}</span>
+                <span className="text-sm font-medium">{scenarioData?.title}</span>
+                <span className="text-xs text-muted-foreground capitalize">• {scenarioDifficulty}</span>
+              </div>
+            </div>
+
+            {scenarioKeyPhrases.length > 0 && (
+              <section>
+                <h2 className="font-heading text-lg font-bold mb-4">📚 Key Phrases Learned</h2>
+                <div className="space-y-3">
+                  {scenarioKeyPhrases.map((kp, i) => (
+                    <div key={i} className="bg-card rounded-2xl p-4 border border-border/50 flex items-center gap-3">
+                      <button
+                        onClick={() => { triggerHaptic(); speakAiAudio(kp.arabic); }}
+                        style={{ background: 'rgba(139,92,246,0.15)', border: 'none', borderRadius: '50%', width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontSize: '1rem', flexShrink: 0 }}
+                      >🔊</button>
+                      <div className="flex-1">
+                        <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.05rem', fontWeight: 600, color: '#8b5cf6', marginBottom: '0.15rem' }}>{kp.arabic}</div>
+                        <div className="text-sm text-muted-foreground">{kp.english}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            <button
+              className="w-full py-4 rounded-2xl font-bold text-base text-white"
+              style={{ background: 'linear-gradient(135deg, #8b5cf6, #6366f1)', boxShadow: '0 4px 16px rgba(139,92,246,0.3)' }}
+              onClick={() => { triggerHaptic(); resetScenarioChat(); }}
+            >
+              Back to Home
+            </button>
+          </main>
+        </div>
+      );
+    }
+  }
+
   // ---------- WORD OF THE DAY SCREEN ----------
 
   if (practiceMode === "wotd") {
     // Loading state
     if (loadingWotd) {
       return (
-        <div className="explorer-shell">
-          <div className="texture-overlay" />
-          <main className="explorer-main" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
-            <div className="explorer-loading">
-              <Leapfrog size="50" speed="2.5" color="var(--secondary)" />
-              <p>Loading today's word...</p>
-            </div>
-          </main>
+        <div className="min-h-screen bg-background text-foreground font-sans flex items-center justify-center">
+          <div className="flex flex-col items-center gap-4">
+            <Leapfrog size="50" speed="2.5" color="var(--primary)" />
+            <p className="text-muted-foreground text-sm font-medium">Loading today's word...</p>
+          </div>
         </div>
       );
     }
@@ -3014,19 +4951,16 @@ function App() {
     // No word found
     if (!currentWotd) {
       return (
-        <div className="explorer-shell">
-          <div className="texture-overlay" />
-          <main className="explorer-main" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', textAlign: 'center', padding: '2rem' }}>
-            <Icon icon="solar:sad-circle-bold" style={{ fontSize: '4rem', color: 'var(--muted-foreground)', marginBottom: '1rem' }} />
-            <h2 style={{ marginBottom: '0.5rem' }}>No Word Available</h2>
-            <p style={{ color: 'var(--muted-foreground)', marginBottom: '2rem' }}>Check back soon for today's phrase!</p>
-            <button
-              className="btn-primary"
-              onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); resetWotdFlow(); }}
-            >
-              Return Home
-            </button>
-          </main>
+        <div className="min-h-screen bg-background text-foreground font-sans flex flex-col items-center justify-center text-center px-8">
+          <Icon icon="solar:sad-circle-bold" className="text-6xl text-muted-foreground mb-4" />
+          <h2 className="font-heading text-xl font-bold mb-2">No Word Available</h2>
+          <p className="text-sm text-muted-foreground mb-8">Check back soon for today's phrase!</p>
+          <button
+            className="bg-primary text-white font-bold py-4 px-8 rounded-2xl text-sm active:scale-[0.97] transition-all"
+            onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); resetWotdFlow(); }}
+          >
+            Return Home
+          </button>
         </div>
       );
     }
@@ -3034,29 +4968,33 @@ function App() {
     // PHASE: INTRO
     if (wotdPhase === "intro") {
       return (
-        <div className={`wotd-intro-screen ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <div className={`min-h-screen bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Back button */}
-          <button
-            className="wotd-back-btn"
-            onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); resetWotdFlow(); }}
-          >
-            <MdArrowBackIosNew />
-          </button>
+          <header className="px-6 pt-12 pb-6">
+            <button
+              className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center"
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); resetWotdFlow(); }}
+            >
+              <MdArrowBackIosNew className="text-foreground" />
+            </button>
+          </header>
 
-          <div className="wotd-intro-content">
-            <div className="wotd-intro-icon-wrap">
-              <Icon icon="solar:sun-bold" className="wotd-intro-icon" />
+          <main className="flex-1 flex flex-col items-center justify-center px-8 text-center">
+            <div className="w-24 h-24 rounded-full bg-chart-3/20 flex items-center justify-center border-2 border-chart-3/30 mb-6">
+              <Icon icon="solar:sun-bold" className="text-chart-3 text-5xl" />
             </div>
-            <h1 className="wotd-intro-title">Word of the Day</h1>
-            <p className="wotd-intro-subtitle">Let's take a look at today's phrase</p>
-          </div>
+            <h1 className="font-heading text-3xl font-bold mb-2">Word of the Day</h1>
+            <p className="text-muted-foreground text-sm">Let's take a look at today's phrase</p>
+          </main>
 
-          <button
-            className="wotd-intro-btn"
-            onClick={() => { triggerHaptic(); setWotdPhase("word"); }}
-          >
-            Let's Go!
-          </button>
+          <footer className="px-6" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 2rem)' }}>
+            <button
+              className="btn-primary" style={{ width: "100%" }}
+              onClick={() => { triggerHaptic(); setWotdPhase("word"); }}
+            >
+              Let's Go!
+            </button>
+          </footer>
         </div>
       );
     }
@@ -3064,53 +5002,54 @@ function App() {
     // PHASE: WORD DISPLAY
     if (wotdPhase === "word") {
       return (
-        <div className="no-scroll-container swipe-in">
-          {/* Header with back arrow */}
-          <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
-            <span
-              style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+        <div className="min-h-screen bg-background text-foreground font-sans flex flex-col swipe-in">
+          {/* Header */}
+          <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+            <button
+              className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center"
               onClick={() => { triggerHaptic(); setWotdPhase("intro"); }}
             >
-              <MdArrowBackIosNew />
-            </span>
-            <div className="lesson-title-badge" style={{ background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' }}>
+              <MdArrowBackIosNew className="text-foreground" />
+            </button>
+            <span className="bg-chart-3/20 text-chart-3 px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider border border-chart-3/20">
               Today's Word
-            </div>
+            </span>
+            <div className="w-10" />
           </header>
 
-          <div className="carousel-content-area swipe-in">
-            <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>:عربي</div>
-            <div className="vocab-card wotd-arabic-card" style={{ direction: "rtl" }}>
-              <span className="explorer-card-corner top-left"></span>
-              <span className="explorer-card-corner top-right"></span>
-              <span className="explorer-card-corner bottom-left"></span>
-              <span className="explorer-card-corner bottom-right"></span>
-              <div className="vocab-text-main" style={{ fontSize: '2.2rem' }}>
-                {currentWotd.arabic_text}
+          <main className="flex-1 px-6 py-6 flex flex-col justify-center space-y-6">
+            {/* Arabic Card */}
+            <div>
+              <p className="text-xs text-muted-foreground font-bold uppercase tracking-wider mb-2 text-right">عربي:</p>
+              <div className="bg-card rounded-3xl p-8 border border-border/50 shadow-md" dir="rtl">
+                <p className="text-3xl font-arabic leading-relaxed text-center">{currentWotd.arabic_text}</p>
+                <button
+                  className="mt-4 mx-auto flex items-center gap-2 bg-primary/10 text-primary px-4 py-2 rounded-full text-xs font-bold uppercase tracking-wider border border-primary/20 active:scale-95 transition-all"
+                  onClick={(e) => { e.stopPropagation(); speakText(currentWotd.arabic_text, 'ar-SA'); }}
+                >
+                  <Icon icon="solar:volume-loud-bold" className="text-base" />
+                  Listen
+                </button>
               </div>
             </div>
 
-            <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
-            <div className="vocab-card">
-              <span className="explorer-card-corner top-left"></span>
-              <span className="explorer-card-corner top-right"></span>
-              <span className="explorer-card-corner bottom-left"></span>
-              <span className="explorer-card-corner bottom-right"></span>
-              <div className="vocab-text-main">{currentWotd.english_text}</div>
+            {/* English Card */}
+            <div>
+              <p className="text-xs text-muted-foreground font-bold uppercase tracking-wider mb-2">English:</p>
+              <div className="bg-card rounded-3xl p-8 border border-border/50 shadow-md">
+                <p className="text-xl font-medium text-center">{currentWotd.english_text}</p>
+              </div>
             </div>
-          </div>
+          </main>
 
-          <footer className="sticky-footer">
+          <footer className="px-6 pt-4" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 2rem)' }}>
             <button
-              className="btn-primary"
-              style={{ width: '100%' }}
+              className="btn-primary" style={{ width: "100%" }}
               onClick={() => {
                 triggerHaptic();
                 if (wotdExamples.length > 0) {
                   setWotdPhase("examples");
                 } else {
-                  playCelebrationSound();
-                  triggerHeavyHaptic();
                   setWotdPhase("complete");
                 }
               }}
@@ -3127,59 +5066,63 @@ function App() {
       const currentExample = wotdExamples[wotdExampleIndex];
 
       return (
-        <div className="no-scroll-container">
-          {/* Header with back arrow and title */}
-          <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
-            <span
-              style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
+        <div className="min-h-screen bg-background text-foreground font-sans flex flex-col">
+          {/* Header */}
+          <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+            <button
+              className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center"
               onClick={() => { triggerHaptic(); setWotdPhase("word"); }}
             >
-              <MdArrowBackIosNew />
-            </span>
-            <div className="lesson-title-badge" style={{ background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' }}>
+              <MdArrowBackIosNew className="text-foreground" />
+            </button>
+            <span className="bg-chart-3/20 text-chart-3 px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider border border-chart-3/20">
               Example {wotdExampleIndex + 1}/{wotdExamples.length}
-            </div>
+            </span>
+            <div className="w-10" />
           </header>
 
-          <div key={wotdExampleIndex} className="carousel-content-area swipe-in">
-            <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>:عربي</div>
-            <div className="arabic-box spotlight-arabic" dir="rtl" style={{ fontSize: '1.8rem' }}>
-              {currentExample.example_arabic}
+          <main key={wotdExampleIndex} className="flex-1 px-6 py-6 flex flex-col justify-center space-y-6 swipe-in">
+            {/* Arabic */}
+            <div>
+              <p className="text-xs text-muted-foreground font-bold uppercase tracking-wider mb-2 text-right">عربي:</p>
+              <div className="bg-card rounded-3xl p-6 border border-border/50 shadow-md" dir="rtl">
+                <p className="text-2xl font-arabic leading-relaxed text-center">{currentExample.example_arabic}</p>
+              </div>
             </div>
 
-            <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
-            <div className="explanation-bubble" style={{ borderLeft: '5px solid var(--yellow)', background: '#fffbeb' }}>
-              {currentExample.example_english}
+            {/* English */}
+            <div>
+              <p className="text-xs text-muted-foreground font-bold uppercase tracking-wider mb-2">English:</p>
+              <div className="bg-card rounded-3xl p-6 border-l-4 border-chart-3 border border-border/50">
+                <p className="text-base">{currentExample.example_english}</p>
+              </div>
             </div>
 
+            {/* Notes */}
             {currentExample.notes && (
-              <>
-                <div className="vocab-label" style={{ marginBottom: '0.25rem', color: 'var(--muted-foreground)' }}>Note:</div>
-                <div className="explanation-bubble" style={{ borderLeft: '5px solid var(--gray-300)', background: 'var(--gray-50)', fontSize: '0.95rem', color: 'var(--muted-foreground)' }}>
-                  {currentExample.notes}
+              <div>
+                <p className="text-xs text-muted-foreground font-bold uppercase tracking-wider mb-2">Note:</p>
+                <div className="bg-muted/30 rounded-3xl p-6 border border-border/30">
+                  <p className="text-sm text-muted-foreground leading-relaxed">{currentExample.notes}</p>
                 </div>
-              </>
+              </div>
             )}
-          </div>
+          </main>
 
-          <footer className="sticky-footer">
-            <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+          <footer className="px-6 pt-4" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 2rem)' }}>
+            <div className="flex items-center gap-3">
               <button
-                className="btn-nav-arrow"
+                className="w-14 h-14 rounded-2xl bg-card border border-border/50 flex items-center justify-center active:scale-[0.95] transition-all disabled:opacity-30"
                 onClick={() => { if (wotdExampleIndex > 0) { triggerHaptic(); setWotdExampleIndex(i => i - 1); } }}
                 disabled={wotdExampleIndex === 0}
-                style={{ opacity: wotdExampleIndex === 0 ? 0.3 : 1 }}
               >
-                <MdArrowBackIosNew />
+                <MdArrowBackIosNew className="text-foreground" />
               </button>
               <button
-                className="btn-primary"
-                style={{ flex: 1 }}
+                className="btn-primary" style={{ flex: 1 }}
                 onClick={() => {
                   triggerHaptic();
                   if (wotdExampleIndex === wotdExamples.length - 1) {
-                    playCelebrationSound();
-                    triggerHeavyHaptic();
                     setWotdPhase("complete");
                   } else {
                     setWotdExampleIndex(i => i + 1);
@@ -3189,12 +5132,11 @@ function App() {
                 {wotdExampleIndex === wotdExamples.length - 1 ? "FINISH" : "CONTINUE"}
               </button>
               <button
-                className="btn-nav-arrow"
+                className="w-12 h-12 rounded-2xl bg-card border border-border/50 flex items-center justify-center active:scale-[0.95] transition-all disabled:opacity-30"
                 onClick={() => { if (wotdExampleIndex < wotdExamples.length - 1) { triggerHaptic(); setWotdExampleIndex(i => i + 1); } }}
                 disabled={wotdExampleIndex === wotdExamples.length - 1}
-                style={{ opacity: wotdExampleIndex === wotdExamples.length - 1 ? 0.3 : 1 }}
               >
-                →
+                <span className="text-foreground">→</span>
               </button>
             </div>
           </footer>
@@ -3216,7 +5158,6 @@ function App() {
           if (navigator.share) {
             await navigator.share(shareData);
           } else {
-            // Fallback: copy to clipboard
             await navigator.clipboard.writeText(shareData.text);
             alert('Copied to clipboard!');
           }
@@ -3226,8 +5167,8 @@ function App() {
       };
 
       return (
-        <div className="wotd-complete-screen">
-          <div className="wotd-complete-lottie">
+        <div className="min-h-screen bg-background text-foreground font-sans flex flex-col items-center justify-center px-8 text-center">
+          <div className="mb-4">
             <DotLottieReact
               src="/animations/done.lottie"
               loop
@@ -3236,22 +5177,25 @@ function App() {
             />
           </div>
 
-          <h1 className="wotd-complete-title">Well Done!</h1>
-          <p className="wotd-complete-subtitle">Check in tomorrow for a new phrase</p>
+          <h1 className="font-heading text-3xl font-bold mb-2">Well Done!</h1>
+          <p className="text-muted-foreground text-sm mb-8">Check in tomorrow for a new phrase</p>
 
-          <div className="wotd-complete-word-preview">
-            <span className="wotd-preview-arabic">{currentWotd.arabic_text}</span>
-            <span className="wotd-preview-divider">•</span>
-            <span className="wotd-preview-english">{currentWotd.english_text}</span>
+          <div className="bg-card rounded-3xl p-6 border border-border/50 w-full max-w-sm mb-8">
+            <p className="text-2xl font-arabic mb-2" dir="rtl">{currentWotd.arabic_text}</p>
+            <div className="w-8 h-0.5 bg-border mx-auto my-3" />
+            <p className="text-base text-muted-foreground">{currentWotd.english_text}</p>
           </div>
 
-          <div className="wotd-complete-buttons">
-            <button className="btn-wotd-share" onClick={handleShare}>
-              <Icon icon="solar:share-bold" style={{ marginRight: '0.5rem' }} />
+          <div className="flex flex-col gap-4 w-full max-w-sm" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 1rem)' }}>
+            <button
+              className="btn-outline w-full" style={{ padding: '1rem', height: '56px', fontSize: '1rem' }}
+              onClick={handleShare}
+            >
+              <Icon icon="solar:share-bold" className="text-xl" />
               Share
             </button>
             <button
-              className="btn-wotd-home"
+              className="btn-outline w-full" style={{ padding: '1rem', height: '56px', fontSize: '1rem' }}
               onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); resetWotdFlow(); }}
             >
               Return Home
@@ -3268,14 +5212,11 @@ function App() {
     // Loading state
     if (loadingPictureLessons) {
       return (
-        <div className="explorer-shell">
-          <div className="texture-overlay" />
-          <main className="explorer-main" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
-            <div className="explorer-loading">
-              <Leapfrog size="50" speed="2.5" color="var(--yellow)" />
-              <p>Loading lessons...</p>
-            </div>
-          </main>
+        <div className="min-h-screen bg-background text-foreground flex items-center justify-center">
+          <div className="flex flex-col items-center gap-3">
+            <Leapfrog size="50" speed="2.5" color="var(--primary)" />
+            <p className="text-muted-foreground text-sm">Loading lessons...</p>
+          </div>
         </div>
       );
     }
@@ -3283,56 +5224,46 @@ function App() {
     // PHASE: LESSONS LIST
     if (picturePhase === "lessons") {
       return (
-        <div className={`explorer-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
-          <div className="texture-overlay" />
-
+        <div className={`min-h-screen bg-background text-foreground font-sans pb-12 ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Header */}
-          <header className="explorer-region-header">
-            <div className="explorer-region-header-content">
-              <button
-                className="explorer-back-btn"
-                onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode("speaking"); resetPictureDescribeFlow(); }}
-              >
-                <span className="explorer-back-icon">◀</span>
-              </button>
-              <div className="explorer-region-title-wrap">
-                <h1 className="explorer-region-title">🖼️ وصف الصورة</h1>
-                <p className="explorer-region-subtitle" style={{ color: 'var(--yellow-dark)' }}>Describe the Picture</p>
-              </div>
-            </div>
+          <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+            <button
+              className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center"
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); setActiveTab("speaking"); resetPictureDescribeFlow(); }}
+            >
+              <MdArrowBackIosNew className="text-foreground" />
+            </button>
+            <span className="bg-primary/20 text-primary px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider border border-primary/20">
+              Describe the Picture
+            </span>
+            <div className="w-10" />
           </header>
 
-          {/* Lessons Grid */}
-          <main className="explorer-region-main">
-            <div className="explorer-blur" style={{ top: '2rem', right: '-3rem', background: 'var(--yellow)', opacity: 0.15 }} />
-            <div className="explorer-blur explorer-blur-2" />
-
-            <div className="explorer-region-content">
-              {pictureDescribeLessons.length === 0 ? (
-                <div className="explorer-empty">
-                  <Icon icon="solar:gallery-bold" className="explorer-empty-icon" />
-                  <p>No picture lessons found</p>
-                </div>
-              ) : (
-                <div className="picture-lessons-grid">
-                  {pictureDescribeLessons.map((lesson) => (
-                    <button
-                      key={lesson.id}
-                      className="picture-lesson-card"
-                      onClick={() => { triggerHaptic(); openPictureDescribeLesson(lesson); }}
-                    >
-                      <div className="picture-lesson-image">
-                        <img src={lesson.image_url} alt={lesson.title} />
-                      </div>
-                      <div className="picture-lesson-info">
-                        <h3 className="picture-lesson-title">{lesson.title}</h3>
-                        <p className="picture-lesson-title-ar">{lesson.title_ar}</p>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+          <main className="px-6 space-y-4 mt-2">
+            {pictureDescribeLessons.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-20">
+                <Icon icon="solar:gallery-bold" className="text-muted-foreground/30 text-6xl mb-4" />
+                <p className="text-muted-foreground text-sm">No picture lessons found</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-4">
+                {pictureDescribeLessons.map((lesson) => (
+                  <button
+                    key={lesson.id}
+                    className="bg-card rounded-3xl border border-border/50 overflow-hidden shadow-sm active:scale-[0.97] transition-all text-left flex flex-col"
+                    onClick={() => { triggerHaptic(); openPictureDescribeLesson(lesson); }}
+                  >
+                    <div className="aspect-[4/3] w-full overflow-hidden bg-muted">
+                      <img src={lesson.image_url} alt={lesson.title} className="w-full h-full object-cover" style={{ pointerEvents: 'none' }} />
+                    </div>
+                    <div className="p-4">
+                      <h3 className="font-heading font-bold text-sm mb-0.5">{lesson.title}</h3>
+                      {lesson.title_ar && <p className="text-xs text-muted-foreground font-arabic" dir="rtl">{lesson.title_ar}</p>}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
           </main>
         </div>
       );
@@ -3495,10 +5426,46 @@ function App() {
           {/* Mic Button */}
           <div className="picture-mic-container">
             {pictureCheckingAnswer ? (
-              <div className="picture-checking">
-                <Leapfrog size="40" speed="2.5" color="#f59e0b" />
-                <p>Checking your answer...</p>
-              </div>
+              (() => {
+                const analysisMessages = [
+                  { icon: '🎤', text: 'Transcribing audio...' },
+                  { icon: '📝', text: 'Analysing your sentences...' },
+                  { icon: '📖', text: 'Checking grammar & structure...' },
+                  { icon: '🔍', text: 'Reviewing vocabulary usage...' },
+                  { icon: '🤖', text: 'Preparing feedback...' },
+                  { icon: '✨', text: 'Almost ready...' },
+                ];
+                const currentMsg = analysisMessages[Math.min(analysisStep, analysisMessages.length - 1)];
+                const progress = Math.min(((analysisStep + 1) / analysisMessages.length) * 100, 95);
+                const randomVocab = pictureVocab[analysisStep % pictureVocab.length];
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem', padding: '1rem' }}>
+                    {/* Analysis message */}
+                    <div style={{
+                      background: 'var(--card)', borderRadius: '1.25rem', padding: '1.25rem', border: '1px solid var(--border)',
+                      width: '100%', maxWidth: '280px', textAlign: 'center'
+                    }}>
+                      <div style={{ fontSize: '2rem', marginBottom: '0.5rem', animation: 'pulse 1.5s ease-in-out infinite' }}>{currentMsg.icon}</div>
+                      <p style={{ color: 'var(--foreground)', fontSize: '0.9rem', fontWeight: 600, margin: '0 0 0.75rem' }}>{currentMsg.text}</p>
+                      {/* Progress bar */}
+                      <div style={{ height: '4px', borderRadius: '2px', background: 'var(--muted)', overflow: 'hidden' }}>
+                        <div style={{ height: '100%', width: `${progress}%`, background: 'var(--primary)', borderRadius: '2px', transition: 'width 1.5s ease-out' }} />
+                      </div>
+                    </div>
+                    {/* Vocab spotlight */}
+                    {randomVocab && (
+                      <div style={{
+                        background: 'var(--muted)', borderRadius: '1rem', padding: '0.85rem 1.25rem', border: '1px solid var(--border)',
+                        textAlign: 'center', animation: 'slideUp 0.4s ease-out'
+                      }}>
+                        <div style={{ fontSize: '0.6rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--muted-foreground)', marginBottom: '0.35rem' }}>Did you say?</div>
+                        <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.2rem', fontWeight: 600, color: 'var(--primary)' }}>{randomVocab.arabic_text || randomVocab.arabic}</div>
+                        <div style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', marginTop: '0.15rem' }}>{randomVocab.english_text || randomVocab.english}</div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()
             ) : (
               <button
                 className={`picture-mic-btn ${pictureRecording ? 'recording' : ''}`}
@@ -3547,243 +5514,365 @@ function App() {
       );
     }
 
-    // PHASE: SUCCESS
-    if (picturePhase === "success" && activePictureLesson) {
+    // PHASE: AI FEEDBACK WALKTHROUGH (Interactive)
+    if (picturePhase === "feedback" && activePictureLesson) {
+      const steps = pictureFeedbackSteps;
+      const currentStep = steps[pictureFeedbackIndex];
+      const isLastStep = pictureFeedbackIndex >= steps.length - 1;
+      const allRevealed = pictureFeedbackIndex >= steps.length;
+      // Check if current step is a challenge that needs completing
+      const isChallenge = currentStep && (currentStep.type === 'correction_challenge' || currentStep.type === 'speak_challenge');
+      const challengeDone = challengeCompleted[pictureFeedbackIndex];
+
       return (
-        <div className="picture-success-screen">
-          <div className="picture-success-lottie">
-            <DotLottieReact
-              src="/animations/done.lottie"
-              loop
-              autoplay
-              style={{ width: '180px', height: '180px' }}
+        <div className="picture-describe-screen" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 20px) + 2rem)' }}>
+          {/* Header */}
+          <header className="picture-describe-header" style={{ position: 'sticky', top: 0, zIndex: 10 }}>
+            <button
+              className="picture-back-btn"
+              onClick={() => { triggerHaptic(); setPracticeMode("picture-describe"); resetPictureDescribeFlow(); }}
+            >
+              <span style={{ fontSize: '1.1rem' }}>◀</span>
+              <span className="picture-btn-label">Exit</span>
+            </button>
+            <h2 className="picture-describe-title">{activePictureLesson.title}</h2>
+            <div style={{ width: '60px' }} />
+          </header>
+
+          {/* Picture at top — compact */}
+          <div style={{ padding: '0.75rem 1rem 0' }}>
+            <img
+              src={activePictureLesson.image_url}
+              alt={activePictureLesson.title}
+              style={{ width: '100%', height: '130px', objectFit: 'cover', borderRadius: '1rem', border: '1px solid var(--border)' }}
             />
           </div>
 
-          <h1 className="picture-success-title">Well Done!</h1>
-          <p className="picture-success-subtitle">You used {pictureMatchPercent}% of the vocabulary</p>
-
-          <div className="picture-success-stats">
-            <div className="picture-stat">
-              <span className="picture-stat-value">{pictureMatchedWords.length}</span>
-              <span className="picture-stat-label">Words Used</span>
-            </div>
-            <div className="picture-stat-divider" />
-            <div className="picture-stat">
-              <span className="picture-stat-value">{pictureVocab.length}</span>
-              <span className="picture-stat-label">Total Words</span>
-            </div>
-          </div>
-
-          {activePictureLesson.model_audio_url && (
-            <div className="picture-model-audio">
-              <p className="model-audio-label">Listen to a model answer:</p>
-              <audio
-                ref={pictureAudioRef}
-                controls
-                src={activePictureLesson.model_audio_url}
-                className="model-audio-player"
-              />
+          {/* Score badge */}
+          {pictureScore != null && (
+            <div style={{ display: 'flex', justifyContent: 'center', margin: '0.75rem 0' }}>
+              <div style={{
+                background: pictureScore >= 7 ? 'rgba(34,197,94,0.1)' : pictureScore >= 5 ? 'rgba(234,179,8,0.1)' : 'rgba(239,68,68,0.1)',
+                border: `1px solid ${pictureScore >= 7 ? 'rgba(34,197,94,0.3)' : pictureScore >= 5 ? 'rgba(234,179,8,0.3)' : 'rgba(239,68,68,0.3)'}`,
+                borderRadius: '1rem', padding: '0.4rem 1.25rem', display: 'flex', alignItems: 'center', gap: '0.4rem'
+              }}>
+                <span style={{ fontSize: '1.4rem', fontWeight: 800, color: pictureScore >= 7 ? '#22c55e' : pictureScore >= 5 ? '#eab308' : '#ef4444' }}>
+                  {pictureScore.toFixed(1)}
+                </span>
+                <span style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', fontWeight: 600 }}>/10</span>
+              </div>
             </div>
           )}
 
-          {/* AI Feedback Card */}
-          {loadingAiFeedback && (
-            <div className="ai-feedback-card ai-feedback-loading">
-              <div className="ai-feedback-header">
-                <span className="ai-feedback-icon">🤖</span>
-                <span>AI is analyzing your answer...</span>
+          {/* Transcript preview — only on first step */}
+          {pictureTranscript && pictureFeedbackIndex === 0 && (
+            <div style={{ padding: '0 1.25rem', marginBottom: '0.75rem' }}>
+              <div style={{ background: 'var(--muted)', borderRadius: '1rem', padding: '0.85rem', border: '1px solid var(--border)' }}>
+                <div style={{ fontSize: '0.65rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--muted-foreground)', marginBottom: '0.35rem' }}>What you said:</div>
+                <p dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.05rem', lineHeight: 1.7, color: 'var(--foreground)', margin: 0 }}>{pictureTranscript}</p>
               </div>
-              <Leapfrog size="24" speed="2.5" color="#f59e0b" />
             </div>
           )}
-          {aiFeedback && !loadingAiFeedback && (
-            <div className="ai-feedback-card">
-              <div className="ai-feedback-header">
-                <span className="ai-feedback-icon">🤖</span>
-                <span className="ai-feedback-label">AI Tutor Feedback</span>
-                {aiFeedback.overallScore != null && (
-                  <span className={`ai-feedback-score ${aiFeedback.overallScore >= 70 ? 'score-good' : aiFeedback.overallScore >= 40 ? 'score-ok' : 'score-low'}`}>
-                    {aiFeedback.overallScore}%
-                  </span>
-                )}
-              </div>
-              {aiFeedback.feedback && (
-                <p className="ai-feedback-text">{aiFeedback.feedback}</p>
-              )}
-              {aiFeedback.corrections?.length > 0 && (
-                <div className="ai-feedback-corrections">
-                  {aiFeedback.corrections.map((c, i) => (
-                    <div key={i} className="ai-correction-item">
-                      <div className="ai-correction-row">
-                        <span className="ai-correction-label">You said:</span>
-                        <span className="ai-correction-arabic">{c.said}</span>
-                      </div>
-                      <div className="ai-correction-row">
-                        <span className="ai-correction-label better-label">Better:</span>
-                        <span className="ai-correction-arabic">{c.better}</span>
-                      </div>
-                      {c.explanation && (
-                        <p className="ai-correction-explanation">{c.explanation}</p>
-                      )}
+
+          {/* Feedback step cards */}
+          <div style={{ padding: '0 1.25rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {steps.slice(0, pictureFeedbackIndex + 1).map((step, idx) => (
+              <div key={idx} style={{
+                background: 'var(--card)', borderRadius: '1.25rem', padding: '1.15rem', border: '1px solid var(--border)',
+                animation: idx === pictureFeedbackIndex ? 'slideUp 0.3s ease-out' : 'none'
+              }}>
+                {/* SEGMENT */}
+                {step.type === 'segment' && (
+                  <>
+                    <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.1rem', fontWeight: 600, marginBottom: '0.6rem', color: 'var(--primary)', lineHeight: 1.8 }}>
+                      "{step.snippet}"
                     </div>
-                  ))}
-                </div>
-              )}
-              {aiFeedback.encouragement && (
-                <p className="ai-feedback-encouragement">{aiFeedback.encouragement}</p>
-              )}
-            </div>
-          )}
+                    <p style={{ fontSize: '0.88rem', lineHeight: 1.6, color: 'var(--foreground)', margin: 0 }}>
+                      {step.analysis}
+                    </p>
+                    {step.tip && (
+                      <div style={{ background: 'rgba(234,179,8,0.08)', borderRadius: '0.75rem', padding: '0.65rem', marginTop: '0.5rem', borderLeft: '3px solid #eab308' }}>
+                        <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#eab308' }}>💡 </span>
+                        <span style={{ fontSize: '0.83rem', color: 'var(--foreground)' }}>{step.tip}</span>
+                      </div>
+                    )}
+                    {step.teach && (
+                      <div style={{ background: 'rgba(20,184,166,0.08)', borderRadius: '0.75rem', padding: '0.65rem', marginTop: '0.5rem', borderLeft: '3px solid #14b8a6' }}>
+                        <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#14b8a6', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.4rem' }}>
+                          📚 {step.teach.label}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                          <button
+                            onClick={() => { triggerHaptic(); speakArabic(step.teach.arabic); }}
+                            style={{ background: 'rgba(20,184,166,0.15)', border: 'none', cursor: 'pointer', fontSize: '1.1rem', width: 36, height: 36, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#14b8a6', flexShrink: 0 }}
+                          >🔊</button>
+                          <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.1rem', fontWeight: 600, color: '#14b8a6' }}>{step.teach.arabic}</div>
+                        </div>
+                        <div style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', paddingLeft: '1.6rem' }}>{step.teach.english}</div>
+                      </div>
+                    )}
+                  </>
+                )}
 
-          <button
-            className="btn-picture-home"
-            onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode("speaking"); resetPictureDescribeFlow(); }}
-          >
-            Return to Speaking Practice
-          </button>
-        </div>
-      );
-    }
+                {/* CORRECTION CHALLENGE */}
+                {step.type === 'correction_challenge' && (
+                  <>
+                    <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#f59e0b', marginBottom: '0.6rem' }}>
+                      🔄 Practice Correction
+                    </div>
+                    <p style={{ fontSize: '0.88rem', color: 'var(--foreground)', marginBottom: '0.6rem' }}>{step.instruction}</p>
+                    <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                      <div style={{ flex: 1, background: 'rgba(239,68,68,0.08)', borderRadius: '0.75rem', padding: '0.6rem', borderLeft: '3px solid #ef4444' }}>
+                        <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#ef4444', marginBottom: '0.25rem' }}>You said:</div>
+                        <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1rem', color: '#ef4444' }}>{step.original}</div>
+                      </div>
+                      <div style={{ flex: 1, background: 'rgba(34,197,94,0.08)', borderRadius: '0.75rem', padding: '0.6rem', borderLeft: '3px solid #22c55e' }}>
+                        <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#22c55e', marginBottom: '0.25rem' }}>Say this:</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                          <button
+                            onClick={() => { triggerHaptic(); speakArabic(step.corrected); }}
+                            style={{ background: 'rgba(34,197,94,0.15)', border: 'none', cursor: 'pointer', fontSize: '1rem', width: 32, height: 32, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#22c55e', flexShrink: 0 }}
+                          >🔊</button>
+                          <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1rem', color: '#22c55e', fontWeight: 600 }}>{step.corrected}</div>
+                        </div>
+                      </div>
+                    </div>
+                    {/* Mic button — show if not completed AND not currently checking */}
+                    {idx === pictureFeedbackIndex && !challengeCompleted[idx] && !challengeChecking && (
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
+                        {/* Show failed result + retry prompt */}
+                        {challengeResult[idx] && !challengeResult[idx].good && (
+                          <div style={{ textAlign: 'center', padding: '0.5rem', borderRadius: '0.75rem', background: 'rgba(239,68,68,0.08)', width: '100%', marginBottom: '0.25rem' }}>
+                            <div style={{ color: '#ef4444', fontSize: '0.83rem', fontWeight: 600, marginBottom: '0.25rem' }}>
+                              ✗ {challengeResult[idx].feedback}
+                            </div>
+                            <div style={{ color: 'var(--muted-foreground)', fontSize: '0.75rem' }}>Try again or skip</div>
+                          </div>
+                        )}
+                        <div style={{ display: 'flex', justifyContent: 'center', gap: '0.75rem' }}>
+                          <button
+                            style={{
+                              width: 56, height: 56, borderRadius: '50%', border: 'none', cursor: 'pointer',
+                              background: challengeRecording ? '#ef4444' : 'var(--primary)', color: 'white',
+                              fontSize: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              animation: challengeRecording ? 'micPulse 1.5s ease-in-out infinite' : 'none',
+                              boxShadow: '0 4px 15px rgba(0,0,0,0.2)'
+                            }}
+                            onClick={() => {
+                              triggerHaptic();
+                              if (challengeRecording) { stopChallengeRecording(idx); }
+                              else { startChallengeRecording(idx); }
+                            }}
+                          >
+                            {challengeRecording ? '⏹' : '🎙️'}
+                          </button>
+                          <button
+                            style={{ padding: '0.5rem 1rem', borderRadius: '2rem', border: '1px solid var(--border)', background: 'var(--muted)', color: 'var(--muted-foreground)', fontSize: '0.8rem', cursor: 'pointer', alignSelf: 'center' }}
+                            onClick={() => { triggerHaptic(); setChallengeCompleted(prev => ({ ...prev, [idx]: true })); }}
+                          >
+                            Skip →
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {/* Success result */}
+                    {challengeCompleted[idx] && challengeResult[idx]?.good && (
+                      <div style={{ textAlign: 'center', padding: '0.5rem', borderRadius: '0.75rem', background: 'rgba(34,197,94,0.08)' }}>
+                        <div style={{ color: '#22c55e', fontSize: '0.85rem', fontWeight: 600 }}>
+                          ✓ {challengeResult[idx].feedback}
+                        </div>
+                      </div>
+                    )}
+                    {/* Skipped (not good or no result) */}
+                    {challengeCompleted[idx] && !challengeResult[idx]?.good && (
+                      <div style={{ textAlign: 'center', padding: '0.5rem', borderRadius: '0.75rem', background: 'rgba(156,163,175,0.08)' }}>
+                        <div style={{ color: 'var(--muted-foreground)', fontSize: '0.83rem' }}>Skipped</div>
+                      </div>
+                    )}
+                    {challengeChecking && idx === pictureFeedbackIndex && (
+                      <div style={{ textAlign: 'center', color: 'var(--muted-foreground)', fontSize: '0.8rem' }}>
+                        <span style={{ animation: 'pulse 1s ease-in-out infinite' }}>Checking your pronunciation...</span>
+                      </div>
+                    )}
+                  </>
+                )}
 
-    // PHASE: RETRY
-    if (picturePhase === "retry" && activePictureLesson) {
-      return (
-        <div className="picture-retry-screen">
-          <div className="picture-retry-icon">
-            <Icon icon="solar:refresh-circle-bold" />
-          </div>
+                {/* SPEAK CHALLENGE (follow-up question) */}
+                {step.type === 'speak_challenge' && (
+                  <>
+                    <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#8b5cf6', marginBottom: '0.6rem' }}>
+                      🗣️ Follow-up Challenge
+                    </div>
+                    <p style={{ fontSize: '0.9rem', color: 'var(--foreground)', marginBottom: '0.5rem', fontWeight: 500 }}>{step.prompt}</p>
+                    {step.hint && (
+                      <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '0.95rem', color: 'var(--muted-foreground)', marginBottom: '0.6rem', fontStyle: 'italic' }}>
+                        💡 {step.hint}
+                      </div>
+                    )}
+                    {/* Mic button — show if not completed AND not currently checking */}
+                    {idx === pictureFeedbackIndex && !challengeCompleted[idx] && !challengeChecking && (
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
+                        {/* Show failed result + retry prompt */}
+                        {challengeResult[idx] && !challengeResult[idx].good && (
+                          <div style={{ textAlign: 'center', padding: '0.5rem', borderRadius: '0.75rem', background: 'rgba(239,68,68,0.08)', width: '100%', marginBottom: '0.25rem' }}>
+                            <div style={{ color: '#ef4444', fontSize: '0.83rem', fontWeight: 600, marginBottom: '0.25rem' }}>
+                              {challengeResult[idx].feedback}
+                            </div>
+                            <div style={{ color: 'var(--muted-foreground)', fontSize: '0.75rem' }}>Try again — answer in Arabic</div>
+                          </div>
+                        )}
+                        <div style={{ display: 'flex', justifyContent: 'center', gap: '0.75rem', alignItems: 'center' }}>
+                          <button
+                            style={{
+                              width: 56, height: 56, borderRadius: '50%', border: 'none', cursor: 'pointer',
+                              background: challengeRecording ? '#ef4444' : '#8b5cf6', color: 'white',
+                              fontSize: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              animation: challengeRecording ? 'micPulse 1.5s ease-in-out infinite' : 'none',
+                              boxShadow: '0 4px 15px rgba(0,0,0,0.2)'
+                            }}
+                            onClick={() => {
+                              triggerHaptic();
+                              if (challengeRecording) { stopChallengeRecording(idx); }
+                              else { startChallengeRecording(idx); }
+                            }}
+                          >
+                            {challengeRecording ? '⏹' : '🎙️'}
+                          </button>
+                          {challengeRecording && (
+                            <span style={{ fontSize: '0.75rem', color: '#8b5cf6', fontWeight: 600 }}>Up to 30s</span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {/* Success result */}
+                    {challengeCompleted[idx] && challengeResult[idx]?.good && (
+                      <div style={{ textAlign: 'center', padding: '0.5rem', borderRadius: '0.75rem', background: 'rgba(139,92,246,0.08)' }}>
+                        <div style={{ color: '#8b5cf6', fontSize: '0.85rem', fontWeight: 600 }}>
+                          ✓ {challengeResult[idx].feedback}
+                        </div>
+                      </div>
+                    )}
+                    {challengeChecking && idx === pictureFeedbackIndex && (
+                      <div style={{ textAlign: 'center', color: 'var(--muted-foreground)', fontSize: '0.8rem' }}>
+                        <span style={{ animation: 'pulse 1s ease-in-out infinite' }}>Checking your response...</span>
+                      </div>
+                    )}
+                  </>
+                )}
 
-          <h1 className="picture-retry-title">Almost There!</h1>
-          <p className="picture-retry-subtitle">You used {pictureMatchPercent}% of the vocabulary. Try to use more of these words:</p>
+                {/* IMPROVEMENT SUGGESTION */}
+                {step.type === 'improvement' && (
+                  <>
+                    <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#3b82f6', marginBottom: '0.6rem' }}>
+                      📈 Level Up Your Answer
+                    </div>
+                    <p style={{ fontSize: '0.88rem', color: 'var(--foreground)', marginBottom: '0.6rem', lineHeight: 1.6 }}>{step.suggestion}</p>
+                    {step.example && (
+                      <div style={{ background: 'rgba(59,130,246,0.08)', borderRadius: '0.75rem', padding: '0.75rem', borderLeft: '3px solid #3b82f6' }}>
+                        <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#3b82f6', marginBottom: '0.3rem' }}>Try saying:</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <button
+                            onClick={() => { triggerHaptic(); speakArabic(step.example); }}
+                            style={{ background: 'rgba(59,130,246,0.15)', border: 'none', cursor: 'pointer', fontSize: '1.1rem', width: 36, height: 36, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#3b82f6', flexShrink: 0 }}
+                          >🔊</button>
+                          <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.05rem', color: '#3b82f6', fontWeight: 600, lineHeight: 1.8 }}>{step.example}</div>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
 
-          <div className="picture-retry-vocab">
-            {pictureMissedWords.map((item, idx) => (
-              <div key={idx} className="picture-retry-vocab-item">
-                <span className="retry-arabic">{item.arabic}</span>
-                <span className="retry-english">{item.english}</span>
+                {/* VOCAB CHECK */}
+                {step.type === 'vocab_check' && (
+                  <>
+                    <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--muted-foreground)', marginBottom: '0.6rem' }}>
+                      📝 Vocabulary Check
+                    </div>
+                    <div style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--primary)', marginBottom: '0.4rem' }}>
+                      {step.used?.length || 0}/{pictureVocab.length} words used
+                    </div>
+                    <p style={{ fontSize: '0.83rem', color: 'var(--muted-foreground)', margin: 0 }}>{step.analysis}</p>
+                  </>
+                )}
               </div>
             ))}
           </div>
 
-          {/* AI Feedback Card */}
-          {loadingAiFeedback && (
-            <div className="ai-feedback-card ai-feedback-loading">
-              <div className="ai-feedback-header">
-                <span className="ai-feedback-icon">🤖</span>
-                <span>AI is analyzing your answer...</span>
-              </div>
-              <Leapfrog size="24" speed="2.5" color="#f59e0b" />
-            </div>
-          )}
-          {aiFeedback && !loadingAiFeedback && (
-            <div className="ai-feedback-card">
-              <div className="ai-feedback-header">
-                <span className="ai-feedback-icon">🤖</span>
-                <span className="ai-feedback-label">AI Tutor Feedback</span>
-                {aiFeedback.overallScore != null && (
-                  <span className={`ai-feedback-score ${aiFeedback.overallScore >= 70 ? 'score-good' : aiFeedback.overallScore >= 40 ? 'score-ok' : 'score-low'}`}>
-                    {aiFeedback.overallScore}%
-                  </span>
-                )}
-              </div>
-              {aiFeedback.feedback && (
-                <p className="ai-feedback-text">{aiFeedback.feedback}</p>
-              )}
-              {aiFeedback.corrections?.length > 0 && (
-                <div className="ai-feedback-corrections">
-                  {aiFeedback.corrections.map((c, i) => (
-                    <div key={i} className="ai-correction-item">
-                      <div className="ai-correction-row">
-                        <span className="ai-correction-label">You said:</span>
-                        <span className="ai-correction-arabic">{c.said}</span>
+          {/* Continue / Action buttons */}
+          <div style={{ padding: '1.25rem 1.25rem 0', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {!allRevealed ? (
+              <button
+                style={{
+                  width: '100%', padding: '0.9rem', borderRadius: '1rem', border: 'none', cursor: 'pointer',
+                  background: ((isChallenge && !challengeDone) || challengeChecking) ? 'var(--muted)' : 'var(--primary)',
+                  color: ((isChallenge && !challengeDone) || challengeChecking) ? 'var(--muted-foreground)' : 'white',
+                  fontWeight: 700, fontSize: '0.93rem',
+                  opacity: ((isChallenge && !challengeDone) || challengeChecking) ? 0.5 : 1,
+                  pointerEvents: ((isChallenge && !challengeDone) || challengeChecking) ? 'none' : 'auto'
+                }}
+                onClick={() => { triggerHaptic(); setPictureFeedbackIndex(pictureFeedbackIndex + 1); }}
+              >
+                Continue →
+              </button>
+            ) : (
+              <>
+                {/* أحسنت congratulations */}
+                <div style={{
+                  textAlign: 'center', padding: '1.5rem', borderRadius: '1.25rem',
+                  background: 'linear-gradient(135deg, rgba(34,197,94,0.1), rgba(59,130,246,0.1))',
+                  border: '1px solid rgba(34,197,94,0.2)'
+                }}>
+                  <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '2rem', fontWeight: 700, color: '#22c55e', marginBottom: '0.25rem' }}>أحسنت!</div>
+                  <div style={{ fontSize: '0.85rem', color: 'var(--muted-foreground)' }}>Great job completing this lesson!</div>
+                  {pictureScore != null && (
+                    <div style={{ marginTop: '0.5rem' }}>
+                      <div style={{ fontSize: '1.3rem', fontWeight: 700, color: 'var(--primary)' }}>
+                        {pictureScore}/10
                       </div>
-                      <div className="ai-correction-row">
-                        <span className="ai-correction-label better-label">Better:</span>
-                        <span className="ai-correction-arabic">{c.better}</span>
-                      </div>
-                      {c.explanation && (
-                        <p className="ai-correction-explanation">{c.explanation}</p>
+                      {pictureVocabStats && (
+                        <div style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', marginTop: '0.25rem' }}>
+                          📖 {pictureVocabStats.vocabUsed}/{pictureVocabStats.vocabTotal} vocab words used
+                        </div>
                       )}
                     </div>
-                  ))}
+                  )}
                 </div>
-              )}
-              {aiFeedback.encouragement && (
-                <p className="ai-feedback-encouragement">{aiFeedback.encouragement}</p>
-              )}
-            </div>
-          )}
-
-          <div className="picture-retry-buttons">
-            <button
-              className="btn-picture-retry"
-              onClick={() => {
-                triggerHaptic();
-                setPicturePhase("picture");
-                setPictureTranscript("");
-                setPictureMatchPercent(0);
-                setPictureMatchedWords([]);
-                setPictureMissedWords([]);
-              }}
-            >
-              <Icon icon="solar:refresh-bold" style={{ marginRight: '0.5rem' }} />
-              Try Again
-            </button>
-            <button
-              className="btn-picture-giveup"
-              onClick={() => { triggerHaptic(); setPicturePhase("solution"); }}
-            >
-              Give Up & Hear Answer
-            </button>
-          </div>
-        </div>
-      );
-    }
-
-    // PHASE: SOLUTION
-    if (picturePhase === "solution" && activePictureLesson) {
-      return (
-        <div className="picture-solution-screen">
-          <div className="picture-solution-icon">
-            <Icon icon="solar:headphones-round-sound-bold" />
-          </div>
-
-          <h1 className="picture-solution-title">Model Answer</h1>
-          <p className="picture-solution-subtitle">Listen to how a native speaker describes this picture</p>
-
-          {activePictureLesson.model_audio_url ? (
-            <div className="picture-model-audio solution">
-              <audio
-                ref={pictureAudioRef}
-                controls
-                autoPlay
-                src={activePictureLesson.model_audio_url}
-                className="model-audio-player"
-              />
-            </div>
-          ) : (
-            <p className="picture-no-audio">No model audio available for this lesson.</p>
-          )}
-
-          <div className="picture-solution-vocab">
-            <h4>Vocabulary Used:</h4>
-            <div className="solution-vocab-list">
-              {pictureVocab.map((item, idx) => (
-                <div key={idx} className="solution-vocab-item">
-                  <span className="solution-arabic">{item.arabic}</span>
-                  <span className="solution-english">{item.english}</span>
+                <div style={{ display: 'flex', gap: '0.75rem' }}>
+                  <button
+                    style={{
+                      flex: 1, padding: '0.9rem', borderRadius: '1rem', background: 'var(--muted)', border: '1px solid var(--border)',
+                      color: 'var(--foreground)', fontWeight: 700, fontSize: '0.88rem', cursor: 'pointer'
+                    }}
+                    onClick={() => {
+                      triggerHaptic();
+                      setPicturePhase("picture");
+                      setPictureTranscript("");
+                      setPictureMatchPercent(0);
+                      setPictureMatchedWords([]);
+                      setPictureMissedWords([]);
+                      setPictureFeedbackSteps([]);
+                      setPictureFeedbackIndex(0);
+                      setPictureScore(null);
+                      setPictureVocabStats(null);
+                      setChallengeCompleted({});
+                      setChallengeResult({});
+                    }}
+                  >
+                    🔄 Try Again
+                  </button>
+                  <button
+                    style={{
+                      flex: 1, padding: '0.9rem', borderRadius: '1rem', background: 'var(--primary)', border: 'none',
+                      color: 'white', fontWeight: 700, fontSize: '0.88rem', cursor: 'pointer'
+                    }}
+                    onClick={() => { triggerHaptic(); setPracticeMode("picture-describe"); resetPictureDescribeFlow(); }}
+                  >
+                    ✓ Done
+                  </button>
                 </div>
-              ))}
-            </div>
+              </>
+            )}
           </div>
-
-          <button
-            className="btn-picture-home"
-            onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode("speaking"); resetPictureDescribeFlow(); }}
-          >
-            Return to Speaking Practice
-          </button>
         </div>
       );
     }
@@ -4023,7 +6112,7 @@ function App() {
           <div className="modal-overlay">
             <div className="modal-content">
               <h3 className="modal-title">Leave Quest?</h3>
-              <p className="text-muted">Are you sure you want to return to the map? All progress will be lost.</p>
+              <p className="text-muted">Are you sure you want to return to home? All progress will be lost.</p>
               <div className="modal-actions">
                 <button className="btn-outline" style={{ flex: 1 }} onClick={() => { triggerHaptic(); setShowQuitQuizConfirm(false); }}>
                   Stay
@@ -4117,7 +6206,7 @@ function App() {
                   Try Again
                 </button>
                 <button className="btn-outline" onClick={() => { triggerHaptic(); backToLessons(); }}>
-                  Return to Map
+                  Return Home
                 </button>
               </div>
             </div>
@@ -4179,6 +6268,10 @@ function App() {
                 <audio
                   ref={audioRef}
                   src={activeLesson.audio_url}
+                  preload="auto"
+                  onError={(e) => {
+                    console.error('Audio load error:', e.target.error?.message || 'unknown', 'code:', e.target.error?.code, 'src:', activeLesson.audio_url?.substring(0, 80));
+                  }}
                   onTimeUpdate={(e) => {
                     // Handle paragraph playback - pause at end_time_seconds
                     if (playingParagraphId && playingParagraphEnd != null) {
@@ -4555,9 +6648,14 @@ function App() {
                   aiDragRef.current.currentY = 0;
                 }}
               >
-                {/* Drag handle */}
-                <div className="ai-sheet-handle-area">
-                  <div className="ai-sheet-handle" />
+                {/* Close button */}
+                <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '0.75rem 1rem 0' }}>
+                  <button
+                    onClick={closeAiSheet}
+                    style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: '50%', width: '32px', height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: 'var(--foreground)' }}
+                  >
+                    ✕
+                  </button>
                 </div>
 
                 {/* Content — centered */}
@@ -4963,12 +7061,15 @@ function App() {
 
                 <div className="carousel-content-area">
                   <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>:عربي</div>
-                  <div className="arabic-box spotlight-arabic" dir="rtl" style={{ fontSize: '2rem' }}>
+                  <div className="arabic-box spotlight-arabic" dir="rtl" style={{ fontSize: '2rem', position: 'relative' }}>
                     {explanations[explanationIndex].arabic_sentence}
+                    <button className="speak-btn" onClick={(e) => { e.stopPropagation(); speakArabic(explanations[explanationIndex].arabic_sentence); }} aria-label="Listen" style={{ position: 'absolute', bottom: '0.75rem', left: '0.75rem' }}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 8.5v7a4.49 4.49 0 002.5-3.5zM14 3.23v2.06a6.5 6.5 0 010 13.42v2.06A8.5 8.5 0 0014 3.23z" /></svg>
+                    </button>
                   </div>
 
                   <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
-                  <div className="explanation-bubble" style={{ borderLeft: '5px solid var(--green)', background: '#f0fff4' }}>
+                  <div className="explanation-bubble" style={{ borderLeft: '4px solid var(--chart-3)' }}>
                     {explanations[explanationIndex].english_sentence}
                   </div>
                 </div>
@@ -5034,6 +7135,10 @@ function App() {
                     <audio
                       ref={audioRef}
                       src={activeLesson.audio_url}
+                      preload="auto"
+                      onError={(e) => {
+                        console.error('Relisten audio load error:', e.target.error?.message || 'unknown', 'code:', e.target.error?.code);
+                      }}
                       onTimeUpdate={(e) => {
                         if (activeLesson.lesson_format !== "blocks" && e.target.duration > 0) {
                           setAudioProgress(
@@ -5118,16 +7223,14 @@ function App() {
           {/* EXIT CONFIRMATION MODAL */}
           {
             showExitModal && (
-              <div className="modal-overlay">
-                <div className="modal-content">
-                  <div className="modal-title">Return to the home screen?</div>
-                  <p className="text-muted">
-                    (Choose YES to leave or NO to resume the lesson)
-                  </p>
-                  <div className="modal-actions">
+              <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)' }}>
+                <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: '1.5rem', padding: '2rem', maxWidth: '320px', width: '90%', textAlign: 'center' }}>
+                  <div style={{ fontSize: '2rem', marginBottom: '0.75rem' }}>🚪</div>
+                  <h3 style={{ fontWeight: 700, fontSize: '1.1rem', marginBottom: '0.5rem', color: 'var(--foreground)' }}>Leave this lesson?</h3>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--muted-foreground)', marginBottom: '1.5rem' }}>Your progress won't be saved.</p>
+                  <div style={{ display: 'flex', gap: '0.75rem' }}>
                     <button
-                      className="btn-outline"
-                      style={{ flex: 1 }}
+                      style={{ flex: 1, padding: '0.875rem', borderRadius: '1rem', background: 'var(--muted)', border: '1px solid var(--border)', color: 'var(--foreground)', fontWeight: 700, fontSize: '0.9rem', cursor: 'pointer' }}
                       onClick={() => {
                         triggerHaptic();
                         setShowExitModal(false);
@@ -5138,22 +7241,17 @@ function App() {
                         }
                       }}
                     >
-                      NO
+                      Stay
                     </button>
                     <button
-                      className="btn-primary"
-                      style={{
-                        flex: 1,
-                        backgroundColor: "var(--red)",
-                        boxShadow: "0 4px 0 var(--red-dark)",
-                      }}
+                      style={{ flex: 1, padding: '0.875rem', borderRadius: '1rem', background: 'var(--destructive)', border: 'none', color: 'white', fontWeight: 700, fontSize: '0.9rem', cursor: 'pointer' }}
                       onClick={() => {
                         triggerHaptic();
                         setShowExitModal(false);
                         backToLessons();
                       }}
                     >
-                      YES
+                      Leave
                     </button>
                   </div>
                 </div>
