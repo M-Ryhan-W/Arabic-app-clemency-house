@@ -220,36 +220,45 @@ export default function ScenarioChat({
 
   async function startScenarioRecording() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      scenarioChunksRef.current = [];
-      scenarioStreamRef.current = stream;
-
-      const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
-      let selectedMime = '';
-      for (const m of mimeTypes) {
-        if (MediaRecorder.isTypeSupported(m)) { selectedMime = m; break; }
-      }
-
-      const recorder = new MediaRecorder(stream, selectedMime ? { mimeType: selectedMime } : {});
-      scenarioRecorderRef.current = recorder;
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) scenarioChunksRef.current.push(e.data);
-      };
-
-      recorder.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
-        scenarioStreamRef.current = null;
-        const blobType = selectedMime || 'audio/webm;codecs=opus';
-        const blob = new Blob(scenarioChunksRef.current, { type: blobType });
-        if (blob.size < 100) {
+      // Request microphone permission explicitly first
+      try {
+        const permResult = await navigator.permissions.query({ name: 'microphone' });
+        if (permResult.state === 'denied') {
+          console.error("Microphone permission denied.");
           setScenarioRecording(false);
           return;
         }
+      } catch (permErr) {
+        console.log('Permissions API not supported, will request via getUserMedia');
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      scenarioChunksRef.current = [];
+      scenarioStreamRef.current = stream;
+
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : '';
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      scenarioRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          scenarioChunksRef.current.push(e.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        // Stop all tracks to release the microphone
+        stream.getTracks().forEach(t => t.stop());
+        scenarioStreamRef.current = null;
+
+        const recordedMime = recorder.mimeType || 'audio/webm;codecs=opus';
+        const blob = new Blob(scenarioChunksRef.current, { type: recordedMime });
+
         const reader = new FileReader();
         reader.onloadend = async () => {
-          const base64 = reader.result.split(',')[1];
-          await sendScenarioAudio(base64, blobType);
+          const base64String = reader.result;
+          const base64Audio = base64String.split(',')[1];
+          await sendScenarioAudio(base64Audio, recordedMime);
         };
         reader.readAsDataURL(blob);
       };
