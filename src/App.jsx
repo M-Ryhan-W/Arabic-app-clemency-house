@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef, useMemo } from "react";
+import ScenarioChat from "./ScenarioChat";
 import { supabase } from "./supabaseClient";
 import { Leapfrog } from 'ldrs/react';
 import 'ldrs/react/Leapfrog.css';
@@ -130,6 +131,8 @@ const playRewardSound = () => {
     });
   } catch (e) { }
 };
+
+const MAX_AUDIO_BASE64_LENGTH = 5 * 1024 * 1024; // ~3.75MB raw audio, reasonable max for speech
 
 // ===== HAPTIC + SOUND HELPERS =====
 
@@ -333,6 +336,8 @@ if (typeof navigator !== 'undefined') {
     };
   }
 }
+
+
 
 function App() {
   // ============ SPLASH SCREEN STATE ============
@@ -593,25 +598,8 @@ function App() {
 
   // ✅ SCENARIO CHAT STATE
   const [scenarioData, setScenarioData] = useState(null); // { id, emoji, title, titleAr }
-  const [scenarioPhase, setScenarioPhase] = useState(null); // null | "difficulty" | "chat" | "summary"
-  const [scenarioDifficulty, setScenarioDifficulty] = useState(null); // "easy" | "intermediate" | "advanced"
-  const [scenarioMessages, setScenarioMessages] = useState([]); // [{ role: "ai"|"user", text, translation?, hint?, keyPhrase? }]
-  const [scenarioRecording, setScenarioRecording] = useState(false);
-  const [scenarioLoading, setScenarioLoading] = useState(false); // AI thinking
+  const [scenarioPhase, setScenarioPhase] = useState(false); // null | "difficulty" | "chat" | "summary"
   const [scenarioCompleted, setScenarioCompleted] = useState(false); // completed today
-  const [scenarioKeyPhrases, setScenarioKeyPhrases] = useState([]); // collected key phrases
-  const [showScenarioHelp, setShowScenarioHelp] = useState(false); // help panel
-  const [showScenarioMoreHelp, setShowScenarioMoreHelp] = useState(false); // expanded help text
-  const [scenarioTurnCount, setScenarioTurnCount] = useState(0);
-  const scenarioRecorderRef = useRef(null);
-  const scenarioStreamRef = useRef(null);
-  const scenarioChunksRef = useRef([]);
-  const scenarioChatEndRef = useRef(null);
-  const scenarioMessagesRef = useRef([]);
-  const scenarioAudioRef = useRef(null);
-  const scenarioStartTimeRef = useRef(null);
-  const scenarioCountdownRef = useRef(null);
-  const [scenarioRecordingSeconds, setScenarioRecordingSeconds] = useState(0);
 
   // ✅ DYNAMIC STREAKS & STATS CALCULATION
   const { currentStreak, longestStreak, totalDays, activeDaysSet } = useMemo(() => {
@@ -673,12 +661,7 @@ function App() {
     };
   }, [activeDatesHistory, lessonProgress, speakingLessonProgress]);
 
-  // Auto-scroll scenario chat
-  useEffect(() => {
-    if (scenarioChatEndRef.current) {
-      scenarioChatEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [scenarioMessages, scenarioLoading]);
+  
 
   // AI HELPER STATE (FAB + slide-up sheet)
   const [aiSheetOpen, setAiSheetOpen] = useState(false);
@@ -957,11 +940,50 @@ function App() {
     return [...arr].sort(() => Math.random() - 0.5);
   }
 
+  // ✅ Helper to fetch and attach options to questions in a single batch query
+  async function attachOptionsToQuestions(questions) {
+    const mcqIds = questions
+      .filter(q => q.question_type === "mcq")
+      .map(q => q.id);
+
+    if (mcqIds.length === 0) {
+      return questions.map(q => ({ ...q, options: [] }));
+    }
+
+    try {
+      const { data: allOptions, error } = await supabase
+        .from("question_options")
+        .select("*")
+        .in("question_id", mcqIds);
+
+      if (error) throw error;
+
+      // Group options by question_id
+      const optionsMap = (allOptions || []).reduce((acc, opt) => {
+        if (!acc[opt.question_id]) acc[opt.question_id] = [];
+        acc[opt.question_id].push(opt);
+        return acc;
+      }, {});
+
+      return questions.map(q => {
+        if (q.question_type === "mcq") {
+          const options = optionsMap[q.id] || [];
+          return { ...q, options: shuffleArray(options) };
+        }
+        return { ...q, options: [] };
+      });
+    } catch (err) {
+      console.error("Error batch loading options:", err);
+      // Fallback: return questions with empty options on error
+      return questions.map(q => ({ ...q, options: [] }));
+    }
+  }
+
   // ---------- SOUND EFFECTS ----------
 
   function playCorrectSound() {
     try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = getAudioCtx();
       const oscillator = ctx.createOscillator();
       const gainNode = ctx.createGain();
       oscillator.connect(gainNode);
@@ -980,7 +1002,7 @@ function App() {
 
   function playWrongSound() {
     try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = getAudioCtx();
       const oscillator = ctx.createOscillator();
       const gainNode = ctx.createGain();
       oscillator.connect(gainNode);
@@ -998,7 +1020,7 @@ function App() {
 
   function playCelebrationSound() {
     try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = getAudioCtx();
       const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
       notes.forEach((freq, i) => {
         const oscillator = ctx.createOscillator();
@@ -1019,7 +1041,7 @@ function App() {
   // Speaking practice correct jingle - pleasant chime
   function playSpeakingCorrectSound() {
     try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = getAudioCtx();
       // Two-note rising chime (G5 -> C6)
       const notes = [783.99, 1046.50];
       notes.forEach((freq, i) => {
@@ -1043,7 +1065,7 @@ function App() {
   // Speaking practice incorrect jingle - soft descending tone
   function playSpeakingIncorrectSound() {
     try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = getAudioCtx();
       const oscillator = ctx.createOscillator();
       const gainNode = ctx.createGain();
       oscillator.type = 'sine';
@@ -1123,7 +1145,7 @@ function App() {
 
         // 2.5. Inside Scenario Chat
         if (scenarioPhase) {
-          resetScenarioChat();
+          setScenarioPhase(false);
           return;
         }
 
@@ -1202,6 +1224,54 @@ function App() {
       }
     };
   }, []); // Register only ONCE
+
+  // Cleanup on unmount — prevent leaked timers, mic locks, and orphaned audio
+  useEffect(() => {
+    return () => {
+      // Clear all interval/timeout timers
+      try { if (analysisTimerRef.current) { clearInterval(analysisTimerRef.current); analysisTimerRef.current = null; } } catch (e) { }
+      try { if (pictureTimerRef.current) { clearInterval(pictureTimerRef.current); pictureTimerRef.current = null; } } catch (e) { }
+      try { if (transitionTimerRef.current) { clearTimeout(transitionTimerRef.current); transitionTimerRef.current = null; } } catch (e) { }
+
+      // Stop all active recordings and release mic streams
+      try {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+          if (mediaRecorderRef.current.stream) {
+            mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop());
+          }
+          mediaRecorderRef.current = null;
+        }
+      } catch (e) { }
+
+
+
+
+
+      try {
+        if (challengeRecorderRef.current && challengeRecorderRef.current.state !== 'inactive') {
+          challengeRecorderRef.current.stop();
+          if (challengeRecorderRef.current.stream) {
+            challengeRecorderRef.current.stream.getTracks().forEach(t => t.stop());
+          }
+          challengeRecorderRef.current = null;
+        }
+      } catch (e) { }
+
+      try {
+        if (challengeStreamRef.current) {
+          challengeStreamRef.current.getTracks().forEach(t => t.stop());
+          challengeStreamRef.current = null;
+        }
+      } catch (e) { }
+
+      // Pause any playing audio
+
+
+      // Cancel speech synthesis
+      try { window.speechSynthesis?.cancel(); } catch (e) { }
+    };
+  }, []);
 
   async function handleSignUp(e) {
     if (e) e.preventDefault();
@@ -1322,17 +1392,8 @@ function App() {
           : Promise.resolve({ data: [], error: null })
       ]);
 
-      // Fetch question options for MCQs
-      const questions = questionsRes.data || [];
-      const questionsWithOptions = [];
-      for (const q of questions) {
-        if (q.question_type === "mcq") {
-          const { data: options } = await supabase.from("question_options").select("*").eq("question_id", q.id);
-          questionsWithOptions.push({ ...q, options: shuffleArray(options || []) });
-        } else {
-          questionsWithOptions.push({ ...q, options: [] });
-        }
-      }
+      // Fetch question options for MCQs in a single batch
+      const questionsWithOptions = await attachOptionsToQuestions(questionsRes.data || []);
 
       // Store in cache
       lessonContentCache.current.set(lessonId, {
@@ -1688,223 +1749,10 @@ function App() {
     }
   }
 
-  async function startScenarioChat(difficulty) {
-    setScenarioDifficulty(difficulty);
-    setScenarioPhase("briefing");
-    setScenarioMessages([]);
-    setScenarioKeyPhrases([]);
-    setScenarioLoading(true);
-    setScenarioTurnCount(0);
-    scenarioStartTimeRef.current = Date.now();
 
-    try {
-      const { data, error } = await supabase.functions.invoke("scenario-chat", {
-        body: { action: "start", difficulty }
-      });
-      console.log('Scenario start raw:', { data, error });
-      if (!error && data) {
-        const parsed = typeof data === 'string' ? JSON.parse(data) : data;
-        console.log('Scenario start parsed:', parsed);
-        if (parsed.message) {
-          const aiMsg = {
-            role: "ai",
-            text: parsed.message,
-            translation: parsed.translation || '',
-            hint: parsed.hint || '',
-            audioHelp: parsed.audioHelp || '',
-            suggestedResponse: parsed.suggestedResponse || '',
-            suggestedResponseTranslation: parsed.suggestedResponseTranslation || '',
-            keyPhrase: parsed.keyPhrase || null,
-            isTranslationVisible: false,
-          };
-          setScenarioMessages([aiMsg]);
-          scenarioMessagesRef.current = [aiMsg];
-          if (parsed.keyPhrase) {
-            setScenarioKeyPhrases(prev => [...prev, parsed.keyPhrase]);
-          }
-          setShowScenarioMoreHelp(false);
-          // Audio playback is now delayed until the user clicks "Ready" on the briefing page
-        } else {
-          // AI returned empty message
-          const fallbackMsg = { role: 'ai', text: 'مرحباً! أهلاً وسهلاً', translation: 'Hello! Welcome!', hint: 'Try greeting back with مرحباً or السلام عليكم', keyPhrase: { arabic: 'أهلاً وسهلاً', english: 'Welcome' }, isTranslationVisible: false };
-          setScenarioMessages([fallbackMsg]);
-          scenarioMessagesRef.current = [fallbackMsg];
-        }
-      } else {
-        console.error('Scenario start error:', error);
-        const fallbackMsg = { role: 'ai', text: 'مرحباً! كيف حالك؟', translation: 'Hello! How are you?', hint: 'Try saying مرحباً (Hello) or بخير (Fine)', keyPhrase: { arabic: 'كيف حالك', english: 'How are you?' }, isTranslationVisible: false };
-        setScenarioMessages([fallbackMsg]);
-        scenarioMessagesRef.current = [fallbackMsg];
-      }
-    } catch (e) {
-      console.error("Error starting scenario:", e);
-    }
-    setScenarioLoading(false);
-  }
 
-  async function startScenarioRecording() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      scenarioChunksRef.current = [];
-      scenarioStreamRef.current = stream;
 
-      const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
-      let selectedMime = '';
-      for (const m of mimeTypes) {
-        if (MediaRecorder.isTypeSupported(m)) { selectedMime = m; break; }
-      }
 
-      const recorder = new MediaRecorder(stream, selectedMime ? { mimeType: selectedMime } : {});
-      scenarioRecorderRef.current = recorder;
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) scenarioChunksRef.current.push(e.data);
-      };
-
-      recorder.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
-        const blobType = selectedMime || 'audio/webm;codecs=opus';
-        const blob = new Blob(scenarioChunksRef.current, { type: blobType });
-        if (blob.size < 100) {
-          setScenarioRecording(false);
-          return;
-        }
-        const reader = new FileReader();
-        reader.onloadend = async () => {
-          const base64 = reader.result.split(',')[1];
-          await sendScenarioAudio(base64, blobType);
-        };
-        reader.readAsDataURL(blob);
-      };
-
-      recorder.start();
-      setScenarioRecording(true);
-      triggerHaptic();
-
-      if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
-      window.speechSynthesis?.cancel();
-
-      setScenarioRecordingSeconds(0);
-      scenarioCountdownRef.current = setInterval(() => {
-        setScenarioRecordingSeconds(prev => {
-          if (prev >= 44) {
-            clearInterval(scenarioCountdownRef.current);
-            if (scenarioRecorderRef.current?.state === 'recording') {
-              scenarioRecorderRef.current.stop();
-              setScenarioRecording(false);
-            }
-            return 45;
-          }
-          return prev + 1;
-        });
-      }, 1000);
-    } catch (e) {
-      console.error("Scenario recording error:", e);
-      setScenarioRecording(false);
-    }
-  }
-
-  function stopScenarioRecording() {
-    if (scenarioRecorderRef.current?.state === 'recording') {
-      scenarioRecorderRef.current.stop();
-      setScenarioRecording(false);
-      clearInterval(scenarioCountdownRef.current);
-      triggerHaptic();
-    }
-  }
-
-  async function sendScenarioAudio(base64, mimeType) {
-    setScenarioLoading(true);
-    try {
-      // Use ref for current messages to avoid stale closure
-      const history = scenarioMessagesRef.current.map(m => ({
-        role: m.role,
-        text: m.text,
-      }));
-
-      const elapsedSeconds = scenarioStartTimeRef.current ? Math.floor((Date.now() - scenarioStartTimeRef.current) / 1000) : 0;
-
-      const { data, error } = await supabase.functions.invoke("scenario-chat", {
-        body: {
-          action: "reply",
-          difficulty: scenarioDifficulty,
-          conversationHistory: history,
-          audioBase64: base64,
-          mimeType: mimeType,
-          elapsedSeconds
-        }
-      });
-
-      if (!error && data) {
-        const parsed = typeof data === 'string' ? JSON.parse(data) : data;
-        console.log('Scenario reply:', parsed);
-        const userMsg = { role: "user", text: parsed.transcript || "..." };
-        const aiMsg = {
-          role: "ai",
-          text: parsed.message,
-          translation: parsed.translation,
-          hint: parsed.hint,
-          audioHelp: parsed.audioHelp,
-          suggestedResponse: parsed.suggestedResponse || '',
-          suggestedResponseTranslation: parsed.suggestedResponseTranslation || '',
-          keyPhrase: parsed.keyPhrase,
-          isTranslationVisible: false,
-        };
-        setScenarioMessages(prev => {
-          const updated = [...prev, userMsg, aiMsg];
-          scenarioMessagesRef.current = updated;
-          return updated;
-        });
-        setScenarioTurnCount(prev => prev + 1);
-
-        if (parsed.keyPhrase) {
-          setScenarioKeyPhrases(prev => [...prev, parsed.keyPhrase]);
-        }
-
-        // Auto TTS the AI response only (help is text-only now)
-        setShowScenarioMoreHelp(false);
-        setTimeout(() => speakAiAudio(parsed.message), 300);
-
-        // Check if conversation is ending
-        if (parsed.isEnding) {
-          setTimeout(() => {
-            setScenarioPhase("summary");
-            setScenarioCompleted(true);
-            const today = new Date().toISOString().slice(0, 10);
-            supabase.from('user_daily_stats').update({ scenario_completed: true })
-              .eq('user_id', user.id).eq('date', today)
-              .then(({ error }) => { if (error) console.error('Error updating scenario completion in DB', error) });
-            triggerHeavyHaptic();
-          }, 3000);
-        }
-      } else {
-        console.error('Scenario reply error:', error);
-      }
-    } catch (e) {
-      console.error("Scenario reply error:", e);
-    }
-    setScenarioLoading(false);
-  }
-
-  function resetScenarioChat() {
-    setScenarioPhase(null);
-    setScenarioDifficulty(null);
-    setScenarioMessages([]);
-    setScenarioKeyPhrases([]);
-    setScenarioRecording(false);
-    setScenarioLoading(false);
-    setShowScenarioHelp(false);
-    setScenarioTurnCount(0);
-    if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
-    if (scenarioCountdownRef.current) clearInterval(scenarioCountdownRef.current);
-    if (scenarioRecorderRef.current?.state === 'recording') {
-      try { scenarioRecorderRef.current.stop(); } catch { }
-    }
-    if (scenarioStreamRef.current) {
-      scenarioStreamRef.current.getTracks().forEach(t => t.stop());
-      scenarioStreamRef.current = null;
-    }
-  }
 
   // ---------- PICTURE DESCRIBE FUNCTIONS ----------
 
@@ -2104,6 +1952,12 @@ function App() {
 
   // Process audio and check against vocab
   const processPictureAudio = async (audioBase64) => {
+    if (!audioBase64 || audioBase64.length > MAX_AUDIO_BASE64_LENGTH) {
+      setSpeechError("Recording is too long. Please try a shorter recording.");
+      setPictureCheckingAnswer(false);
+      return;
+    }
+
     try {
       // Start animated analysis steps
       setAnalysisStep(0);
@@ -2525,6 +2379,11 @@ function App() {
   // isSpeakingPractice: if true, play jingle sounds for feedback
   const sendAudioToBackend = async (audioBase64, expectedTextOverride = null, isSpeakingPractice = false) => {
     if (!audioBase64) return;
+    if (audioBase64.length > MAX_AUDIO_BASE64_LENGTH) {
+      setSpeechError("Recording is too long. Please try a shorter recording.");
+      setIsCheckingAnswer(false);
+      return;
+    }
 
     setSpeechFeedback(null); // Reset feedback
     setAiFeedback(null);
@@ -2694,28 +2553,8 @@ function App() {
 
         if (qError) throw qError;
 
-        const questionsWithOptions = [];
-
-        for (const q of qData || []) {
-          if (q.question_type === "mcq") {
-            const { data: options, error: optError } = await supabase
-              .from("question_options")
-              .select("*")
-              .eq("question_id", q.id);
-
-            if (optError) {
-              console.error("Error loading options:", optError);
-              questionsWithOptions.push({ ...q, options: [] });
-            } else {
-              questionsWithOptions.push({
-                ...q,
-                options: shuffleArray(options || []),
-              });
-            }
-          } else {
-            questionsWithOptions.push({ ...q, options: [] });
-          }
-        }
+        // Load questions with options in batch
+        const questionsWithOptions = await attachOptionsToQuestions(qData || []);
 
         setQuestions(questionsWithOptions);
 
@@ -3129,7 +2968,7 @@ function App() {
         {/* Background Decorative Elements */}
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/10 rounded-full blur-[120px]" />
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-secondary/10 rounded-full blur-[120px]" />
-        
+
         <div className="w-full max-w-md z-10 space-y-8 animate-in fade-in zoom-in duration-500">
           {/* Logo & Header */}
           <div className="flex flex-col items-center text-center space-y-4">
@@ -3151,7 +2990,7 @@ function App() {
           {/* Auth Card */}
           <div className="bg-card/40 backdrop-blur-2xl border border-border/50 rounded-[2.5rem] p-8 shadow-2xl relative overflow-hidden">
             <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-primary via-secondary to-primary" />
-            
+
             <div className="mb-8">
               <h2 className="font-heading text-xl font-bold">
                 {authMode === "signin" ? "Welcome back" : "Join the adventure"}
@@ -3591,7 +3430,7 @@ function App() {
                         setTimeout(() => setSpeechError(""), 3000);
                         return;
                       }
-                      setScenarioPhase("difficulty");
+                      setScenarioPhase(true);
                     }}
                   >
                     <div className="absolute top-0 left-0 w-2 h-full rounded-l-3xl" style={{ background: 'linear-gradient(to bottom, #8b5cf6, #6366f1)' }} />
@@ -4482,456 +4321,26 @@ function App() {
   // ---------- SCENARIO CHAT SCREEN ----------
 
   if (scenarioPhase) {
-    // DIFFICULTY SELECTION
-    if (scenarioPhase === "difficulty") {
-      return (
-        <div className="min-h-screen bg-background text-foreground font-sans" style={{ background: 'linear-gradient(180deg, rgba(139,92,246,0.08) 0%, var(--background) 40%)' }}>
-          <header className="px-6 pt-12 pb-6 flex items-center gap-4">
-            <button onClick={() => { triggerHaptic(); resetScenarioChat(); }} className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center">
-              <MdArrowBackIosNew className="text-foreground" />
-            </button>
-            <div className="flex-1 text-center">
-              <h1 className="font-heading text-lg font-bold">Daily Scenario</h1>
-            </div>
-            <div className="w-10" />
-          </header>
-
-          <main className="px-6 space-y-6">
-            <div className="text-center py-6">
-              <div className="text-6xl mb-4">{scenarioData?.emoji}</div>
-              <h2 className="font-heading text-2xl font-bold mb-2">{scenarioData?.title}</h2>
-              <p dir="rtl" className="text-lg text-muted-foreground" style={{ fontFamily: "'Noto Sans Arabic', sans-serif" }}>{scenarioData?.titleAr}</p>
-              <p className="text-sm text-muted-foreground mt-3">Choose your difficulty level to begin:</p>
-            </div>
-
-            {[
-              { key: "easy", label: "🟢 Easy", desc: "Simple words, translations provided, hints given proactively", color: "#22c55e" },
-              { key: "intermediate", label: "🟡 Intermediate", desc: "Natural Arabic, moderate vocabulary, hints on request", color: "#eab308" },
-              { key: "advanced", label: "🔴 Advanced", desc: "Rich vocabulary, idioms, minimal English, challenging", color: "#ef4444" },
-            ].map(d => (
-              <button
-                key={d.key}
-                className="w-full bg-card rounded-2xl p-5 border border-border/50 shadow-sm flex items-center gap-4 active:scale-[0.97] transition-transform text-left"
-                onClick={() => { triggerHaptic(); startScenarioChat(d.key); }}
-              >
-                <div className="text-2xl">{d.label.split(' ')[0]}</div>
-                <div className="flex-1">
-                  <h3 className="font-bold text-base mb-0.5">{d.label.split(' ').slice(1).join(' ')}</h3>
-                  <p className="text-xs text-muted-foreground">{d.desc}</p>
-                </div>
-                <Icon icon="solar:arrow-right-bold" className="text-muted-foreground text-lg" />
-              </button>
-            ))}
-          </main>
-        </div>
-      );
-    }
-
-    // BRIEFING SCREEN
-    if (scenarioPhase === "briefing") {
-      const scenarioContext = {
-        cafe: "You are visiting an Arabic café. Order your favorite drink and a snack from the waiter.",
-        restaurant: "You are dining at an Arabic restaurant. Browse the menu and order food from the waiter.",
-        groceries: "You are at a local grocery store. Pick up fruits, vegetables, and household items from the shopkeeper.",
-        hotel: "You are checking into a hotel. Talk to the receptionist about your reservation and get your room key.",
-        airport: "You are at the airport check-in counter. Present your passport and check in for your flight.",
-        directions: "You are lost in a new city. Ask a local on the street for directions to the mosque, library, or market.",
-        market: "You are exploring a traditional market. Negotiate the price of spices and goods with the vendor.",
-        clothes: "You are at a clothing store. Ask the assistant to help you find the right sizes and colors.",
-        bookstore: "You are visiting a bookstore. Ask the clerk to help you find an Arabic book suited to your level.",
-        meeting: "You are at a social gathering. Introduce yourself to a friendly new person and have a casual chat.",
-        invitation: "You are talking to a friend. Invite them to a dinner or a party, and discuss the details.",
-        family: "You are at a family gathering. Chat with your relative about life, work, and family news.",
-        pharmacy: "You are feeling unwell. Explain your symptoms to the pharmacist and ask for recommendations.",
-        taxi: "You are taking a taxi. Tell the driver where you want to go, and ask about the route and fare.",
-        bank: "You are at the bank. Speak to the teller to open an account or exchange money.",
-        school: "It's your first day at school. Meet your teacher, introduce yourself, and talk about your favorite subjects.",
-        gym: "You are at a fitness club. Talk to the gym trainer about signing up and your fitness goals.",
-        doctor: "You have a doctor's appointment. Explain your symptoms to the doctor to get advice and treatment.",
-        library: "You are at the public library. Ask the librarian about borrowing books or finding a quiet study spot.",
-        bakery: "You are at a local bakery. Buy fresh bread, pastries, and sweets from the baker.",
-        phone: "You are at a phone store. Talk to the employee about buying a new phone or repairing your broken one.",
-        park: "You are relaxing on a bench at the park. Have a friendly chat with someone sitting next to you.",
-        post_office: "You are at the post office. Speak to the clerk to send a package or buy stamps.",
-        barber: "You are at the barber shop. Explain to the barber how you want your hair cut.",
-        neighbor: "You just moved in. Meet your new neighbor, introduce yourself, and chat about the area.",
-        travel_agent: "You are at a travel agency. Talk to the agent about planning a trip and suggest activities.",
-        mechanic: "Your car has a problem. Explain the issue to the mechanic and ask what needs to be fixed.",
-        birthday: "You're at a friend's birthday party. Chat with other guests and celebrate.",
-        rent: "You are looking to rent an apartment. Talk to the landlord, ask for a tour, and discuss the price.",
-        wedding: "You are a guest at a wedding. Celebrate and chat with the other guests about the ceremony.",
-      };
-
-      const scenarioVocab = {
-        "cafe": [{ ar: "قهوة", en: "Coffee" }, { ar: "شاي", en: "Tea" }, { ar: "حليب", en: "Milk" }, { ar: "حساب", en: "Bill" }, { ar: "سكر", en: "Sugar" }, { ar: "كعكة", en: "Cake" }],
-        "restaurant": [{ ar: "طاولة", en: "Table" }, { ar: "قائمة", en: "Menu" }, { ar: "لذيذ", en: "Delicious" }, { ar: "دجاج", en: "Chicken" }, { ar: "ماء", en: "Water" }, { ar: "لحم", en: "Meat" }],
-        "groceries": [{ ar: "فواكه", en: "Fruits" }, { ar: "خضار", en: "Vegetables" }, { ar: "كم السعر", en: "How much?" }, { ar: "خبز", en: "Bread" }, { ar: "طماطم", en: "Tomato" }, { ar: "بيض", en: "Eggs" }],
-        "hotel": [{ ar: "غرفة", en: "Room" }, { ar: "حجز", en: "Reservation" }, { ar: "ليلة", en: "Night" }, { ar: "مفتاح", en: "Key" }, { ar: "جواز سفر", en: "Passport" }, { ar: "سرير", en: "Bed" }],
-        "airport": [{ ar: "جواز سفر", en: "Passport" }, { ar: "تذكرة", en: "Ticket" }, { ar: "حقيبة", en: "Bag" }, { ar: "رحلة", en: "Flight" }, { ar: "طائرة", en: "Airplane" }, { ar: "بوابة", en: "Gate" }],
-        "directions": [{ ar: "أين", en: "Where" }, { ar: "يمين", en: "Right" }, { ar: "يسار", en: "Left" }, { ar: "طريق", en: "Road" }, { ar: "مسجد", en: "Mosque" }, { ar: "قريب", en: "Near" }],
-        "market": [{ ar: "سعر", en: "Price" }, { ar: "غالي", en: "Expensive" }, { ar: "رخيص", en: "Cheap" }, { ar: "أريد", en: "I want" }, { ar: "ممكن", en: "Is it possible" }, { ar: "تفضل", en: "Here you go" }],
-        "clothes": [{ ar: "قميص", en: "Shirt" }, { ar: "سروال", en: "Pants" }, { ar: "مقاس", en: "Size" }, { ar: "لون", en: "Color" }, { ar: "حذاء", en: "Shoes" }, { ar: "أكبر", en: "Larger" }],
-        "bookstore": [{ ar: "كتاب", en: "Book" }, { ar: "قصة", en: "Story" }, { ar: "قراءة", en: "Reading" }, { ar: "قاموس", en: "Dictionary" }, { ar: "عربي", en: "Arabic" }, { ar: "لغة", en: "Language" }],
-        "meeting": [{ ar: "اسمي", en: "My name" }, { ar: "تشرفنا", en: "Nice to meet you" }, { ar: "طالب", en: "Student" }, { ar: "من أين", en: "From where" }, { ar: "عمل", en: "Work" }, { ar: "جامعة", en: "University" }],
-        "invitation": [{ ar: "دعوة", en: "Invitation" }, { ar: "متى", en: "When" }, { ar: "وقت", en: "Time" }, { ar: "موعد", en: "Appointment" }, { ar: "غداً", en: "Tomorrow" }, { ar: "عشاء", en: "Dinner" }],
-        "family": [{ ar: "عائلة", en: "Family" }, { ar: "أخ", en: "Brother" }, { ar: "أخت", en: "Sister" }, { ar: "كيف حال", en: "How is..." }, { ar: "أب", en: "Father" }, { ar: "أم", en: "Mother" }],
-        "pharmacy": [{ ar: "صيدلية", en: "Pharmacy" }, { ar: "دواء", en: "Medicine" }, { ar: "مريض", en: "Sick" }, { ar: "ألم", en: "Pain" }, { ar: "صداع", en: "Headache" }, { ar: "طبيب", en: "Doctor" }],
-        "taxi": [{ ar: "سيارة أجرة", en: "Taxi" }, { ar: "إلى أين", en: "Where to" }, { ar: "مطار", en: "Airport" }, { ar: "توقف", en: "Stop" }, { ar: "عنوان", en: "Address" }, { ar: "هنا", en: "Here" }],
-        "bank": [{ ar: "بنك", en: "Bank" }, { ar: "نقود", en: "Money" }, { ar: "حساب", en: "Account" }, { ar: "صرف", en: "Exchange" }, { ar: "دولار", en: "Dollar" }, { ar: "بطاقة", en: "Card" }],
-        "school": [{ ar: "مدرسة", en: "School" }, { ar: "معلم", en: "Teacher" }, { ar: "صف", en: "Class" }, { ar: "درس", en: "Lesson" }, { ar: "كتاب", en: "Book" }, { ar: "سؤال", en: "Question" }],
-        "gym": [{ ar: "نادي", en: "Gym" }, { ar: "رياضة", en: "Sport" }, { ar: "وزن", en: "Weight" }, { ar: "تدريب", en: "Training" }, { ar: "صحة", en: "Health" }, { ar: "اشتراك", en: "Subscription" }],
-        "doctor": [{ ar: "طبيب", en: "Doctor" }, { ar: "مستشفى", en: "Hospital" }, { ar: "موعد", en: "Appointment" }, { ar: "علاج", en: "Treatment" }, { ar: "ألم", en: "Pain" }, { ar: "مريض", en: "Sick" }],
-        "library": [{ ar: "مكتبة", en: "Library" }, { ar: "استعارة", en: "Borrow" }, { ar: "هدوء", en: "Quiet" }, { ar: "بطاقة", en: "Card" }, { ar: "كتاب", en: "Book" }, { ar: "قراءة", en: "Read" }],
-        "bakery": [{ ar: "مخبز", en: "Bakery" }, { ar: "خبز", en: "Bread" }, { ar: "حلوى", en: "Sweets" }, { ar: "طازج", en: "Fresh" }, { ar: "كعكة", en: "Cake" }, { ar: "لذيذ", en: "Delicious" }],
-        "phone": [{ ar: "هاتف", en: "Phone" }, { ar: "شاشة", en: "Screen" }, { ar: "تصليح", en: "Repair" }, { ar: "شاحن", en: "Charger" }, { ar: "جديد", en: "New" }, { ar: "مشكلة", en: "Problem" }],
-        "park": [{ ar: "حديقة", en: "Park" }, { ar: "طقس", en: "Weather" }, { ar: "جميل", en: "Beautiful" }, { ar: "جلوس", en: "Sitting" }, { ar: "أشجار", en: "Trees" }, { ar: "مشمس", en: "Sunny" }],
-        "post_office": [{ ar: "بريد", en: "Post" }, { ar: "رسالة", en: "Letter" }, { ar: "طابع", en: "Stamp" }, { ar: "عنوان", en: "Address" }, { ar: "طرد", en: "Package" }, { ar: "إرسال", en: "Send" }],
-        "barber": [{ ar: "حلاق", en: "Barber" }, { ar: "شعر", en: "Hair" }, { ar: "قص", en: "Cut" }, { ar: "قصير", en: "Short" }, { ar: "طويل", en: "Long" }, { ar: "لحية", en: "Beard" }],
-        "neighbor": [{ ar: "جار", en: "Neighbor" }, { ar: "بيت", en: "House" }, { ar: "جديد", en: "New" }, { ar: "منطقة", en: "Area" }, { ar: "أهلاً", en: "Welcome" }, { ar: "مساعدة", en: "Help" }],
-        "travel_agent": [{ ar: "سفر", en: "Travel" }, { ar: "طائرة", en: "Airplane" }, { ar: "فندق", en: "Hotel" }, { ar: "عطلة", en: "Holiday" }, { ar: "دولار", en: "Dollar" }, { ar: "تذكرة", en: "Ticket" }],
-        "mechanic": [{ ar: "ميكانيكي", en: "Mechanic" }, { ar: "سيارة", en: "Car" }, { ar: "مشكلة", en: "Problem" }, { ar: "إصلاح", en: "Fix" }, { ar: "محرك", en: "Engine" }, { ar: "زيت", en: "Oil" }],
-        "birthday": [{ ar: "عيد ميلاد", en: "Birthday" }, { ar: "هدية", en: "Gift" }, { ar: "عمر", en: "Age" }, { ar: "مبروك", en: "Congratulations" }, { ar: "سنة", en: "Year" }, { ar: "حفلة", en: "Party" }],
-        "rent": [{ ar: "شقة", en: "Apartment" }, { ar: "إيجار", en: "Rent" }, { ar: "شهر", en: "Month" }, { ar: "عقد", en: "Contract" }, { ar: "غرفة", en: "Room" }, { ar: "مفتاح", en: "Key" }],
-        "wedding": [{ ar: "زفاف", en: "Wedding" }, { ar: "عروس", en: "Bride" }, { ar: "عريس", en: "Groom" }, { ar: "احتفال", en: "Celebration" }, { ar: "مبروك", en: "Congratulations" }, { ar: "جميل", en: "Beautiful" }],
-      };
-
-      const words = scenarioData?.id ? (scenarioVocab[scenarioData.id] || []) : [];
-      const userSetting = scenarioData?.id ? (scenarioContext[scenarioData.id] || scenarioData?.setting) : scenarioData?.setting;
-
-      return (
-        <div className="min-h-screen bg-background text-foreground font-sans relative flex flex-col pt-12">
-          <header className="px-6 pb-6 flex items-center justify-between z-10 w-full flex-shrink-0">
-            <button onClick={() => { triggerHaptic(); resetScenarioChat(); }} className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center animate-in fade-in duration-300">
-              <MdArrowBackIosNew className="text-foreground" />
-            </button>
-            {scenarioLoading && (
-              <div className="bg-primary/10 rounded-full px-4 py-1.5 border border-primary/20 flex flex-row items-center gap-2 animate-in fade-in duration-300">
-                <Leapfrog size="20" speed="2.5" color="var(--primary)" />
-                <span className="text-primary text-xs font-bold uppercase tracking-widest">Connecting</span>
-              </div>
-            )}
-            {!scenarioLoading && (
-              <div className="bg-green-500/10 rounded-full px-4 py-1.5 border border-green-500/20 flex flex-row items-center gap-2 animate-in fade-in duration-300">
-                <Icon icon="solar:check-circle-bold" className="text-green-500 text-lg" />
-                <span className="text-green-500 text-xs font-bold uppercase tracking-widest">Ready</span>
-              </div>
-            )}
-          </header>
-
-          <div className="flex-1 overflow-y-auto px-6 pb-6 z-10 animate-in fade-in slide-in-from-bottom-8 duration-700 delay-150 fill-mode-both">
-            <div className="flex flex-col items-center justify-center text-center mt-2 mb-8">
-              <div className="text-7xl mb-6 relative">
-                <div className="absolute inset-0 bg-primary/20 blur-3xl rounded-full scale-150 -z-10" />
-                {scenarioData?.emoji}
-              </div>
-              <h1 className="font-heading text-3xl font-bold mb-2 text-foreground">{scenarioData?.title}</h1>
-              <p dir="rtl" className="text-lg text-primary font-medium" style={{ fontFamily: "'Noto Sans Arabic', sans-serif" }}>{scenarioData?.titleAr}</p>
-            </div>
-
-            <div className="bg-card/40 backdrop-blur-xl border border-border/50 rounded-3xl p-6 shadow-2xl mb-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-8 h-8 rounded-xl bg-violet-500/10 flex items-center justify-center text-violet-400">
-                  <Icon icon="solar:info-square-bold" className="text-xl" />
-                </div>
-                <h3 className="font-heading text-lg font-bold">Situation Overview</h3>
-              </div>
-              <p className="text-muted-foreground leading-relaxed text-sm">{userSetting || "Get ready to practice your Arabic in this real-life scenario."}</p>
-            </div>
-
-            {words.length > 0 && (
-              <div className="bg-card/40 backdrop-blur-xl border border-border/50 rounded-3xl p-6 shadow-2xl mb-8">
-                <div className="flex items-center gap-3 mb-4">
-                   <div className="w-8 h-8 rounded-xl bg-green-500/10 flex items-center justify-center text-green-500">
-                    <Icon icon="solar:book-bookmark-bold" className="text-xl" />
-                  </div>
-                  <h3 className="font-heading text-lg font-bold">Useful Words</h3>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  {words.map((w, idx) => (
-                    <button key={idx} className="bg-background/50 border border-border/50 rounded-2xl p-3 flex flex-col items-center justify-center text-center gap-1 active:scale-95 transition-transform w-full hover:border-primary/50" onClick={() => { triggerHaptic(); speakAiAudio(w.ar); }}>
-                      <span dir="rtl" className="text-lg font-bold text-primary" style={{ fontFamily: "'Noto Sans Arabic', sans-serif" }}>{w.ar}</span>
-                      <span className="text-xs text-muted-foreground font-medium">{w.en}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="px-6 pb-8 z-10 w-full bg-gradient-to-t from-background via-background to-transparent pt-4">
-            <button
-              disabled={scenarioLoading}
-              onClick={() => {
-                triggerHaptic();
-                setScenarioPhase("chat");
-                if (scenarioMessages.length > 0) {
-                  setTimeout(() => speakAiAudio(scenarioMessages[0].text), 300);
-                }
-              }}
-              className="w-full h-14 rounded-[1.5rem] font-bold text-sm uppercase tracking-wider flex items-center justify-center gap-2 transition-all active:scale-[0.97]"
-              style={{
-                background: scenarioLoading ? 'var(--muted)' : 'var(--primary)',
-                color: scenarioLoading ? 'var(--muted-foreground)' : 'white',
-                boxShadow: scenarioLoading ? 'none' : '0 8px 32px rgba(224,159,62,0.3)',
-              }}
-            >
-              {scenarioLoading ? (
-                <>
-                  <Leapfrog size="20" speed="2.5" color="var(--primary)" />
-                  <span>Preparing...</span>
-                </>
-              ) : (
-                <>
-                  <span>Ready to Practice!</span>
-                  <Icon icon="solar:arrow-right-bold" className="text-xl" />
-                </>
-              )}
-            </button>
-          </div>
-        </div>
-      );
-    }
-
-    // CHAT SCREEN
-    if (scenarioPhase === "chat") {
-      const lastAi = [...scenarioMessages].reverse().find(m => m.role === 'ai');
-      const elapsedSec = scenarioStartTimeRef.current ? Math.floor((Date.now() - scenarioStartTimeRef.current) / 1000) : 0;
-      const timeRemaining = Math.max(0, 300 - elapsedSec);
-      const showTimeWarning = timeRemaining > 0 && timeRemaining <= 60 && !scenarioLoading;
-      return (
-        <div className="bg-background text-foreground font-sans flex flex-col" style={{ height: '100vh', overflow: 'hidden' }}>
-          {/* Header — compact */}
-          <header className="px-4 pt-12 pb-2 flex items-center gap-3 border-b border-border/30 flex-shrink-0" style={{ background: 'linear-gradient(180deg, rgba(139,92,246,0.08) 0%, transparent 100%)' }}>
-            <button onClick={() => { triggerHaptic(); resetScenarioChat(); }} className="w-8 h-8 rounded-full bg-card border border-border/50 flex items-center justify-center">
-              <MdArrowBackIosNew className="text-foreground text-xs" />
-            </button>
-            <div className="flex-1 flex items-center gap-2">
-              <span className="text-lg">{scenarioData?.emoji}</span>
-              <h1 className="font-heading text-sm font-bold">{scenarioData?.title}</h1>
-              <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold px-2 py-0.5 rounded-full border border-border/50" style={{
-                color: scenarioDifficulty === 'easy' ? '#22c55e' : scenarioDifficulty === 'intermediate' ? '#eab308' : '#ef4444',
-                borderColor: scenarioDifficulty === 'easy' ? 'rgba(34,197,94,0.3)' : scenarioDifficulty === 'intermediate' ? 'rgba(234,179,8,0.3)' : 'rgba(239,68,68,0.3)',
-              }}>{scenarioDifficulty === 'intermediate' ? 'Medium' : scenarioDifficulty === 'easy' ? 'Easy' : 'Hard'}</span>
-            </div>
-            {/* Time warning indicator */}
-            {showTimeWarning && (
-              <div className="flex items-center gap-1 px-2 py-1 rounded-full animate-in fade-in duration-500" style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)' }}>
-                <div className="w-1.5 h-1.5 rounded-full bg-red-400" style={{ animation: 'pulse 1.5s ease-in-out infinite' }} />
-                <span className="text-[10px] text-red-400 font-bold">{Math.floor(timeRemaining / 60)}:{String(timeRemaining % 60).padStart(2, '0')}</span>
-              </div>
-            )}
-          </header>
-
-          {/* Messages — top portion, scrollable */}
-          <div className="overflow-y-auto px-3 py-2 space-y-2" style={{ maxHeight: '30vh', minHeight: '15vh', flexShrink: 0 }}>
-            {scenarioMessages.map((msg, i) => (
-              <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div
-                  style={{
-                    maxWidth: '88%',
-                    padding: '0.5rem 0.75rem',
-                    borderRadius: msg.role === 'user' ? '1rem 1rem 0.2rem 1rem' : '1rem 1rem 1rem 0.2rem',
-                    background: msg.role === 'user' ? 'var(--primary)' : 'var(--card)',
-                    color: msg.role === 'user' ? 'white' : 'var(--foreground)',
-                    border: msg.role === 'user' ? 'none' : '1px solid var(--border)',
-                  }}
-                >
-                  <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '0.9rem', lineHeight: 1.7, fontWeight: 500 }}>
-                    {msg.text}
-                  </div>
-                  {msg.role === 'ai' && (
-                    <div className="flex items-center gap-2 mt-1 pt-1 border-t" style={{ borderColor: 'var(--border)' }}>
-                      {msg.translation && (
-                        msg.isTranslationVisible ? (
-                          <p className="text-[11px] text-muted-foreground italic flex-1">{msg.translation}</p>
-                        ) : (
-                          <button
-                            onClick={() => {
-                              triggerHaptic();
-                              setScenarioMessages(prev => prev.map((m, idx) => idx === i ? { ...m, isTranslationVisible: true } : m));
-                            }}
-                            className="text-[11px] text-violet-400 font-medium flex-1 text-left"
-                          >
-                            Show translation
-                          </button>
-                        )
-                      )}
-                      <button
-                        onClick={() => { triggerHaptic(); speakAiAudio(msg.text); }}
-                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: 'var(--muted-foreground)' }}
-                      >
-                        <Icon icon="solar:volume-loud-bold" className="text-base" />
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
-
-            {scenarioLoading && (
-              <div className="flex justify-start">
-                <div style={{ padding: '0.5rem 0.75rem', borderRadius: '1rem 1rem 1rem 0.2rem', background: 'var(--card)', border: '1px solid var(--border)' }}>
-                  <div className="flex gap-1">
-                    <div className="w-1.5 h-1.5 rounded-full bg-violet-400" style={{ animation: 'pulse 1s ease-in-out infinite' }} />
-                    <div className="w-1.5 h-1.5 rounded-full bg-violet-400" style={{ animation: 'pulse 1s ease-in-out 0.2s infinite' }} />
-                    <div className="w-1.5 h-1.5 rounded-full bg-violet-400" style={{ animation: 'pulse 1s ease-in-out 0.4s infinite' }} />
-                  </div>
-                </div>
-              </div>
-            )}
-            <div ref={scenarioChatEndRef} />
-          </div>
-
-          {/* Bottom Panel — takes most of the screen */}
-          <div className="flex-1 flex flex-col border-t border-border/50 overflow-y-auto" style={{ background: 'var(--card)', borderTopLeftRadius: '1.5rem', borderTopRightRadius: '1.5rem', paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.5rem)' }}>
-
-            {/* Suggested Response Card */}
-            {lastAi && !scenarioLoading && (lastAi.suggestedResponse || lastAi.hint) && (
-              <div className="px-5 pt-4 pb-2 flex-shrink-0 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                {/* Written hint */}
-                {lastAi.hint && (
-                  <p className="text-xs text-muted-foreground text-center mb-3">
-                    <Icon icon="solar:chat-round-dots-bold" className="inline mr-1 text-sm" style={{ verticalAlign: '-2px' }} />
-                    {lastAi.hint}
-                  </p>
-                )}
-
-                {/* Suggested response */}
-                {lastAi.suggestedResponse && (
-                  <div style={{ background: 'var(--background)', border: '1px solid var(--border)', borderRadius: '1rem', padding: '0.75rem 1rem' }}>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground">Try saying</span>
-                      <button
-                        onClick={() => { triggerHaptic(); speakAiAudio(lastAi.suggestedResponse); }}
-                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2 }}
-                      >
-                        <Icon icon="solar:volume-loud-bold" className="text-base text-primary" />
-                      </button>
-                    </div>
-                    <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.05rem', lineHeight: 1.8, fontWeight: 600, color: 'var(--primary)', textAlign: 'right' }}>
-                      {lastAi.suggestedResponse}
-                    </div>
-                    {lastAi.suggestedResponseTranslation && (
-                      <p className="text-xs text-muted-foreground mt-1 italic">{lastAi.suggestedResponseTranslation}</p>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* More Help — toggle button + expanded content */}
-            {lastAi?.audioHelp && !scenarioLoading && (
-              <div className="px-5 pt-1 pb-1 flex-shrink-0">
-                <button
-                  onClick={() => { triggerHaptic(); setShowScenarioMoreHelp(prev => !prev); }}
-                  className="w-full flex items-center justify-center gap-2 py-2 rounded-xl transition-all active:scale-[0.98]"
-                  style={{ background: showScenarioMoreHelp ? 'rgba(139,92,246,0.08)' : 'transparent', border: '1px solid var(--border)' }}
-                >
-                  <Icon icon={showScenarioMoreHelp ? "solar:alt-arrow-up-bold" : "solar:lightbulb-bold"} className="text-sm" style={{ color: 'var(--primary)' }} />
-                  <span className="text-xs font-semibold" style={{ color: 'var(--primary)' }}>
-                    {showScenarioMoreHelp ? 'Hide Help' : 'Need More Help?'}
-                  </span>
-                </button>
-
-                {showScenarioMoreHelp && (
-                  <div className="mt-2 px-4 py-3 rounded-xl animate-in fade-in slide-in-from-top-1 duration-200" style={{ background: 'var(--background)', border: '1px solid var(--border)' }}>
-                    <p className="text-sm leading-relaxed text-foreground" style={{ lineHeight: 1.7 }}>
-                      {lastAi.audioHelp}
-                    </p>
-                  </div>
-                )}
-              </div>
-            )}
-
-
-
-            {/* Spacer */}
-            <div className="flex-1" style={{ minHeight: '1rem' }} />
-
-            {/* Mic Button — pill shaped */}
-            <div className="px-6 pb-1 flex-shrink-0">
-              <button
-                onClick={() => {
-                  if (scenarioRecording) {
-                    stopScenarioRecording();
-                  } else if (!scenarioLoading) {
-                    startScenarioRecording();
-                  }
-                }}
-                disabled={scenarioLoading}
-                className="w-full active:scale-[0.97] transition-transform"
-                style={{
-                  height: 56, borderRadius: '1.5rem',
-                  background: scenarioRecording ? 'linear-gradient(135deg, #ef4444, #dc2626)' : scenarioLoading ? 'var(--muted)' : 'var(--primary)',
-                  border: 'none', cursor: scenarioLoading ? 'not-allowed' : 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.6rem',
-                  boxShadow: scenarioRecording ? '0 0 25px rgba(239,68,68,0.4)' : '0 4px 16px rgba(0,0,0,0.12)',
-                  color: 'white',
-                  fontSize: '0.9rem', fontWeight: 700,
-                  letterSpacing: '0.02em'
-                }}
-              >
-                <Icon icon={scenarioRecording ? "solar:stop-bold" : "solar:microphone-bold"} className="text-xl" />
-                <span>{scenarioRecording ? `Recording... ${scenarioRecordingSeconds}s` : scenarioLoading ? 'Thinking...' : 'Tap to Speak'}</span>
-              </button>
-            </div>
-
-            <p className="text-center text-[10px] text-muted-foreground opacity-40 pb-1 pt-1">
-              Hold to record your response
-            </p>
-          </div>
-        </div>
-      );
-    }
-
-    // SUMMARY SCREEN
-    if (scenarioPhase === "summary") {
-      return (
-        <div className="min-h-screen bg-background text-foreground font-sans" style={{ background: 'linear-gradient(180deg, rgba(139,92,246,0.1) 0%, var(--background) 50%)' }}>
-          <main className="px-6 pt-16 pb-12 space-y-8">
-            <div className="text-center">
-              <div className="text-6xl mb-4">🎉</div>
-              <h1 className="font-heading text-3xl font-bold mb-2">Conversation Complete!</h1>
-              <p className="text-muted-foreground">Great job practicing your Arabic!</p>
-              <div className="flex items-center justify-center gap-2 mt-3">
-                <span className="text-sm">{scenarioData?.emoji}</span>
-                <span className="text-sm font-medium">{scenarioData?.title}</span>
-                <span className="text-xs text-muted-foreground capitalize">• {scenarioDifficulty}</span>
-              </div>
-            </div>
-
-            {scenarioKeyPhrases.length > 0 && (
-              <section>
-                <h2 className="font-heading text-lg font-bold mb-4">📚 Key Phrases Learned</h2>
-                <div className="space-y-3">
-                  {scenarioKeyPhrases.map((kp, i) => (
-                    <div key={i} className="bg-card rounded-2xl p-4 border border-border/50 flex items-center gap-3">
-                      <button
-                        onClick={() => { triggerHaptic(); speakAiAudio(kp.arabic); }}
-                        style={{ background: 'rgba(139,92,246,0.15)', border: 'none', borderRadius: '50%', width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontSize: '1rem', flexShrink: 0 }}
-                      >🔊</button>
-                      <div className="flex-1">
-                        <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.05rem', fontWeight: 600, color: '#8b5cf6', marginBottom: '0.15rem' }}>{kp.arabic}</div>
-                        <div className="text-sm text-muted-foreground">{kp.english}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )}
-
-            <button
-              className="w-full py-4 rounded-2xl font-bold text-base text-white"
-              style={{ background: 'linear-gradient(135deg, #8b5cf6, #6366f1)', boxShadow: '0 4px 16px rgba(139,92,246,0.3)' }}
-              onClick={() => { triggerHaptic(); resetScenarioChat(); }}
-            >
-              Back to Home
-            </button>
-          </main>
-        </div>
-      );
-    }
+    return (
+      <ScenarioChat
+        scenarioData={scenarioData}
+        scenarioCompleted={scenarioCompleted}
+        user={user}
+        onComplete={() => {
+          setScenarioCompleted(true);
+          const today = new Date().toISOString().slice(0, 10);
+          supabase.from('user_daily_stats').update({ scenario_completed: true })
+            .eq('user_id', user.id).eq('date', today);
+          triggerHeavyHaptic();
+        }}
+        onExit={() => setScenarioPhase(false)}
+        supabase={supabase}
+        triggerHaptic={triggerHaptic}
+        triggerHeavyHaptic={triggerHeavyHaptic}
+      />
+    );
   }
+
 
   // ---------- WORD OF THE DAY SCREEN ----------
 
@@ -5025,7 +4434,7 @@ function App() {
                 <p className="text-3xl font-arabic leading-relaxed text-center">{currentWotd.arabic_text}</p>
                 <button
                   className="mt-4 mx-auto flex items-center gap-2 bg-primary/10 text-primary px-4 py-2 rounded-full text-xs font-bold uppercase tracking-wider border border-primary/20 active:scale-95 transition-all"
-                  onClick={(e) => { e.stopPropagation(); speakText(currentWotd.arabic_text, 'ar-SA'); }}
+                  onClick={(e) => { e.stopPropagation(); speakAiAudio(currentWotd.arabic_text); }}
                 >
                   <Icon icon="solar:volume-loud-bold" className="text-base" />
                   Listen
@@ -5087,6 +4496,13 @@ function App() {
               <p className="text-xs text-muted-foreground font-bold uppercase tracking-wider mb-2 text-right">عربي:</p>
               <div className="bg-card rounded-3xl p-6 border border-border/50 shadow-md" dir="rtl">
                 <p className="text-2xl font-arabic leading-relaxed text-center">{currentExample.example_arabic}</p>
+                <button
+                  className="mt-4 mx-auto flex items-center gap-2 bg-primary/10 text-primary px-4 py-2 rounded-full text-xs font-bold uppercase tracking-wider border border-primary/20 active:scale-95 transition-all"
+                  onClick={(e) => { e.stopPropagation(); speakAiAudio(currentExample.example_arabic); }}
+                >
+                  <Icon icon="solar:volume-loud-bold" className="text-base" />
+                  Listen
+                </button>
               </div>
             </div>
 
