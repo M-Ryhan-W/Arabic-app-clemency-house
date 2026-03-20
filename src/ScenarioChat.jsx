@@ -198,6 +198,9 @@ export default function ScenarioChat({
           if (parsed.keyPhrase) {
             setScenarioKeyPhrases(prev => [...prev, parsed.keyPhrase]);
           }
+          if (parsed.audioBase64) {
+            scenarioTtsCache.current[parsed.message] = parsed.audioBase64;
+          }
           // Audio playback is now delayed until the user clicks "Ready" on the briefing page
 
         } else {
@@ -332,7 +335,6 @@ export default function ScenarioChat({
 
     setScenarioLoading(true);
     try {
-      // Use ref for current messages to avoid stale closure
       const history = scenarioMessagesRef.current.map(m => ({
         role: m.role,
         text: m.text,
@@ -352,68 +354,110 @@ export default function ScenarioChat({
         }
       });
 
-      if (!error && data) {
-        const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+      // Parse response — handle both string and object
+      let parsed = null;
+      if (data) {
+        parsed = typeof data === 'string' ? JSON.parse(data) : data;
         console.log('Scenario reply:', parsed);
-        // Handle empty transcript — recording didn't capture speech
-        if (!parsed.transcript || parsed.transcript.trim() === "") {
-          const retryMsg = {
-            role: "ai",
-            text: parsed.message || "لَمْ أَسْمَعْ شَيْئًا",
-            translation: parsed.translation || "I didn't hear anything. Please try again.",
-            hint: "Make sure to speak clearly into the microphone",
-            audioHelp: "",
-            suggestedResponse: "",
-            suggestedResponseTranslation: "",
-            keyPhrase: null,
-            isTranslationVisible: true, // Show translation immediately so user knows what happened
-          };
-          setScenarioMessages(prev => {
-            const updated = [...prev, retryMsg];
-            scenarioMessagesRef.current = updated;
-            return updated;
-          });
-          // Don't TTS the "didn't hear" message — just let user try again
-          setScenarioLoading(false);
-          return;
-        }
+      }
 
-        const userMsg = { role: "user", text: parsed.transcript };
-        const aiMsg = {
+      // If invoke itself errored or no data at all
+      if (error || !parsed || !parsed.message) {
+        console.error('Scenario reply error:', error || 'No valid response');
+        const errorMsg = {
           role: "ai",
-          text: parsed.message,
-          translation: parsed.translation,
-          hint: parsed.hint,
-          keyPhrase: parsed.keyPhrase,
-          isTranslationVisible: false,
+          text: parsed?.message || "عُذْرًا، حَدَثَ خَطَأٌ. حَاوِلْ مَرَّةً أُخْرَى.",
+          translation: parsed?.translation || "Sorry, something went wrong. Please try again.",
+          hint: parsed?.hint || "Tap the microphone and try again.",
+          keyPhrase: null,
+          isTranslationVisible: true,
         };
         setScenarioMessages(prev => {
-          const updated = [...prev, userMsg, aiMsg];
+          const updated = [...prev, errorMsg];
           scenarioMessagesRef.current = updated;
           return updated;
         });
-        setScenarioTurnCount(prev => prev + 1);
-
-        if (parsed.keyPhrase) {
-          setScenarioKeyPhrases(prev => [...prev, parsed.keyPhrase]);
-        }
-
-        // Play AI response audio immediately — no delay
-        setHelpData(null);
-        speakAiAudio(parsed.message);
-
-        // Check if conversation is ending
-        if (parsed.isEnding) {
-          setTimeout(() => {
-            setScenarioEnded(true);
-            triggerHaptic();
-          }, 1500);
-        }
-      } else {
-        console.error('Scenario reply error:', error);
+        setScenarioLoading(false);
+        return;
       }
+
+      // Handle empty transcript
+      if (!parsed.transcript || parsed.transcript.trim() === "") {
+        const retryMsg = {
+          role: "ai",
+          text: parsed.message || "لَمْ أَسْمَعْ شَيْئًا",
+          translation: parsed.translation || "I didn't hear anything. Please try again.",
+          hint: "Make sure to speak clearly into the microphone",
+          keyPhrase: null,
+          isTranslationVisible: true,
+        };
+        setScenarioMessages(prev => {
+          const updated = [...prev, retryMsg];
+          scenarioMessagesRef.current = updated;
+          return updated;
+        });
+        setScenarioLoading(false);
+        return;
+      }
+
+      // Success — add user message and AI reply
+      const userMsg = { role: "user", text: parsed.transcript };
+      const aiMsg = {
+        role: "ai",
+        text: parsed.message,
+        translation: parsed.translation,
+        hint: parsed.hint,
+        keyPhrase: parsed.keyPhrase,
+        isTranslationVisible: false,
+      };
+      setScenarioMessages(prev => {
+        const updated = [...prev, userMsg, aiMsg];
+        scenarioMessagesRef.current = updated;
+        return updated;
+      });
+      setScenarioTurnCount(prev => prev + 1);
+
+      if (parsed.keyPhrase) {
+        setScenarioKeyPhrases(prev => [...prev, parsed.keyPhrase]);
+      }
+
+      // Play inline audio instantly if available
+      setHelpData(null);
+      if (parsed.audioBase64) {
+          scenarioTtsCache.current[parsed.message] = parsed.audioBase64;
+          if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
+          const audio = new Audio(`data:audio/mp3;base64,${parsed.audioBase64}`);
+          scenarioAudioRef.current = audio;
+          audio.play().catch(e => console.error("Audio play failed:", e));
+      } else {
+          // Fallback to separate TTS call
+          speakAiAudio(parsed.message);
+      }
+
+      // Check if conversation is ending
+      if (parsed.isEnding) {
+        setTimeout(() => {
+          setScenarioEnded(true);
+          triggerHaptic();
+        }, 1500);
+      }
+
     } catch (e) {
-      console.error("Scenario reply error:", e);
+      console.error("Scenario reply exception:", e);
+      // Show visible error to user instead of silently failing
+      const errorMsg = {
+        role: "ai",
+        text: "عُذْرًا، حَدَثَ خَطَأٌ. حَاوِلْ مَرَّةً أُخْرَى.",
+        translation: "Sorry, something went wrong. Please try again.",
+        hint: "Tap the microphone and try again.",
+        keyPhrase: null,
+        isTranslationVisible: true,
+      };
+      setScenarioMessages(prev => {
+        const updated = [...prev, errorMsg];
+        scenarioMessagesRef.current = updated;
+        return updated;
+      });
     }
     setScenarioLoading(false);
   }

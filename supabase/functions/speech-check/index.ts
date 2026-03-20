@@ -99,8 +99,9 @@ serve(async (req) => {
     }
 
     // Gemini call
+    const modelVersion = wantFeedback ? "gemini-2.5-flash" : "gemini-2.5-flash-lite";
     const geminiRes = await fetch(
-      `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/gemini-2.0-flash:generateContent`,
+      `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/${modelVersion}:generateContent`,
       {
         method: "POST",
         headers: {

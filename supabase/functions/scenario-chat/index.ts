@@ -31,9 +31,9 @@ async function getAccessToken() {
     return { token: cachedToken, projectId: cachedProjectId };
 }
 
-async function callVertexAI(projectId, token, payload) {
+async function callVertexAI(projectId: string, token: string, payload: any, model: string = "gemini-2.5-flash") {
     const geminiRes = await fetch(
-        `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/gemini-2.0-flash:generateContent`,
+        `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/${model}:generateContent`,
         {
             method: "POST",
             headers: {
@@ -161,11 +161,17 @@ IMPORTANT:
 function cleanJson(text: string): string {
     if (!text) return "";
     let cleaned = String(text).trim();
-    if (cleaned.startsWith("```json")) {
-        cleaned = cleaned.replace(/^```json/, "").replace(/```$/, "").trim();
-    } else if (cleaned.startsWith("```")) {
-        cleaned = cleaned.replace(/^```/, "").replace(/```$/, "").trim();
+    const match = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (match) {
+        return match[1].trim();
     }
+    
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && start <= end) {
+        return cleaned.substring(start, end + 1);
+    }
+    
     return cleaned;
 }
 
@@ -199,14 +205,48 @@ serve(async (req) => {
             const geminiData = await callVertexAI(projectId, token, {
                 systemInstruction: { parts: [{ text: systemPrompt }] },
                 contents: [{ role: "user", parts: [{ text: "Start the conversation. Greet me in character." }] }],
-                generationConfig: { temperature: 0.8, maxOutputTokens: 200, responseMimeType: "application/json" },
+                generationConfig: { temperature: 0.8, maxOutputTokens: 800, responseMimeType: "application/json" },
             });
 
             const text = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
             if (!text) throw new Error("No response from Gemini");
 
-            const parsed = JSON.parse(cleanJson(text));
-            return new Response(JSON.stringify(parsed), {
+            const parsed = Object.assign({
+                message: "مرحباً",
+                translation: "Hello",
+                hint: "Greet them back."
+            }, JSON.parse(cleanJson(text)));
+
+            const voicePool = [
+                "ar-XA-Chirp3-HD-Puck",
+                "ar-XA-Chirp3-HD-Aoede",
+                "ar-XA-Chirp3-HD-Charon",
+                "ar-XA-Chirp3-HD-Kore",
+                "ar-XA-Chirp3-HD-Fenrir",
+                "ar-XA-Chirp3-HD-Leda",
+            ];
+            const voice = voicePool[Math.floor(Math.random() * voicePool.length)];
+
+            let responseAudio = null;
+            try {
+                const ttsRes = await fetch("https://texttospeech.googleapis.com/v1/text:synthesize", {
+                    method: "POST",
+                    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        input: { text: parsed.message },
+                        voice: { languageCode: "ar-XA", name: voice },
+                        audioConfig: { audioEncoding: "MP3" }
+                    })
+                });
+                if (ttsRes.ok) {
+                    const ttsData = await ttsRes.json();
+                    responseAudio = ttsData.audioContent || null;
+                }
+            } catch (e) {
+                console.error("Inline TTS failed:", e);
+            }
+
+            return new Response(JSON.stringify({ ...parsed, audioBase64: responseAudio }), {
                 headers: { ...corsHeaders, "Content-Type": "application/json" },
             });
         }
@@ -245,10 +285,11 @@ serve(async (req) => {
                             { text: 'Transcribe this Arabic audio exactly. If silent or no speech, respond with just: {"transcript":""}. Otherwise respond with: {"transcript":"<Arabic text>"}' },
                         ],
                     }],
-                    generationConfig: { temperature: 0.1, maxOutputTokens: 200, responseMimeType: "application/json" },
-                });
+                    generationConfig: { temperature: 0.1, maxOutputTokens: 400, responseMimeType: "application/json" },
+                }, "gemini-2.5-flash-lite");
 
                 const transcribeText = transcribeData?.candidates?.[0]?.content?.parts?.[0]?.text;
+                console.log("Transcription raw:", transcribeText);
                 let transcript = "";
                 try {
                     const parsed = JSON.parse(cleanJson(transcribeText));
@@ -281,14 +322,54 @@ serve(async (req) => {
                 const replyData = await callVertexAI(projectId, token, {
                     systemInstruction: { parts: [{ text: systemPrompt }] },
                     contents,
-                    generationConfig: { temperature: 0.8, maxOutputTokens: 200, responseMimeType: "application/json" },
+                    generationConfig: { temperature: 0.8, maxOutputTokens: 800, responseMimeType: "application/json" },
                 });
 
                 const replyText = replyData?.candidates?.[0]?.content?.parts?.[0]?.text;
+                console.log("Reply raw:", replyText);
                 if (!replyText) throw new Error("No response from Gemini");
 
-                const parsed = JSON.parse(cleanJson(replyText));
-                return new Response(JSON.stringify({ ...parsed, transcript }), {
+                let parsed: any;
+                try {
+                    parsed = JSON.parse(cleanJson(replyText));
+                } catch {
+                    parsed = {};
+                }
+                
+                if (!parsed.message) parsed.message = "عُذْرًا، كَانَ هُنَاكَ خَطَأٌ.";
+                if (!parsed.translation) parsed.translation = "Sorry, there was an error.";
+                if (!parsed.hint) parsed.hint = "Try repeating what you said.";
+
+                const voicePool = [
+                    "ar-XA-Chirp3-HD-Puck",
+                    "ar-XA-Chirp3-HD-Aoede",
+                    "ar-XA-Chirp3-HD-Charon",
+                    "ar-XA-Chirp3-HD-Kore",
+                    "ar-XA-Chirp3-HD-Fenrir",
+                    "ar-XA-Chirp3-HD-Leda",
+                ];
+                const voice = voicePool[Math.floor(Math.random() * voicePool.length)];
+
+                let responseAudio = null;
+                try {
+                    const ttsRes = await fetch("https://texttospeech.googleapis.com/v1/text:synthesize", {
+                        method: "POST",
+                        headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            input: { text: parsed.message },
+                            voice: { languageCode: "ar-XA", name: voice },
+                            audioConfig: { audioEncoding: "MP3" }
+                        })
+                    });
+                    if (ttsRes.ok) {
+                        const ttsData = await ttsRes.json();
+                        responseAudio = ttsData.audioContent || null;
+                    }
+                } catch (e) {
+                    console.error("Inline TTS failed:", e);
+                }
+
+                return new Response(JSON.stringify({ ...parsed, transcript, audioBase64: responseAudio }), {
                     headers: { ...corsHeaders, "Content-Type": "application/json" },
                 });
             }
@@ -303,20 +384,12 @@ serve(async (req) => {
             const lastAiMessage = reqBody.lastAiMessage || "";
             const diff = reqBody.difficulty || "intermediate";
 
-            const helpPrompt = `You are a friendly Arabic tutor helping a student in a conversation scenario.
+            const helpSystemInstruction = `You are a friendly Arabic tutor helping a student in a conversation scenario.
 
-SCENARIO: ${scenario.title}
-DIFFICULTY: ${diff}
-
-The character just said this to the student (in Arabic):
-"${lastAiMessage}"
-
-The student needs help responding. Give them:
+Give them:
 1. A clear explanation in English of what was said and what the student should say back
 2. A specific Arabic phrase they can say, with full tashkeel
 3. The English translation of that phrase
-
-${diff === 'easy' ? 'Keep the suggested phrase VERY simple — 2-4 words max.' : diff === 'advanced' ? 'The suggested phrase can be a natural full sentence.' : 'Keep the suggested phrase moderate — a short natural sentence.'}
 
 Respond with valid JSON only:
 {
@@ -325,9 +398,18 @@ Respond with valid JSON only:
   "suggestedResponseTranslation": "<English translation>"
 }`;
 
+            const helpUserPrompt = `SCENARIO: ${scenario.title}
+DIFFICULTY: ${diff}
+
+The character just said this to the student (in Arabic):
+"${lastAiMessage}"
+
+${diff === 'easy' ? 'Keep the suggested phrase VERY simple — 2-4 words max.' : diff === 'advanced' ? 'The suggested phrase can be a natural full sentence.' : 'Keep the suggested phrase moderate — a short natural sentence.'}`;
+
             const helpData = await callVertexAI(projectId, token, {
-                contents: [{ role: "user", parts: [{ text: helpPrompt }] }],
-                generationConfig: { temperature: 0.7, maxOutputTokens: 200, responseMimeType: "application/json" },
+                systemInstruction: { parts: [{ text: helpSystemInstruction }] },
+                contents: [{ role: "user", parts: [{ text: helpUserPrompt }] }],
+                generationConfig: { temperature: 0.7, maxOutputTokens: 800, responseMimeType: "application/json" },
             });
 
             const helpText = helpData?.candidates?.[0]?.content?.parts?.[0]?.text;

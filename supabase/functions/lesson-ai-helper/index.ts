@@ -50,7 +50,7 @@ serve(async (req) => {
 
         // Call Gemini 2.0 Flash
         const geminiRes = await fetch(
-            `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/gemini-2.0-flash:generateContent`,
+            `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent`,
             {
                 method: "POST",
                 headers: {
