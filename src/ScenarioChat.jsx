@@ -96,6 +96,10 @@ export default function ScenarioChat({
   const [scenarioTurnCount, setScenarioTurnCount] = useState(0);
   const [scenarioRecordingSeconds, setScenarioRecordingSeconds] = useState(0);
   const [scenarioEnded, setScenarioEnded] = useState(false);
+  const [streamingAiText, setStreamingAiText] = useState("");
+
+  const [playingAudioUrl, setPlayingAudioUrl] = useState(null); // Track which audio is playing
+  const [scenarioVoice, setScenarioVoice] = useState(null); // Track assigned TTS voice
 
   const scenarioRecorderRef = useRef(null);
   const scenarioStreamRef = useRef(null);
@@ -132,32 +136,57 @@ export default function ScenarioChat({
   const speakAiAudio = async (text, onComplete) => {
     if (!text) return;
     try {
+      // Toggle play/pause if this audio is already playing
+      if (scenarioAudioRef.current && playingAudioUrl === text) {
+        if (!scenarioAudioRef.current.paused) {
+          scenarioAudioRef.current.pause();
+          setPlayingAudioUrl(null);
+          return;
+        } else {
+           scenarioAudioRef.current.play();
+           setPlayingAudioUrl(text);
+           return;
+        }
+      }
+
+      const playAudio = (audioBase64) => {
+        if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
+        const audio = new Audio(`data:audio/mp3;base64,${audioBase64}`);
+        scenarioAudioRef.current = audio;
+        setPlayingAudioUrl(text);
+        
+        audio.onended = () => {
+          setPlayingAudioUrl(null);
+          if (onComplete) onComplete();
+        };
+        audio.onpause = () => {
+            // Only clear if it was paused intentionally, not ended 
+            // (onended fires separately)
+            if (scenarioAudioRef.current === audio && audio.currentTime !== audio.duration) {
+                setPlayingAudioUrl(null);
+            }
+        };
+
+        audio.play().catch(e => {
+          console.error("Audio playback failed:", e);
+          setPlayingAudioUrl(null);
+        });
+      };
+
       // Check cache first
       if (scenarioTtsCache.current[text]) {
-        if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
-        const audio = new Audio(`data:audio/mp3;base64,${scenarioTtsCache.current[text]}`);
-        scenarioAudioRef.current = audio;
-        if (onComplete) audio.onended = onComplete;
-        audio.play().catch(e => console.error("Cached audio play failed:", e));
+        playAudio(scenarioTtsCache.current[text]);
         return;
       }
 
       const { data, error } = await supabase.functions.invoke("scenario-chat", {
-        body: { action: "generate-tts", text }
+        body: { action: "generate-tts", text, voice: scenarioVoice }
       });
       if (error) throw error;
       const parsed = typeof data === 'string' ? JSON.parse(data) : data;
       if (parsed.audioBase64) {
         scenarioTtsCache.current[text] = parsed.audioBase64;
-        if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
-        const audio = new Audio(`data:audio/mp3;base64,${parsed.audioBase64}`);
-        scenarioAudioRef.current = audio;
-        if (onComplete) {
-          audio.onended = onComplete;
-        }
-        audio.play().catch(e => {
-          console.error("Audio playback failed:", e);
-        });
+        playAudio(parsed.audioBase64);
       } else {
         throw new Error("No audio returned");
       }
@@ -167,6 +196,15 @@ export default function ScenarioChat({
   };
 
   async function startScenarioChat(difficulty) {
+    // Generate a random voice for this session
+    const voicePool = [
+        "ar-XA-Chirp3-HD-Puck", "ar-XA-Chirp3-HD-Aoede",
+        "ar-XA-Chirp3-HD-Charon", "ar-XA-Chirp3-HD-Kore",
+        "ar-XA-Chirp3-HD-Fenrir", "ar-XA-Chirp3-HD-Leda",
+    ];
+    const newVoice = voicePool[Math.floor(Math.random() * voicePool.length)];
+    setScenarioVoice(newVoice);
+
     setScenarioDifficulty(difficulty);
     setScenarioPhase("briefing");
     setScenarioMessages([]);
@@ -197,9 +235,6 @@ export default function ScenarioChat({
           scenarioMessagesRef.current = [aiMsg];
           if (parsed.keyPhrase) {
             setScenarioKeyPhrases(prev => [...prev, parsed.keyPhrase]);
-          }
-          if (parsed.audioBase64) {
-            scenarioTtsCache.current[parsed.message] = parsed.audioBase64;
           }
           // Audio playback is now delayed until the user clicks "Ready" on the briefing page
 
@@ -268,7 +303,7 @@ export default function ScenarioChat({
 
       recorder.start();
       setScenarioRecording(true);
-      triggerHeavyHaptic();
+      triggerHaptic();
 
       if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
       window.speechSynthesis?.cancel();
@@ -299,7 +334,7 @@ export default function ScenarioChat({
       scenarioRecorderRef.current.stop();
     }
     setScenarioRecording(false);
-    triggerHeavyHaptic();
+    triggerHaptic();
   }
 
   async function requestHelp() {
@@ -309,22 +344,33 @@ export default function ScenarioChat({
     setHelpLoading(true);
     setHelpData(null);
     try {
+      const history = scenarioMessagesRef.current.map(m => ({
+        role: m.role,
+        text: m.text,
+      }));
       const { data, error } = await supabase.functions.invoke("scenario-chat", {
         body: {
           action: "help",
           lastAiMessage: lastAi.text,
           difficulty: scenarioDifficulty,
+          conversationHistory: history,
         }
       });
       if (!error && data) {
         const parsed = typeof data === 'string' ? JSON.parse(data) : data;
         setHelpData(parsed);
+      } else {
+        console.error("Help request failed:", error);
+        setHelpData({ explanation: "Sorry, help isn't available right now. Try again in a moment.", suggestedResponse: "", suggestedResponseTranslation: "" });
       }
     } catch (e) {
       console.error("Help request error:", e);
+      setHelpData({ explanation: "Something went wrong. Please try again.", suggestedResponse: "", suggestedResponseTranslation: "" });
     }
     setHelpLoading(false);
   }
+
+  const [showExitConfirm, setShowExitConfirm] = useState(false); // Back button confirm
 
   async function sendScenarioAudio(base64, mimeType) {
     if (!base64 || base64.length > MAX_AUDIO_BASE64_LENGTH) {
@@ -334,6 +380,8 @@ export default function ScenarioChat({
     }
 
     setScenarioLoading(true);
+    setStreamingAiText("");
+
     try {
       const history = scenarioMessagesRef.current.map(m => ({
         role: m.role,
@@ -342,109 +390,168 @@ export default function ScenarioChat({
 
       const elapsedSeconds = scenarioStartTimeRef.current ? Math.floor((Date.now() - scenarioStartTimeRef.current) / 1000) : 0;
 
-      const { data, error } = await supabase.functions.invoke("scenario-chat", {
-        body: {
-          action: "reply",
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+      // Get user session JWT for auth (supabase.functions.invoke does this internally)
+      const { data: { session } } = await supabase.auth.getSession();
+      const accessToken = session?.access_token || supabaseAnonKey;
+
+      // Use raw fetch for SSE streaming (supabase.functions.invoke doesn't support streaming)
+      const response = await fetch(`${supabaseUrl}/functions/v1/scenario-chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${accessToken}`,
+          "apikey": supabaseAnonKey,
+        },
+        body: JSON.stringify({
+          action: "reply-stream",
           difficulty: scenarioDifficulty,
           conversationHistory: history,
           audioBase64: base64,
           mimeType: mimeType,
           elapsedSeconds,
-          turnCount: scenarioTurnCount
+          turnCount: scenarioTurnCount,
+        }),
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      // Read SSE stream
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let accumulatedText = "";
+      let gotTranscript = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (value) {
+          buffer += decoder.decode(value, { stream: !done });
         }
-      });
+        if (done) {
+          buffer += decoder.decode();
+        }
 
-      // Parse response — handle both string and object
-      let parsed = null;
-      if (data) {
-        parsed = typeof data === 'string' ? JSON.parse(data) : data;
-        console.log('Scenario reply:', parsed);
-      }
+        // Normalize \r\n → \n for consistent parsing
+        buffer = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
-      // If invoke itself errored or no data at all
-      if (error || !parsed || !parsed.message) {
-        console.error('Scenario reply error:', error || 'No valid response');
-        const errorMsg = {
-          role: "ai",
-          text: parsed?.message || "عُذْرًا، حَدَثَ خَطَأٌ. حَاوِلْ مَرَّةً أُخْرَى.",
-          translation: parsed?.translation || "Sorry, something went wrong. Please try again.",
-          hint: parsed?.hint || "Tap the microphone and try again.",
-          keyPhrase: null,
-          isTranslationVisible: true,
-        };
-        setScenarioMessages(prev => {
-          const updated = [...prev, errorMsg];
-          scenarioMessagesRef.current = updated;
-          return updated;
-        });
-        setScenarioLoading(false);
-        return;
-      }
+        // SSE events are separated by \n\n — process all complete events
+        let eventEnd;
+        while ((eventEnd = buffer.indexOf("\n\n")) !== -1) {
+          const eventBlock = buffer.slice(0, eventEnd);
+          buffer = buffer.slice(eventEnd + 2);
 
-      // Handle empty transcript
-      if (!parsed.transcript || parsed.transcript.trim() === "") {
-        const retryMsg = {
-          role: "ai",
-          text: parsed.message || "لَمْ أَسْمَعْ شَيْئًا",
-          translation: parsed.translation || "I didn't hear anything. Please try again.",
-          hint: "Make sure to speak clearly into the microphone",
-          keyPhrase: null,
-          isTranslationVisible: true,
-        };
-        setScenarioMessages(prev => {
-          const updated = [...prev, retryMsg];
-          scenarioMessagesRef.current = updated;
-          return updated;
-        });
-        setScenarioLoading(false);
-        return;
-      }
+          for (const line of eventBlock.split("\n")) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("data: ")) continue;
+            const jsonStr = trimmed.slice(6).trim();
+            if (!jsonStr) continue;
 
-      // Success — add user message and AI reply
-      const userMsg = { role: "user", text: parsed.transcript };
-      const aiMsg = {
-        role: "ai",
-        text: parsed.message,
-        translation: parsed.translation,
-        hint: parsed.hint,
-        keyPhrase: parsed.keyPhrase,
-        isTranslationVisible: false,
-      };
-      setScenarioMessages(prev => {
-        const updated = [...prev, userMsg, aiMsg];
-        scenarioMessagesRef.current = updated;
-        return updated;
-      });
-      setScenarioTurnCount(prev => prev + 1);
+            let event;
+            try {
+              event = JSON.parse(jsonStr);
+            } catch {
+              continue;
+            }
 
-      if (parsed.keyPhrase) {
-        setScenarioKeyPhrases(prev => [...prev, parsed.keyPhrase]);
-      }
+            // --- Handle SSE event types ---
+            if (event.type === "transcript") {
+              gotTranscript = true;
+              if (event.text && event.text.trim()) {
+                const userMsg = { role: "user", text: event.text };
+                setScenarioMessages(prev => {
+                  const updated = [...prev, userMsg];
+                  scenarioMessagesRef.current = updated;
+                  return updated;
+                });
+                setScenarioLoading(false);
+              }
+            }
 
-      // Play inline audio instantly if available
-      setHelpData(null);
-      if (parsed.audioBase64) {
-          scenarioTtsCache.current[parsed.message] = parsed.audioBase64;
-          if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
-          const audio = new Audio(`data:audio/mp3;base64,${parsed.audioBase64}`);
-          scenarioAudioRef.current = audio;
-          audio.play().catch(e => console.error("Audio play failed:", e));
-      } else {
-          // Fallback to separate TTS call
-          speakAiAudio(parsed.message);
-      }
+            if (event.type === "chunk") {
+              accumulatedText += event.text;
+              setStreamingAiText(accumulatedText);
+            }
 
-      // Check if conversation is ending
-      if (parsed.isEnding) {
-        setTimeout(() => {
-          setScenarioEnded(true);
-          triggerHaptic();
-        }, 1500);
-      }
+            if (event.type === "done") {
+              setStreamingAiText("");
+
+              if (event.emptyTranscript) {
+                const retryMsg = {
+                  role: "ai",
+                  text: event.message || "لَمْ أَسْمَعْ شَيْئًا",
+                  translation: event.translation || "I didn't hear anything. Please try again.",
+                  hint: event.hint || "Make sure to speak clearly into the microphone",
+                  keyPhrase: null,
+                  isTranslationVisible: true,
+                };
+                setScenarioMessages(prev => {
+                  const updated = [...prev, retryMsg];
+                  scenarioMessagesRef.current = updated;
+                  return updated;
+                });
+              } else {
+                const aiMsg = {
+                  role: "ai",
+                  text: event.message || accumulatedText,
+                  translation: event.translation || "",
+                  hint: event.hint || "",
+                  keyPhrase: event.keyPhrase || null,
+                  isTranslationVisible: false,
+                };
+                setScenarioMessages(prev => {
+                  const updated = [...prev, aiMsg];
+                  scenarioMessagesRef.current = updated;
+                  return updated;
+                });
+                setScenarioTurnCount(prev => prev + 1);
+
+                if (event.keyPhrase) {
+                  setScenarioKeyPhrases(prev => [...prev, event.keyPhrase]);
+                }
+
+                setHelpData(null);
+                if (event.audioBase64) {
+                  try {
+                    scenarioTtsCache.current[event.message] = event.audioBase64;
+                    if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
+                    const audio = new Audio(`data:audio/mp3;base64,${event.audioBase64}`);
+                    scenarioAudioRef.current = audio;
+                    audio.play().catch(e => console.error("Audio play failed:", e));
+                  } catch (e) {
+                    console.error("TTS playback error:", e);
+                  }
+                } else {
+                  speakAiAudio(event.message || accumulatedText);
+                }
+
+                if (event.isEnding) {
+                  setTimeout(() => {
+                    setScenarioEnded(true);
+                    triggerHaptic();
+                  }, 1500);
+                }
+              }
+            }
+
+            if (event.type === "error") {
+              console.error("SSE error event:", event.message);
+              throw new Error(event.message);
+            }
+          }  // end for (line of eventBlock)
+        }  // end while (eventEnd)
+
+        if (done) break;
+      }  // end while (true)
 
     } catch (e) {
       console.error("Scenario reply exception:", e);
-      // Show visible error to user instead of silently failing
+      setStreamingAiText("");
       const errorMsg = {
         role: "ai",
         text: "عُذْرًا، حَدَثَ خَطَأٌ. حَاوِلْ مَرَّةً أُخْرَى.",
@@ -497,7 +604,7 @@ export default function ScenarioChat({
     if (scenarioChatEndRef.current) {
       scenarioChatEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [scenarioMessages, scenarioLoading]);
+  }, [scenarioMessages, scenarioLoading, streamingAiText]);
 
   if (scenarioPhase) {
     // DIFFICULTY SELECTION
@@ -660,11 +767,11 @@ export default function ScenarioChat({
       const showTimeWarning = timeRemaining > 0 && timeRemaining <= 60 && !scenarioLoading;
       return (
         <div className="bg-background text-foreground font-sans flex flex-col h-screen overflow-hidden relative">
-          
+
           {/* 60s Time Warning Toast */}
           <AnimatePresence>
             {showTimeWarning && (
-              <motion.div 
+              <motion.div
                 initial={{ opacity: 0, y: -50 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -50 }}
@@ -676,9 +783,33 @@ export default function ScenarioChat({
             )}
           </AnimatePresence>
 
+          {/* Exit Confirmation Modal */}
+          {showExitConfirm && (
+            <div className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-6" onClick={() => setShowExitConfirm(false)}>
+              <div className="bg-card rounded-3xl p-6 max-w-sm w-full border border-border shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                <h3 className="font-heading text-lg font-bold mb-2">Leave conversation?</h3>
+                <p className="text-sm text-muted-foreground mb-6">Your progress in this scenario won't be saved.</p>
+                <div className="flex gap-3">
+                  <button
+                    className="flex-1 py-3 rounded-xl border border-border font-bold text-sm text-foreground bg-muted active:scale-[0.97] transition-all"
+                    onClick={() => { triggerHaptic(); setShowExitConfirm(false); }}
+                  >
+                    Stay
+                  </button>
+                  <button
+                    className="flex-1 py-3 rounded-xl font-bold text-sm text-white bg-destructive active:scale-[0.97] transition-all"
+                    onClick={() => { triggerHaptic(); setShowExitConfirm(false); resetScenarioChat(); }}
+                  >
+                    Leave
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Header */}
           <header className="px-5 pt-12 pb-4 flex items-center gap-4 bg-background z-10 flex-shrink-0 shadow-sm">
-            <button onClick={() => { triggerHaptic(); resetScenarioChat(); }} className="w-10 h-10 rounded-full bg-card/80 border border-border/50 flex items-center justify-center active:scale-95 transition-transform">
+            <button onClick={() => { triggerHaptic(); setShowExitConfirm(true); }} className="w-10 h-10 rounded-full bg-card/80 border border-border/50 flex items-center justify-center active:scale-95 transition-transform">
               <MdArrowBackIosNew className="text-foreground" />
             </button>
             <div className="flex-1 flex flex-col justify-center">
@@ -733,17 +864,42 @@ export default function ScenarioChat({
                           </button>
                         )
                       )}
+                      
                       <button
                         onClick={() => { triggerHaptic(); speakAiAudio(msg.text); }}
-                        className="w-10 h-10 rounded-full flex items-center justify-center bg-secondary/10 text-secondary active:scale-95 transition-transform flex-shrink-0"
+                        className={`w-10 h-10 rounded-full flex items-center justify-center active:scale-95 transition-all flex-shrink-0 ${
+                          playingAudioUrl === msg.text ? "bg-secondary/20 text-secondary" : "bg-secondary/10 text-secondary"
+                        }`}
                       >
-                        <Icon icon="solar:volume-loud-bold" className="text-xl" />
+                        <Icon 
+                          icon={playingAudioUrl === msg.text ? "solar:pause-bold" : "solar:volume-loud-bold"} 
+                          className="text-xl" 
+                        />
                       </button>
                     </div>
                   )}
                 </div>
               </div>
             ))}
+
+            {/* Streaming AI reply — typewriter effect */}
+            {streamingAiText && (
+              <div className="flex justify-start">
+                <div
+                  className="bg-card border border-border/50 shadow-sm"
+                  style={{
+                    maxWidth: '85%',
+                    padding: '1rem',
+                    borderRadius: '1.5rem 1.5rem 1.5rem 0.25rem',
+                  }}
+                >
+                  <div dir="rtl" className="text-lg leading-relaxed font-semibold" style={{ fontFamily: "'Noto Sans Arabic', sans-serif" }}>
+                    {streamingAiText}
+                    <span className="inline-block w-0.5 h-5 bg-primary ml-1 animate-pulse align-text-bottom" />
+                  </div>
+                </div>
+              </div>
+            )}
 
             {scenarioLoading && (
               <div className="flex justify-start">
@@ -757,7 +913,7 @@ export default function ScenarioChat({
 
           {/* Bottom Panel */}
           <div className={`bg-card border-t border-border/50 rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.05)] flex-shrink-0 flex flex-col relative z-20 pb-safe transition-all duration-500 ${scenarioRecording ? 'bg-red-500/10 scale-[1.02] shadow-[0_-15px_50px_rgba(239,68,68,0.2)]' : ''}`}>
-            
+
             <div className="flex-1 overflow-y-auto max-h-[40vh] px-5 pt-4 pb-2 scrollbar-hide">
               {/* Hint — always shown if available */}
               {lastAi?.hint && !scenarioLoading && (
@@ -870,13 +1026,12 @@ export default function ScenarioChat({
                       }
                     }}
                     disabled={scenarioLoading}
-                    className={`w-20 h-20 rounded-full flex items-center justify-center shadow-lg transition-all duration-200 text-white select-none ${
-                      scenarioRecording
+                    className={`w-20 h-20 rounded-full flex items-center justify-center shadow-lg transition-all duration-200 text-white select-none ${scenarioRecording
                         ? 'bg-red-500 scale-110 shadow-[0_0_30px_rgba(239,68,68,0.4)]'
                         : scenarioLoading
                           ? 'bg-muted text-muted-foreground'
                           : 'bg-primary active:scale-95'
-                    }`}
+                      }`}
                   >
                     <Icon
                       icon={scenarioLoading ? "solar:hourglass-bold" : scenarioRecording ? "solar:stop-bold" : "solar:microphone-bold"}
@@ -891,7 +1046,7 @@ export default function ScenarioChat({
                 </>
               )}
             </div>
-            
+
           </div>
         </div>
       );
@@ -902,10 +1057,10 @@ export default function ScenarioChat({
       const elapsedSec = scenarioStartTimeRef.current ? Math.floor((Date.now() - scenarioStartTimeRef.current) / 1000) : 0;
       const mins = Math.floor(elapsedSec / 60);
       const secs = elapsedSec % 60;
-      
+
       return (
         <div className="min-h-screen bg-background text-foreground font-sans relative" style={{ background: 'linear-gradient(180deg, rgba(34,197,94,0.1) 0%, var(--background) 50%)' }}>
-          
+
           <div className="absolute top-10 left-0 w-full flex justify-center pointer-events-none z-0">
             <DotLottieReact src="/animations/done.lottie" loop autoplay style={{ width: 180, height: 180, opacity: 0.15 }} />
           </div>
@@ -918,7 +1073,7 @@ export default function ScenarioChat({
               </div>
               <h1 className="font-heading text-4xl font-bold mb-3 text-foreground">Complete!</h1>
               <p className="text-muted-foreground text-lg mb-4">Great job practicing your Arabic!</p>
-              
+
               <div className="inline-flex items-center gap-3 bg-card border border-border/50 px-5 py-2.5 rounded-full shadow-sm">
                 <span className="text-xl">{scenarioData?.emoji}</span>
                 <span className="text-base font-bold">{scenarioData?.title}</span>

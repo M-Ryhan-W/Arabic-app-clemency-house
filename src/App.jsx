@@ -1814,7 +1814,7 @@ function App() {
     const missed = [];
 
     pictureVocab.forEach(item => {
-      const normalizedWord = normalizeArabic(item.arabic);
+      const normalizedWord = normalizeArabic(item.arabic_text || item.arabic);
       // Check if the word appears in transcript (partial match for compound words)
       const words = normalizedWord.split(/\s+/);
       const isMatch = words.some(w => normalizedTranscript.includes(w)) ||
@@ -1990,6 +1990,16 @@ function App() {
       }
 
       const parsed = typeof data === "string" ? JSON.parse(data) : data;
+      console.log("Picture describe FULL response:", JSON.stringify(parsed, null, 2));
+      
+      // Check for edge function error (returns ok:false with _error)
+      if (parsed?.ok === false && parsed?._error) {
+        console.error("Picture describe API error:", parsed._error);
+        setSpeechError("AI error: " + parsed._error);
+        setPictureCheckingAnswer(false);
+        return;
+      }
+
       const transcript = parsed?.transcript || "";
 
       console.log("Picture describe transcript:", transcript);
@@ -2030,7 +2040,7 @@ function App() {
             fallbackSteps.push({ type: 'segment', snippet: c.said, analysis: c.explanation, tip: `Better: ${c.better}` });
           });
         }
-        fallbackSteps.push({ type: 'vocab_check', used: matched.map(w => w.arabic), missed: missed.map(w => w.arabic), analysis: `You used ${percent}% of the target vocabulary.` });
+        fallbackSteps.push({ type: 'vocab_check', used: matched.map(w => w.arabic_text || w.arabic), missed: missed.map(w => w.arabic_text || w.arabic), analysis: `You used ${percent}% of the target vocabulary.` });
         fallbackSteps.push({ type: 'summary', message: parsed?.encouragement || 'Keep practicing! Every attempt makes you stronger. 💪' });
         setPictureFeedbackSteps(fallbackSteps);
         setPictureScore(parsed?.overallScore ? (parsed.overallScore / 10) : (percent / 10));
@@ -4721,7 +4731,7 @@ function App() {
                   <span className="explorer-card-corner bottom-left"></span>
                   <span className="explorer-card-corner bottom-right"></span>
                   <div className="vocab-text-main">
-                    {pictureVocab[pictureVocabIndex].arabic}
+                    {pictureVocab[pictureVocabIndex].arabic_text || pictureVocab[pictureVocabIndex].arabic}
                     {pictureVocab[pictureVocabIndex].note && (
                       <span style={{ display: "block", fontSize: "0.9rem", marginTop: "0.5rem", color: "var(--muted-foreground)" }}>
                         [{pictureVocab[pictureVocabIndex].note}]
@@ -4736,7 +4746,7 @@ function App() {
                   <span className="explorer-card-corner top-right"></span>
                   <span className="explorer-card-corner bottom-left"></span>
                   <span className="explorer-card-corner bottom-right"></span>
-                  <div className="vocab-text-main">{pictureVocab[pictureVocabIndex].english}</div>
+                  <div className="vocab-text-main">{pictureVocab[pictureVocabIndex].english_text || pictureVocab[pictureVocabIndex].english}</div>
                 </div>
               </div>
 
@@ -4914,9 +4924,9 @@ function App() {
                 <div className="picture-hint-list">
                   {pictureVocab.map((item, idx) => (
                     <div key={idx} className="picture-hint-item">
-                      <span className="hint-arabic">{item.arabic}</span>
+                      <span className="hint-arabic">{item.arabic_text || item.arabic}</span>
                       <span className="hint-divider">—</span>
-                      <span className="hint-english">{item.english}</span>
+                      <span className="hint-english">{item.english_text || item.english}</span>
                     </div>
                   ))}
                 </div>

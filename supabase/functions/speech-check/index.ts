@@ -68,11 +68,15 @@ serve(async (req) => {
       : "Transcribe this Arabic audio. Return ONLY a JSON object: {\"transcript\": \"<the Arabic text>\"}. Nothing else.";
 
     // Build parts array: text + audio + optional image
+    // Gemini only accepts base MIME types (e.g. "audio/webm"), not codec params (e.g. "audio/webm;codecs=opus")
+    const rawMime = body.mimeType || "audio/webm";
+    const audioMimeType = rawMime.split(";")[0].trim();
+    
     const parts: any[] = [
       { text: prompt },
       {
         inlineData: {
-          mimeType: "audio/webm",
+          mimeType: audioMimeType,
           data: base64Audio,
         },
       },
@@ -84,7 +88,14 @@ serve(async (req) => {
         const imgRes = await fetch(body.imageUrl);
         if (imgRes.ok) {
           const imgBuf = await imgRes.arrayBuffer();
-          const imgBase64 = btoa(String.fromCharCode(...new Uint8Array(imgBuf)));
+          // Use chunked conversion to avoid stack overflow on large images
+          const imgBytes = new Uint8Array(imgBuf);
+          let imgBase64 = '';
+          const chunkSize = 8192;
+          for (let i = 0; i < imgBytes.length; i += chunkSize) {
+            imgBase64 += String.fromCharCode(...imgBytes.subarray(i, i + chunkSize));
+          }
+          imgBase64 = btoa(imgBase64);
           const contentType = imgRes.headers.get("content-type") || "image/jpeg";
           parts.push({
             inlineData: {
@@ -100,6 +111,8 @@ serve(async (req) => {
 
     // Gemini call
     const modelVersion = wantFeedback ? "gemini-2.5-flash" : "gemini-2.5-flash-lite";
+    console.log(`[speech-check] Using model: ${modelVersion}, exerciseType: ${exerciseType}`);
+    
     const geminiRes = await fetch(
       `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/${modelVersion}:generateContent`,
       {
@@ -117,7 +130,7 @@ serve(async (req) => {
           ],
           generationConfig: {
             temperature: wantFeedback ? 0.3 : 0.1,
-            maxOutputTokens: 2048,
+            maxOutputTokens: 4096,
             responseMimeType: "application/json",
           },
         }),
@@ -125,22 +138,37 @@ serve(async (req) => {
     );
 
     const geminiData = await geminiRes.json();
+    console.log("[speech-check] Gemini HTTP status:", geminiRes.status);
 
     if (geminiData.error) {
-      console.error("Gemini error:", JSON.stringify(geminiData.error));
+      console.error("[speech-check] Gemini API error:", JSON.stringify(geminiData.error));
       return new Response(
-        JSON.stringify({ ok: true, transcript: "" }),
+        JSON.stringify({ ok: false, transcript: "", _error: geminiData.error.message || "Gemini API error", _errorCode: geminiData.error.code }),
         { headers: corsHeaders }
       );
     }
 
-    const responseText =
-      geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    // Check for blocked/empty candidates
+    const candidate = geminiData?.candidates?.[0];
+    const finishReason = candidate?.finishReason;
+    console.log("[speech-check] Finish reason:", finishReason);
+    
+    if (!candidate || !candidate.content) {
+      console.error("[speech-check] No candidate content. Full response:", JSON.stringify(geminiData).substring(0, 1000));
+      return new Response(
+        JSON.stringify({ ok: false, transcript: "", _error: `No response from Gemini (finishReason: ${finishReason})` }),
+        { headers: corsHeaders }
+      );
+    }
+
+    const responseText = candidate.content.parts?.[0]?.text || "{}";
+    console.log("[speech-check] Response text length:", responseText.length);
 
     let result;
     try {
       result = JSON.parse(responseText);
     } catch {
+      console.warn("[speech-check] Failed to parse JSON, raw:", responseText.substring(0, 500));
       result = { transcript: responseText.trim() };
     }
 

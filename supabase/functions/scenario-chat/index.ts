@@ -158,6 +158,42 @@ IMPORTANT:
 - Do NOT include suggestedResponse or audioHelp — those are generated separately only if the student asks for help.`;
 }
 
+function buildStreamingSystemPrompt(scenario: typeof SCENARIOS[0], difficulty: string, elapsedTimeSec: number = 0, turnCount: number = 0): string {
+    const timeInstruction = elapsedTimeSec > 240
+        ? "TIME ALERT: Wrap up naturally now."
+        : "";
+
+    const turnGuidance = turnCount < 6
+        ? "Keep the conversation going, ask follow-up questions."
+        : turnCount < 8
+            ? "You can start winding down if appropriate."
+            : "You may wrap up naturally when it feels right.";
+
+    const difficultyGuide: any = {
+        easy: "Use only basic, common Arabic words. Keep sentences very short and simple. Use clear Fusha.",
+        intermediate: "Use simple Fusha. Clear, moderate length sentences.",
+        advanced: "Use natural, fluid Fusha with richer vocabulary."
+    };
+
+    return `You are playing a CHARACTER in an Arabic conversation scenario. Stay in character.
+
+SCENARIO: ${scenario.title} (${scenario.titleAr})
+YOUR ROLE: ${scenario.setting}
+
+${difficultyGuide[difficulty] || difficultyGuide.intermediate}
+
+TURN: ${turnCount} of ~8-10. ${turnGuidance}
+${timeInstruction}
+
+RULES:
+1. Stay in character at ALL times.
+2. Include FULL tashkeel (diacritics) on every Arabic word.
+3. Use Modern Standard Arabic (Fusha) only. No dialects.
+4. End with a follow-up question to keep the conversation going.
+5. Respond ONLY with your Arabic message. NO English, NO translation, NO JSON, NO hints.
+6. Be concise — 1-3 sentences max. This is a real-time conversation.`;
+}
+
 function cleanJson(text: string): string {
     if (!text) return "";
     let cleaned = String(text).trim();
@@ -165,13 +201,13 @@ function cleanJson(text: string): string {
     if (match) {
         return match[1].trim();
     }
-    
+
     const start = cleaned.indexOf('{');
     const end = cleaned.lastIndexOf('}');
     if (start !== -1 && end !== -1 && start <= end) {
         return cleaned.substring(start, end + 1);
     }
-    
+
     return cleaned;
 }
 
@@ -211,42 +247,8 @@ serve(async (req) => {
             const text = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
             if (!text) throw new Error("No response from Gemini");
 
-            const parsed = Object.assign({
-                message: "مرحباً",
-                translation: "Hello",
-                hint: "Greet them back."
-            }, JSON.parse(cleanJson(text)));
-
-            const voicePool = [
-                "ar-XA-Chirp3-HD-Puck",
-                "ar-XA-Chirp3-HD-Aoede",
-                "ar-XA-Chirp3-HD-Charon",
-                "ar-XA-Chirp3-HD-Kore",
-                "ar-XA-Chirp3-HD-Fenrir",
-                "ar-XA-Chirp3-HD-Leda",
-            ];
-            const voice = voicePool[Math.floor(Math.random() * voicePool.length)];
-
-            let responseAudio = null;
-            try {
-                const ttsRes = await fetch("https://texttospeech.googleapis.com/v1/text:synthesize", {
-                    method: "POST",
-                    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        input: { text: parsed.message },
-                        voice: { languageCode: "ar-XA", name: voice },
-                        audioConfig: { audioEncoding: "MP3" }
-                    })
-                });
-                if (ttsRes.ok) {
-                    const ttsData = await ttsRes.json();
-                    responseAudio = ttsData.audioContent || null;
-                }
-            } catch (e) {
-                console.error("Inline TTS failed:", e);
-            }
-
-            return new Response(JSON.stringify({ ...parsed, audioBase64: responseAudio }), {
+            const parsed = JSON.parse(cleanJson(text));
+            return new Response(JSON.stringify(parsed), {
                 headers: { ...corsHeaders, "Content-Type": "application/json" },
             });
         }
@@ -277,11 +279,13 @@ serve(async (req) => {
             }
 
             if (audioBase64) {
+                // Gemini only accepts base MIME types (e.g. "audio/webm"), not codec params
+                const audioMime = (reqBody.mimeType || "audio/webm").split(";")[0].trim();
                 const transcribeData = await callVertexAI(projectId, token, {
                     contents: [{
                         role: "user",
                         parts: [
-                            { inlineData: { mimeType: reqBody.mimeType || "audio/webm;codecs=opus", data: audioBase64 } },
+                            { inlineData: { mimeType: audioMime, data: audioBase64 } },
                             { text: 'Transcribe this Arabic audio exactly. If silent or no speech, respond with just: {"transcript":""}. Otherwise respond with: {"transcript":"<Arabic text>"}' },
                         ],
                     }],
@@ -329,52 +333,281 @@ serve(async (req) => {
                 console.log("Reply raw:", replyText);
                 if (!replyText) throw new Error("No response from Gemini");
 
-                let parsed: any;
-                try {
-                    parsed = JSON.parse(cleanJson(replyText));
-                } catch {
-                    parsed = {};
-                }
-                
-                if (!parsed.message) parsed.message = "عُذْرًا، كَانَ هُنَاكَ خَطَأٌ.";
-                if (!parsed.translation) parsed.translation = "Sorry, there was an error.";
-                if (!parsed.hint) parsed.hint = "Try repeating what you said.";
-
-                const voicePool = [
-                    "ar-XA-Chirp3-HD-Puck",
-                    "ar-XA-Chirp3-HD-Aoede",
-                    "ar-XA-Chirp3-HD-Charon",
-                    "ar-XA-Chirp3-HD-Kore",
-                    "ar-XA-Chirp3-HD-Fenrir",
-                    "ar-XA-Chirp3-HD-Leda",
-                ];
-                const voice = voicePool[Math.floor(Math.random() * voicePool.length)];
-
-                let responseAudio = null;
-                try {
-                    const ttsRes = await fetch("https://texttospeech.googleapis.com/v1/text:synthesize", {
-                        method: "POST",
-                        headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            input: { text: parsed.message },
-                            voice: { languageCode: "ar-XA", name: voice },
-                            audioConfig: { audioEncoding: "MP3" }
-                        })
-                    });
-                    if (ttsRes.ok) {
-                        const ttsData = await ttsRes.json();
-                        responseAudio = ttsData.audioContent || null;
-                    }
-                } catch (e) {
-                    console.error("Inline TTS failed:", e);
-                }
-
-                return new Response(JSON.stringify({ ...parsed, transcript, audioBase64: responseAudio }), {
+                const parsed = JSON.parse(cleanJson(replyText));
+                return new Response(JSON.stringify({ ...parsed, transcript }), {
                     headers: { ...corsHeaders, "Content-Type": "application/json" },
                 });
             }
 
             throw new Error("No audio provided");
+        }
+
+        // Action: reply-stream — SSE streaming version of reply
+        if (action === "reply-stream") {
+            const scenario = getTodayScenario();
+            const { token, projectId } = await getAccessToken();
+
+            // Build conversation history for context
+            const contents: any[] = [];
+            contents.push({ role: "user", parts: [{ text: "Start the conversation. Greet me in character." }] });
+
+            if (conversationHistory && conversationHistory.length > 0) {
+                for (const msg of conversationHistory) {
+                    const msgRole = msg.role === "ai" ? "model" : "user";
+                    const lastTurn = contents[contents.length - 1];
+                    if (lastTurn.role === msgRole) {
+                        lastTurn.parts[0].text += "\n" + msg.text;
+                    } else {
+                        contents.push({ role: msgRole, parts: [{ text: msg.text }] });
+                    }
+                }
+            }
+
+            if (!audioBase64) {
+                throw new Error("No audio provided");
+            }
+
+            // --- SSE Response Stream ---
+            const sseHeaders = {
+                ...corsHeaders,
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            };
+
+            const stream = new ReadableStream({
+                async start(controller) {
+                    const sendEvent = (data: any) => {
+                        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`));
+                    };
+
+                    try {
+                        // --- Step 1: Transcribe audio ---
+                        const audioMime = (reqBody.mimeType || "audio/webm").split(";")[0].trim();
+                        const transcribeData = await callVertexAI(projectId, token, {
+                            contents: [{
+                                role: "user",
+                                parts: [
+                                    { inlineData: { mimeType: audioMime, data: audioBase64 } },
+                                    { text: 'You are an expert Arabic audio transcriber. Transcribe the speech precisely. CRITICAL: If the audio is silent, has only background noise, or contains no discernible speech, you MUST return exactly: {"transcript":""}. Do not guess or hallucinate text. If there is valid speech, return: {"transcript":"<Arabic text>"}' },
+                                ],
+                            }],
+                            generationConfig: { temperature: 0.1, maxOutputTokens: 400, responseMimeType: "application/json" },
+                        }, "gemini-2.5-flash-lite");
+
+                        const transcribeText = transcribeData?.candidates?.[0]?.content?.parts?.[0]?.text;
+                        let transcript = "";
+                        try {
+                            const parsed = JSON.parse(cleanJson(transcribeText));
+                            transcript = parsed.transcript || "";
+                        } catch {
+                            transcript = transcribeText || "";
+                        }
+
+                        // Send transcript event immediately
+                        sendEvent({ type: "transcript", text: transcript });
+
+                        if (!transcript || transcript.trim() === "") {
+                            sendEvent({
+                                type: "done",
+                                message: "لَمْ أَسْمَعْ شَيْئًا. هَلْ يُمْكِنُكَ تَكْرَارُ ذَلِكَ مِنْ فَضْلِكَ؟",
+                                translation: "I didn't hear anything. Can you repeat that please?",
+                                hint: "Speak clearly into the microphone and try again.",
+                                isEnding: false,
+                                keyPhrase: null,
+                                audioBase64: null,
+                                emptyTranscript: true,
+                            });
+                            controller.close();
+                            return;
+                        }
+
+                        // Add transcript to conversation context
+                        const lastTurnRole = contents[contents.length - 1].role;
+                        if (lastTurnRole === "user") {
+                            contents[contents.length - 1].parts[0].text += "\n" + transcript;
+                        } else {
+                            contents.push({ role: "user", parts: [{ text: transcript }] });
+                        }
+
+                        // --- Step 2: Stream Gemini reply (plain Arabic text) ---
+                        const streamSystemPrompt = buildStreamingSystemPrompt(scenario, difficulty || "intermediate", reqBody.elapsedSeconds || 0, reqBody.turnCount || 0);
+
+                        const streamRes = await fetch(
+                            `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse`,
+                            {
+                                method: "POST",
+                                headers: {
+                                    Authorization: `Bearer ${token}`,
+                                    "Content-Type": "application/json",
+                                },
+                                body: JSON.stringify({
+                                    systemInstruction: { parts: [{ text: streamSystemPrompt }] },
+                                    contents,
+                                    generationConfig: { temperature: 0.8, maxOutputTokens: 400 },
+                                }),
+                            }
+                        );
+
+                        if (!streamRes.ok || !streamRes.body) {
+                            const errText = await streamRes.text();
+                            console.error("[reply-stream] Gemini stream error:", streamRes.status, errText);
+                            throw new Error("Gemini streaming failed");
+                        }
+
+                        // Read the SSE stream from Gemini and forward chunks
+                        let fullArabicReply = "";
+                        const reader = streamRes.body.getReader();
+                        const decoder = new TextDecoder();
+                        let buffer = "";
+
+                        while (true) {
+                            const { done, value } = await reader.read();
+
+                            if (value) {
+                                buffer += decoder.decode(value, { stream: !done });
+                            }
+                            if (done) {
+                                buffer += decoder.decode(); // flush
+                            }
+
+                            // Normalize \r\n → \n (HTTP responses may use CRLF)
+                            buffer = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+                            // SSE events are separated by double-newline (\n\n)
+                            let eventEnd;
+                            while ((eventEnd = buffer.indexOf("\n\n")) !== -1) {
+                                const eventBlock = buffer.slice(0, eventEnd);
+                                buffer = buffer.slice(eventEnd + 2);
+
+                                for (const line of eventBlock.split("\n")) {
+                                    const trimmed = line.trim();
+                                    if (trimmed.startsWith("data: ")) {
+                                        const jsonStr = trimmed.slice(6).trim();
+                                        if (jsonStr === "[DONE]") continue;
+                                        try {
+                                            const chunk = JSON.parse(jsonStr);
+                                            const text = chunk?.candidates?.[0]?.content?.parts?.[0]?.text;
+                                            if (text) {
+                                                fullArabicReply += text;
+                                                sendEvent({ type: "chunk", text });
+                                            }
+                                            // Log if Gemini stopped for any reason
+                                            const finish = chunk?.candidates?.[0]?.finishReason;
+                                            if (finish && finish !== "STOP") {
+                                                console.warn("[reply-stream] finishReason:", finish);
+                                            }
+                                        } catch (e: any) {
+                                            console.error("[reply-stream] chunk parse error:", e.message, "data:", jsonStr.substring(0, 200));
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (done) {
+                                // Parse remaining buffer
+                                if (buffer.trim()) {
+                                    for (const line of buffer.split("\n")) {
+                                        const trimmed = line.trim();
+                                        if (trimmed.startsWith("data: ")) {
+                                            const jsonStr = trimmed.slice(6).trim();
+                                            if (jsonStr === "[DONE]") continue;
+                                            try {
+                                                const chunk = JSON.parse(jsonStr);
+                                                const text = chunk?.candidates?.[0]?.content?.parts?.[0]?.text;
+                                                if (text) {
+                                                    fullArabicReply += text;
+                                                    sendEvent({ type: "chunk", text });
+                                                }
+                                            } catch (e) {}
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+
+                        if (!fullArabicReply.trim()) {
+                            throw new Error("No reply text generated");
+                        }
+
+                        // --- Step 3: Parallel metadata extraction + TTS ---
+                        const [metaResult, ttsResult] = await Promise.allSettled([
+                            // Metadata extraction (fast Flash-Lite call)
+                            callVertexAI(projectId, token, {
+                                contents: [{
+                                    role: "user",
+                                    parts: [{ text: `Given this Arabic message from a conversation:\n"${fullArabicReply}"\n\nProvide:\n1. English translation\n2. A short hint (5-12 words) suggesting what the student should say next\n3. One useful key phrase from the message with its English meaning\n4. Whether this feels like a conversation ending (true/false)\n\nRespond in JSON: {"translation":"...","hint":"...","keyPhrase":{"arabic":"...","english":"..."},"isEnding":false}` }],
+                                }],
+                                generationConfig: { temperature: 0.1, maxOutputTokens: 400, responseMimeType: "application/json" },
+                            }, "gemini-2.5-flash-lite"),
+
+                            // TTS generation (in parallel)
+                            (async () => {
+                                const voicePool = [
+                                    "ar-XA-Chirp3-HD-Puck", "ar-XA-Chirp3-HD-Aoede",
+                                    "ar-XA-Chirp3-HD-Charon", "ar-XA-Chirp3-HD-Kore",
+                                    "ar-XA-Chirp3-HD-Fenrir", "ar-XA-Chirp3-HD-Leda",
+                                ];
+                                const voice = reqBody.voice || voicePool[Math.floor(Math.random() * voicePool.length)];
+                                const ttsRes = await fetch("https://texttospeech.googleapis.com/v1/text:synthesize", {
+                                    method: "POST",
+                                    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+                                    body: JSON.stringify({
+                                        input: { text: fullArabicReply },
+                                        voice: { languageCode: "ar-XA", name: voice },
+                                        audioConfig: { audioEncoding: "MP3" },
+                                    }),
+                                });
+                                if (!ttsRes.ok) return null;
+                                const ttsData = await ttsRes.json();
+                                return ttsData.audioContent || null;
+                            })(),
+                        ]);
+
+                        // Extract metadata
+                        let translation = "", hint = "", keyPhrase = null, isEnding = false;
+                        if (metaResult.status === "fulfilled") {
+                            try {
+                                const metaText = metaResult.value?.candidates?.[0]?.content?.parts?.[0]?.text;
+                                const meta = JSON.parse(cleanJson(metaText));
+                                translation = meta.translation || "";
+                                hint = meta.hint || "";
+                                keyPhrase = meta.keyPhrase || null;
+                                isEnding = meta.isEnding || false;
+                            } catch (e) {
+                                console.error("[reply-stream] Metadata parse error:", e);
+                            }
+                        }
+
+                        // Extract TTS audio
+                        let ttsAudio = null;
+                        if (ttsResult.status === "fulfilled" && ttsResult.value) {
+                            ttsAudio = ttsResult.value;
+                        }
+
+                        // Send final done event
+                        sendEvent({
+                            type: "done",
+                            message: fullArabicReply,
+                            translation,
+                            hint,
+                            isEnding,
+                            keyPhrase,
+                            audioBase64: ttsAudio,
+                            emptyTranscript: false,
+                        });
+
+                    } catch (err: any) {
+                        console.error("[reply-stream] Error:", err);
+                        sendEvent({ type: "error", message: err.message || "Something went wrong" });
+                    } finally {
+                        controller.close();
+                    }
+                },
+            });
+
+            return new Response(stream, { headers: sseHeaders });
         }
 
         // Action: help — on-demand detailed help for the current conversation point
@@ -383,34 +616,41 @@ serve(async (req) => {
             const { token, projectId } = await getAccessToken();
             const lastAiMessage = reqBody.lastAiMessage || "";
             const diff = reqBody.difficulty || "intermediate";
+            const history = conversationHistory || [];
 
-            const helpSystemInstruction = `You are a friendly Arabic tutor helping a student in a conversation scenario.
+            // Build a brief conversation summary for context
+            const recentTurns = history.slice(-4).map((m: any) => 
+                `${m.role === 'ai' ? 'Waiter/Character' : 'Student'}: ${m.text}`
+            ).join("\n");
 
-Give them:
-1. A clear explanation in English of what was said and what the student should say back
-2. A specific Arabic phrase they can say, with full tashkeel
-3. The English translation of that phrase
+            const helpSystemInstruction = `You are a friendly, encouraging Arabic tutor helping a student practice a conversation.
 
-Respond with valid JSON only:
+The student is in a "${scenario.title}" scenario (${scenario.setting}).
+Difficulty: ${diff}.
+
+Your job:
+1. Briefly explain what the character just said (1 sentence, plain English — do NOT give a full translation, just the gist)
+2. Tell the student what they should say next — give them a SPECIFIC Arabic phrase or sentence they can use, with FULL tashkeel (diacritics)
+3. Provide the English translation of that phrase
+
+${diff === 'easy' ? 'Keep the suggested phrase VERY simple — 2-5 words max. Use basic vocabulary only.' : diff === 'advanced' ? 'The suggested phrase should be a natural, full Arabic sentence.' : 'Keep the suggested phrase moderate — a short, natural sentence of 4-8 words.'}
+
+Respond ONLY with valid JSON:
 {
-  "explanation": "<2-3 sentence English explanation of the situation and what to say>",
+  "explanation": "<1 sentence: what the character said and what the student should do>",
   "suggestedResponse": "<Arabic phrase with full tashkeel>",
   "suggestedResponseTranslation": "<English translation>"
 }`;
 
-            const helpUserPrompt = `SCENARIO: ${scenario.title}
-DIFFICULTY: ${diff}
-
-The character just said this to the student (in Arabic):
-"${lastAiMessage}"
-
-${diff === 'easy' ? 'Keep the suggested phrase VERY simple — 2-4 words max.' : diff === 'advanced' ? 'The suggested phrase can be a natural full sentence.' : 'Keep the suggested phrase moderate — a short natural sentence.'}`;
+            const helpUserPrompt = recentTurns
+                ? `Here is the recent conversation:\n${recentTurns}\n\nThe character's latest message:\n"${lastAiMessage}"\n\nWhat should the student say next?`
+                : `The character just said:\n"${lastAiMessage}"\n\nWhat should the student say next?`;
 
             const helpData = await callVertexAI(projectId, token, {
                 systemInstruction: { parts: [{ text: helpSystemInstruction }] },
                 contents: [{ role: "user", parts: [{ text: helpUserPrompt }] }],
-                generationConfig: { temperature: 0.7, maxOutputTokens: 800, responseMimeType: "application/json" },
-            });
+                generationConfig: { temperature: 0.5, maxOutputTokens: 400, responseMimeType: "application/json" },
+            }, "gemini-2.5-flash-lite");
 
             const helpText = helpData?.candidates?.[0]?.content?.parts?.[0]?.text;
             if (!helpText) throw new Error("No help response");
@@ -434,7 +674,7 @@ ${diff === 'easy' ? 'Keep the suggested phrase VERY simple — 2-4 words max.' :
                 "ar-XA-Chirp3-HD-Fenrir",
                 "ar-XA-Chirp3-HD-Leda",
             ];
-            const voice = voicePool[Math.floor(Math.random() * voicePool.length)];
+            const voice = reqBody.voice || voicePool[Math.floor(Math.random() * voicePool.length)];
 
             const ttsRes = await fetch("https://texttospeech.googleapis.com/v1/text:synthesize", {
                 method: "POST",
