@@ -703,6 +703,7 @@ function App() {
     setTabDirection(tabOrder[newTab] > tabOrder[activeTab] ? 'forward' : 'back');
     setTabTransitionKey(k => k + 1);
     setActiveTab(newTab);
+    window.scrollTo(0, 0);
   };
 
   // LESSON CONTENT CACHE (for preloading)
@@ -1818,6 +1819,13 @@ function App() {
   }, [activeLesson, practiceMode, selectedStage, showStreaksPage, activePictureLesson,
     activeSpeakingLesson, showMyPosts, showLeaderboard, showTeacherDashboard,
     showTeacherStudentPosts, scenarioPhase, activeTab, activeExerciseType, communityView]);
+
+  // Scroll to top when navigating between screens
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [activeLesson, practiceMode, selectedStage, showStreaksPage, activePictureLesson,
+    activeSpeakingLesson, showMyPosts, showLeaderboard, showTeacherDashboard,
+    showTeacherStudentPosts, scenarioPhase, communityView, wotdPhase]);
 
   // Cleanup on unmount — prevent leaked timers, mic locks, and orphaned audio
   useEffect(() => {
