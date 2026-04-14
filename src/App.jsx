@@ -4953,7 +4953,7 @@ function App() {
                 <img src="/clemency-icon.png" alt="Ihya Institute" className="w-20 h-20 object-contain brightness-[1.6] relative z-10" />
               </div>
             </div>
-            <h1 className="text-[2rem] font-semibold tracking-tight leading-[1.2] mb-3" style={{ fontFamily: "var(--font-display)" }}>
+            <h1 className="text-[2rem] font-semibold tracking-tight leading-[1.2] mb-3" style={{ fontFamily: "var(--font-sans)" }}>
               Discover the{' '}
               <span className="relative inline-block">
                 <span style={{ color: '#E09F3E' }}>soul</span>
@@ -4968,7 +4968,7 @@ function App() {
 
           {/* Form section title */}
           <div className="text-center mb-5 auth-fade-up auth-fade-up-delay-1">
-            <h2 className="text-lg font-bold tracking-tight" style={{ fontFamily: "var(--font-display)" }}>
+            <h2 className="text-lg font-bold tracking-tight" style={{ fontFamily: "var(--font-sans)" }}>
               {authForgotMode ? "Reset password" : authMode === "signin" ? "Welcome back" : "Create account"}
             </h2>
             <p className="text-muted-foreground/70 text-xs mt-1.5 tracking-wide">
@@ -4986,7 +4986,7 @@ function App() {
           >
             {/* Email input */}
             <div className="auth-input-group auth-fade-up auth-fade-up-delay-2">
-              <div className="relative group flex items-center rounded-2xl border border-border/30 bg-card/40 backdrop-blur-sm focus-within:border-primary/50 focus-within:bg-card/70 transition-all duration-300">
+              <div className="relative group flex items-center rounded-2xl border border-border/20 bg-transparent focus-within:border-primary/40 transition-all duration-300">
                 <div className="pl-4 text-muted-foreground/40 group-focus-within:text-primary transition-colors duration-300 flex-shrink-0">
                   <Icon icon="solar:letter-bold" className="text-[15px]" />
                 </div>
@@ -5006,7 +5006,7 @@ function App() {
               className="auth-input-group auth-fade-up auth-fade-up-delay-3"
               style={authForgotMode ? { opacity: 0, height: 0, overflow: 'hidden', margin: 0 } : {}}
             >
-              <div className="relative group flex items-center rounded-2xl border border-border/30 bg-card/40 backdrop-blur-sm focus-within:border-primary/50 focus-within:bg-card/70 transition-all duration-300">
+              <div className="relative group flex items-center rounded-2xl border border-border/20 bg-transparent focus-within:border-primary/40 transition-all duration-300">
                 <div className="pl-4 text-muted-foreground/40 group-focus-within:text-primary transition-colors duration-300 flex-shrink-0">
                   <Icon icon="solar:lock-password-bold" className="text-[15px]" />
                 </div>
