@@ -242,15 +242,52 @@
   text-transform: uppercase;
 }
 
+/* ── Action Row (audio + continue) ── */
+.prebook-action-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: auto;
+}
+
+/* ── Audio Button ── */
+.prebook-audio-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 54px;
+  height: 54px;
+  flex-shrink: 0;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border: none;
+  border-radius: var(--radius-lg);
+  font-size: 1.3rem;
+  cursor: pointer;
+  box-shadow: 0 4px 0 var(--yellow-dark);
+  transition: transform 0.1s;
+}
+.prebook-audio-btn:active {
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 var(--yellow-dark);
+}
+.prebook-audio-btn.playing {
+  animation: prebook-pulse-audio 0.8s ease-in-out infinite;
+}
+@keyframes prebook-pulse-audio {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+
 /* ── Continue Button ── */
 .prebook-continue-btn {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  width: 100%;
+  flex: 1;
   padding: 16px;
-  margin-top: auto;
   background: var(--primary);
   color: var(--primary-foreground);
   border: none;

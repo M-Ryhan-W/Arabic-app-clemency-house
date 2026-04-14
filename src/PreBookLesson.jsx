@@ -1,8 +1,9 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Icon } from '@iconify/react';
 import { Capacitor } from '@capacitor/core';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
+import { TextToSpeech } from '@capacitor-community/text-to-speech';
 import { DotLottieReact } from '@lottiefiles/dotlottie-react';
 import './PreBookLesson.css';
 
@@ -197,6 +198,48 @@ export default function PreBookLesson({ items, loading = false, error = '', onCo
   const [shakeIdx, setShakeIdx] = useState(-1);
   const [buildDone, setBuildDone] = useState(false);
   const [showQuit, setShowQuit] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  const speakArabic = useCallback(async (text) => {
+    if (!text || isSpeaking) return;
+    setIsSpeaking(true);
+    const lang = 'ar-SA';
+    const rate = 0.85;
+
+    if (Capacitor.isNativePlatform()) {
+      try {
+        try { await TextToSpeech.stop(); } catch (_) {}
+        await TextToSpeech.speak({ text, lang, rate, volume: 1.0 });
+        setIsSpeaking(false);
+        return;
+      } catch (e) {
+        try {
+          await TextToSpeech.speak({ text, lang: 'ar', rate, volume: 1.0 });
+          setIsSpeaking(false);
+          return;
+        } catch (_) {}
+      }
+    }
+
+    if (window.speechSynthesis) {
+      try {
+        window.speechSynthesis.cancel();
+        await new Promise(r => setTimeout(r, 50));
+        const utter = new SpeechSynthesisUtterance(text);
+        utter.lang = lang;
+        utter.rate = rate;
+        utter.volume = 1.0;
+        const voices = window.speechSynthesis.getVoices() || [];
+        const match = voices.find(v => v.lang === lang) || voices.find(v => v.lang.startsWith('ar'));
+        if (match) utter.voice = match;
+        utter.onend = () => setIsSpeaking(false);
+        utter.onerror = () => setIsSpeaking(false);
+        window.speechSynthesis.speak(utter);
+      } catch (e) { setIsSpeaking(false); }
+    } else {
+      setIsSpeaking(false);
+    }
+  }, [isSpeaking]);
 
   const step = steps[stepIdx];
   const progress = steps.length > 0 ? (stepIdx / steps.length) * 100 : 0;
@@ -210,6 +253,11 @@ export default function PreBookLesson({ items, loading = false, error = '', onCo
     setUsedSet(new Set());
     setShakeIdx(-1);
     setBuildDone(false);
+    setIsSpeaking(false);
+    try {
+      if (Capacitor.isNativePlatform()) TextToSpeech.stop();
+      else window.speechSynthesis?.cancel();
+    } catch (_) {}
     window.scrollTo(0, 0);
   }, [stepIdx]);
 
@@ -502,15 +550,22 @@ export default function PreBookLesson({ items, loading = false, error = '', onCo
                   {!revealed && <div className="prebook-tap-hint">Tap to reveal</div>}
                 </div>
                 {revealed && (
-                  <motion.button
-                    className="prebook-continue-btn"
+                  <motion.div
+                    className="prebook-action-row"
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
-                    onClick={() => { haptic(); advance(); }}
                   >
-                    Continue
-                    <Icon icon="solar:arrow-right-linear" />
-                  </motion.button>
+                    <button
+                      className={`prebook-audio-btn ${isSpeaking ? 'playing' : ''}`}
+                      onClick={() => { haptic(); speakArabic(step.word.word_ar); }}
+                    >
+                      <Icon icon="solar:volume-loud-bold" />
+                    </button>
+                    <button className="prebook-continue-btn" onClick={() => { haptic(); advance(); }}>
+                      Continue
+                      <Icon icon="solar:arrow-right-linear" />
+                    </button>
+                  </motion.div>
                 )}
               </div>
             )}
@@ -529,10 +584,18 @@ export default function PreBookLesson({ items, loading = false, error = '', onCo
                   <span className="prebook-sentence-word-eq">=</span>
                   <span className="prebook-sentence-word-en">{step.word.word_en}</span>
                 </div>
-                <button className="prebook-continue-btn" onClick={() => { haptic(); advance(); }}>
-                  Continue
-                  <Icon icon="solar:arrow-right-linear" />
-                </button>
+                <div className="prebook-action-row">
+                  <button
+                    className={`prebook-audio-btn ${isSpeaking ? 'playing' : ''}`}
+                    onClick={() => { haptic(); speakArabic(step.sentenceAr); }}
+                  >
+                    <Icon icon="solar:volume-loud-bold" />
+                  </button>
+                  <button className="prebook-continue-btn" onClick={() => { haptic(); advance(); }}>
+                    Continue
+                    <Icon icon="solar:arrow-right-linear" />
+                  </button>
+                </div>
               </div>
             )}
 
