@@ -172,8 +172,8 @@ const scenarioVocab = {
 
 export default function ScenarioChat({
   scenarioData,
-  scenarioCompleted,
   user,
+  markScenarioCompletedForToday,
   onComplete,
   onExit,
   supabase,
@@ -263,6 +263,9 @@ export default function ScenarioChat({
       const u = new SpeechSynthesisUtterance(text);
       u.lang = 'ar-SA';
       u.rate = 0.8;
+      const voices = window.speechSynthesis?.getVoices?.() || [];
+      const arabicVoice = voices.find(v => v.lang?.toLowerCase().startsWith('ar'));
+      if (arabicVoice) u.voice = arabicVoice;
       window.speechSynthesis.speak(u);
     } catch (e) { }
   };
@@ -1099,7 +1102,9 @@ export default function ScenarioChat({
                   <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: 'rgba(224,159,62,0.08)', border: '1px solid rgba(224,159,62,0.12)' }}>
                     <Icon icon="solar:book-bookmark-bold" className="text-xl" style={{ color: '#E09F3E' }} />
                   </div>
-                  <h3 className="text-base font-bold tracking-tight" style={{ fontFamily: "var(--font-heading)" }}>Useful Words</h3>
+                  <h3 className="text-base font-bold tracking-tight" style={{ fontFamily: "var(--font-heading)" }}>
+                    Useful Words <span className="text-xs font-medium text-muted-foreground/70">- (click to hear)</span>
+                  </h3>
                 </div>
                 <div className="grid grid-cols-3 gap-2.5">
                   {words.map((w, idx) => (
@@ -1107,7 +1112,7 @@ export default function ScenarioChat({
                       key={idx}
                       className="word-grid-item rounded-xl p-3 flex flex-col items-center justify-center text-center gap-1.5 active:scale-95 transition-all w-full"
                       style={{ animationDelay: `${idx * 0.05}s`, background: 'rgba(13,27,42,0.6)', border: '1px solid rgba(42,59,84,0.3)' }}
-                      onClick={() => { triggerHaptic(); speakAiAudio(w.ar); }}
+                      onClick={() => { triggerHaptic(); speakArabic(w.ar); }}
                     >
                       <span dir="rtl" className="text-base font-bold text-foreground" style={{ fontFamily: "var(--font-arabic)" }}>{w.ar}</span>
                       <span className="text-[10px] text-muted-foreground/50 font-medium tracking-wide">{w.en}</span>
@@ -1124,6 +1129,7 @@ export default function ScenarioChat({
               disabled={scenarioLoading}
               onClick={() => {
                 triggerHaptic();
+                markScenarioCompletedForToday?.();
                 setScenarioPhase("chat");
                 if (scenarioMessages.length > 0) {
                   setTimeout(() => speakAiAudio(scenarioMessages[0].text), 300);
@@ -1164,7 +1170,8 @@ export default function ScenarioChat({
             <div className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-6" onClick={() => setShowExitConfirm(false)}>
               <div className="bg-card rounded-3xl p-6 max-w-sm w-full border border-border shadow-2xl" onClick={(e) => e.stopPropagation()}>
                 <h3 className="font-heading text-lg font-bold mb-2">Leave conversation?</h3>
-                <p className="text-sm text-muted-foreground mb-6">Your progress in this scenario won't be saved.</p>
+                <p className="text-sm text-muted-foreground mb-1">Your progress in this scenario won't be saved.</p>
+                <p className="text-xs text-destructive/80 font-medium mb-5">You won't be able to redo this scenario again today.</p>
                 <div className="flex gap-3">
                   <button
                     className="flex-1 py-3 rounded-xl border border-border font-bold text-sm text-foreground bg-muted active:scale-[0.97] transition-all"

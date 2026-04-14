@@ -239,19 +239,28 @@ Respond with JSON:
   }
 
   if (exerciseType === "speak-check") {
-    return `Arabic tutor evaluating student response to: "${expectedText}"
+    return `Arabic tutor evaluating student response to the question: "${expectedText}"
 
 CRITICAL — SILENCE CHECK FIRST:
 If the audio contains NO clear Arabic speech (silence, noise, breathing, mumbling, or only English) → transcript MUST be "", score=0, pass=false. Do NOT fabricate or guess words. Do NOT give positive feedback for silence.
 
 If they DID speak Arabic:
 - Transcribe exactly what they said
-- Pass if they spoke Arabic and it's at least loosely relevant
-- Grammar mistakes are OK → still pass
-- Totally unrelated to question → fail
+- Evaluate whether their answer actually responds to the question asked
+- RELEVANCE IS CRITICAL: If the student said something totally unrelated to the question, they MUST fail. Do NOT say "good job" for an irrelevant answer. Be honest — tell them their answer didn't address the question and explain what a good answer would include.
+- Only pass if the answer is at least a reasonable attempt to answer the specific question
+- Grammar mistakes are OK if the answer is relevant → still pass
+- Minor topic drift is OK if they're in the right ballpark → pass with constructive feedback
+- Completely off-topic, random words, or answering a different question → fail (score 20-40), and explain what was expected
+
+FEEDBACK RULES:
+- Be HONEST. Never praise an irrelevant or wrong answer.
+- If they failed: explain what they said, why it doesn't answer the question, and give an example of what a good answer would be.
+- If they passed: acknowledge what they got right, then offer one improvement.
+- Never say "good job" or "great work" unless the answer genuinely deserves it.
 
 Respond with JSON:
-{"transcript":"<Arabic or empty if silent>","overallScore":<0-100>,"pass":<bool>,"feedback":"<2-3 sentences: what they said, what was good/bad, one teaching point>"}`;
+{"transcript":"<Arabic or empty if silent>","overallScore":<0-100>,"pass":<bool>,"feedback":"<2-3 sentences: honest assessment of relevance and quality, with constructive guidance>"}`;
   }
 
   if (exerciseType === "reading") {

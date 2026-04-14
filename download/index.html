@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta
+    name="description"
+    content="Download the official Android release of Ihya Arabic App from the Ihya Arabic website."
+  />
+  <link rel="icon" type="image/png" href="/clemency-icon.png" />
+  <link rel="apple-touch-icon" href="/clemency-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Cormorant+Garamond:wght@500;600;700&family=JetBrains+Mono:wght@500&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css" />
+  <title>Download Ihya Arabic App</title>
+</head>
+
+<body>
+  <div class="ambient ambient-left"></div>
+  <div class="ambient ambient-right"></div>
+
+  <div class="page-shell">
+    <header class="topbar">
+      <a class="brandmark" href="/">
+        <img src="/clemency-icon.png" alt="Ihya Arabic App icon" />
+        <span>Ihya Arabic App</span>
+      </a>
+      <p class="topbar-note">Official Android download page</p>
+    </header>
+
+    <main class="content-grid">
+      <section class="hero-card">
+        <div class="hero-copy">
+          <p class="eyebrow">Direct Download</p>
+          <h1>Install Ihya Arabic App from a branded, official page.</h1>
+          <p class="lead">
+            This page gives people a clean destination on your own domain first, then serves the Android APK from the
+            same site over HTTPS.
+          </p>
+
+          <div class="cta-row">
+            <a
+              id="downloadCta"
+              class="cta-button is-disabled"
+              aria-disabled="true"
+              role="button"
+            >
+              Preparing the Android release
+            </a>
+            <a class="secondary-button" href="/">
+              Open The App Site
+            </a>
+          </div>
+
+          <p class="microcopy">
+            Android may still show the normal sideload warning because the app is being installed outside Google Play.
+          </p>
+        </div>
+
+        <aside class="release-card">
+          <div class="release-card-header">
+            <img src="/logo.png" alt="Ihya Arabic App logo" />
+            <div>
+              <p class="release-label">Current release</p>
+              <h2>Ihya Arabic App</h2>
+            </div>
+          </div>
+
+          <dl class="release-meta">
+            <div>
+              <dt>Status</dt>
+              <dd id="releaseStatus">Awaiting APK upload</dd>
+            </div>
+            <div>
+              <dt>Version</dt>
+              <dd>1.0.0</dd>
+            </div>
+            <div>
+              <dt>Package</dt>
+              <dd>com.clemencyhouse.arabic</dd>
+            </div>
+            <div>
+              <dt>File name</dt>
+              <dd>ihya-arabic-app-release.apk</dd>
+            </div>
+            <div>
+              <dt>File size</dt>
+              <dd id="releaseSize">Will appear after upload</dd>
+            </div>
+            <div>
+              <dt>SHA-256</dt>
+              <dd id="releaseChecksum">Add a checksum file to display it here</dd>
+            </div>
+          </dl>
+        </aside>
+      </section>
+
+      <section class="trust-grid">
+        <article class="info-card">
+          <p class="card-kicker">Why this looks cleaner</p>
+          <h2>People land on your product page first.</h2>
+          <p>
+            A real website, app name, version, package ID, and file details feel materially more trustworthy than a
+            raw file-host link.
+          </p>
+        </article>
+
+        <article class="info-card">
+          <p class="card-kicker">Install flow</p>
+          <h2>Keep the path direct and simple.</h2>
+          <ol class="steps">
+            <li>Open this page on an Android phone.</li>
+            <li>Tap the download button.</li>
+            <li>Approve install from your browser if Android asks.</li>
+          </ol>
+        </article>
+
+        <article class="info-card">
+          <p class="card-kicker">Hosting path</p>
+          <h2>Upload one signed file to keep the URL stable.</h2>
+          <p class="mono-path">/downloads/ihya-arabic-app-release.apk</p>
+          <p class="info-note">
+            If you also upload <span class="mono-inline">ihya-arabic-app-release.sha256</span>, the checksum appears
+            automatically.
+          </p>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+
+</html>

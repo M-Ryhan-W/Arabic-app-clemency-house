@@ -491,7 +491,7 @@ button {
 }
 
 .confirm-title {
-  font-family: 'Playfair Display', serif;
+  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
   font-size: 1.3rem;
   font-weight: 700;
   color: var(--foreground);
@@ -5860,56 +5860,60 @@ button {
   }
 }
 
-/* Hint Overlay */
-.picture-hint-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 200;
-  padding: 1rem;
-  animation: fadeIn 0.25s ease;
+.picture-hint-panel-shell {
+  padding: 0 1.25rem;
+  padding-top: 0.25rem;
 }
 
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-  }
-
-  to {
-    opacity: 1;
-  }
-}
-
-.picture-hint-modal {
-  background: var(--card);
-  border-radius: 20px;
-  padding: 1.5rem;
-  max-width: 360px;
-  width: 100%;
-  max-height: 70vh;
+.picture-hint-panel {
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.08), rgba(245, 158, 11, 0.03));
+  border: 1px solid rgba(245, 158, 11, 0.16);
+  border-radius: 1.25rem;
+  padding: 0.9rem;
   display: flex;
   flex-direction: column;
-  animation: slideUp 0.3s ease;
-  border: 1px solid var(--border);
+  gap: 0.75rem;
 }
 
-.picture-hint-modal h3 {
-  text-align: center;
-  margin: 0 0 1rem 0;
-  font-size: 1.25rem;
+.picture-hint-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.picture-hint-panel-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
   color: var(--foreground);
 }
 
-.picture-hint-list {
+.picture-hint-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 999px;
+  border: 1px solid rgba(245, 158, 11, 0.18);
+  background: rgba(245, 158, 11, 0.08);
+  color: #f59e0b;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.picture-hint-close-btn:active {
+  transform: scale(0.94);
+}
+
+.picture-hint-panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-height: min(28vh, 220px);
   overflow-y: auto;
-  flex: 1;
-  margin-bottom: 1rem;
+  padding-right: 0.2rem;
 }
 
 .picture-hint-item {

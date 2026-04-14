@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">language-app</string>
-    <string name="title_activity_main">language-app</string>
+    <string name="app_name">Ihya Arabic App</string>
+    <string name="title_activity_main">Ihya Arabic App</string>
     <string name="package_name">com.clemencyhouse.arabic</string>
     <string name="custom_url_scheme">com.clemencyhouse.arabic</string>
 </resources>

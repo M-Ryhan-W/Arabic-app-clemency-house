@@ -593,17 +593,34 @@ function App() {
   const [authForgotMode, setAuthForgotMode] = useState(false);
   const [resetSent, setResetSent] = useState(false);
 
+  async function upsertTodayDailyStats(patch) {
+    if (!user) return { error: null };
+    const today = new Date().toISOString().slice(0, 10);
+    return supabase.from('user_daily_stats').upsert({
+      user_id: user.id,
+      date: today,
+      daily_goal_minutes: dailyGoalMinutes,
+      total_minutes_spent: Math.floor(dailySecondsSpent / 60),
+      ...patch,
+    }, { onConflict: 'user_id,date' });
+  }
+
+  async function markPictureCompletedForToday() {
+    setPictureCompleted(true);
+    const { error } = await upsertTodayDailyStats({ picture_completed: true });
+    if (error) console.error('Failed to mark picture complete:', JSON.stringify(error));
+  }
+
+  async function markScenarioCompletedForToday() {
+    setScenarioCompleted(true);
+    const { error } = await upsertTodayDailyStats({ scenario_completed: true });
+    if (error) console.error('Failed to mark scenario complete:', JSON.stringify(error));
+  }
+
   // Sync Daily Stats from Supabase on Login
   useEffect(() => {
     if (!user) return;
-    let savedPictureCompleted = false;
-    // Restore picture-of-the-day completion from localStorage
-    try {
-      const today = new Date().toISOString().slice(0, 10);
-      const saved = localStorage.getItem('picture_completed_date');
-      savedPictureCompleted = saved === today;
-      setPictureCompleted(savedPictureCompleted);
-    } catch {}
+    try { localStorage.removeItem('picture_completed_date'); } catch {}
     const fetchDailyStats = async () => {
       const today = new Date().toISOString().slice(0, 10);
       const { data, error } = await supabase.from('user_daily_stats')
@@ -615,23 +632,23 @@ function App() {
       if (data) {
         setDailyGoalMinutes(data.daily_goal_minutes);
         setDailySecondsSpent(data.total_minutes_spent * 60);
-        setScenarioCompleted(data.scenario_completed);
-        const pictureDone = Boolean(data.picture_completed) || savedPictureCompleted;
-        setPictureCompleted(pictureDone);
-        if (savedPictureCompleted && !data.picture_completed) {
-          supabase.from('user_daily_stats').update({ picture_completed: true })
-            .eq('user_id', user.id).eq('date', today)
-            .then(({ error: pictureSyncError }) => {
-              if (pictureSyncError) console.error('user_daily_stats picture sync failed:', JSON.stringify(pictureSyncError));
-            });
-        }
+        setScenarioCompleted(Boolean(data.scenario_completed));
+        setPictureCompleted(Boolean(data.picture_completed));
       } else if (error?.code === 'PGRST116') {
         // Not found, create it
-        await supabase.from('user_daily_stats').insert({ user_id: user.id, date: today, daily_goal_minutes: 20, picture_completed: savedPictureCompleted });
+        await supabase.from('user_daily_stats').insert({
+          user_id: user.id,
+          date: today,
+          daily_goal_minutes: 20,
+          picture_completed: false,
+          scenario_completed: false,
+        });
         setDailyGoalMinutes(20);
         setDailySecondsSpent(0);
         setScenarioCompleted(false);
-        setPictureCompleted(savedPictureCompleted);
+        setPictureCompleted(false);
+      } else if (error) {
+        console.error('Failed to load daily stats:', JSON.stringify(error));
       }
 
       // Fetch all historical dates for the Streaks page
@@ -793,8 +810,11 @@ function App() {
   const infoToastTimerRef = useRef(null);
   const showInfoToast = (message, icon = 'solar:info-circle-bold') => {
     if (infoToastTimerRef.current) clearTimeout(infoToastTimerRef.current);
-    setInfoToast({ message, icon });
-    infoToastTimerRef.current = setTimeout(() => setInfoToast(null), 2500);
+    setInfoToast(null);
+    requestAnimationFrame(() => {
+      setInfoToast({ message, icon });
+      infoToastTimerRef.current = setTimeout(() => setInfoToast(null), 2500);
+    });
   };
   const [pictureCompleted, setPictureCompleted] = useState(false);
   const [correctionInputMode, setCorrectionInputMode] = useState('text');
@@ -3084,6 +3104,11 @@ function App() {
     return `${m}:${s.toString().padStart(2, '0')}`;
   }
 
+  function stripLeadingSentenceNumber(text) {
+    if (!text) return '';
+    return text.replace(/^[\s\u200e\u200f]*[\d٠-٩]+\s*[\.\)\-:]\s*/, '').trim();
+  }
+
   function formatMinutesSpent(totalMinutes) {
     const mins = Math.max(0, Number(totalMinutes || 0));
     if (mins < 60) return `${mins}m`;
@@ -3473,6 +3498,14 @@ function App() {
     }
   }
 
+  function openPictureDescribePractice() {
+    if (!pictureCompleted) {
+      markPictureCompletedForToday();
+    }
+    setShowPictureHint(false);
+    setPicturePhase("picture");
+  }
+
   // Calculate vocab match percentage
   function calculateVocabMatch(transcript) {
     const normalizedTranscript = normalizeArabic(transcript);
@@ -3747,18 +3780,6 @@ function App() {
       setPictureFeedbackIndex(0);
       triggerHaptic();
 
-      // Mark picture of the day as completed for today
-      try {
-        const today = new Date().toISOString().slice(0, 10);
-        localStorage.setItem('picture_completed_date', today);
-        setPictureCompleted(true);
-        supabase.from('user_daily_stats').update({ picture_completed: true })
-          .eq('user_id', user.id).eq('date', today)
-          .then(({ error }) => {
-            if (error) console.error('user_daily_stats picture completion sync failed:', JSON.stringify(error));
-          });
-      } catch {}
-
       setPictureCheckingAnswer(false);
 
       // Store rating label (fair/good/excellent)
@@ -3957,7 +3978,11 @@ function App() {
                 setChallengeCompleted(prev => ({ ...prev, [stepIdx]: true }));
               } else {
                 triggerHaptic();
-                // Don't mark as completed — allow retry
+                // Speak challenges: one attempt only — mark completed on failure
+                // Correction challenges: allow retry
+                if (isSpeakChallenge && !isSilent) {
+                  setChallengeCompleted(prev => ({ ...prev, [stepIdx]: true }));
+                }
               }
             } else {
               // Network/edge error — be honest
@@ -5364,8 +5389,8 @@ function App() {
                     )}
                     {/* Decorative corner accent */}
                     <div className="absolute top-0 right-0 w-32 h-32 opacity-[0.07]" style={{ background: 'radial-gradient(circle at top right, #E09F3E, transparent 70%)' }} />
-                    <div className="relative z-10 p-6 flex flex-col h-full min-h-[200px] items-center justify-center text-center">
-                      <h3 className="text-2xl font-heading font-bold mb-16 tracking-tight max-w-[26rem]">{nextLesson.title}</h3>
+                    <div className="relative z-10 p-6 flex flex-col h-full items-center justify-center text-center gap-6">
+                      <h3 className="text-2xl font-heading font-bold tracking-tight max-w-[26rem]">{nextLesson.title}</h3>
                       <button
                         className="w-full max-w-[22rem] font-bold py-4 rounded-2xl flex items-center justify-center active:scale-[0.97] transition-all text-sm tracking-wide relative overflow-hidden"
                         style={{ background: 'linear-gradient(135deg, #E09F3E, #D4922F)', color: '#0D1B2A', boxShadow: '0 8px 32px rgba(224,159,62,0.2), inset 0 1px 0 rgba(255,255,255,0.12)' }}
@@ -5548,7 +5573,7 @@ function App() {
                               <div className="min-w-0">
                                 <h3 className="font-heading text-xl font-bold">{stageTitle}</h3>
                                 <p className="text-sm text-muted-foreground mt-2 leading-relaxed">
-                                  Learn the basics with essential vocabulary and sentence building
+                                  Learn the basics with essential vocabulary and sentence building. Recommended for absolute beginners or as a refresher before diving into the core stages
                                 </p>
                               </div>
                               {isCompleted && (
@@ -6212,6 +6237,8 @@ function App() {
                                 const isHidden = activeExerciseIndex !== null && !isSelected;
                                 const promptKey = isReadAloud ? item.arabic_text : item.english_text;
                                 const isCompleted = completedPrompts.has(promptKey);
+                                const displayArabic = stripLeadingSentenceNumber(item.arabic_text);
+                                const displayEnglish = stripLeadingSentenceNumber(item.english_text);
                                 return (
                                   <div
                                     key={item.id}
@@ -6227,25 +6254,35 @@ function App() {
                                       setRecordedAudio(null);
                                     }}
                                   >
-                                    <div className="flex items-center gap-4">
-                                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${isCompleted ? 'bg-green-500/15' : `bg-${accentColor}/15`}`}>
-                                        {isCompleted ? (
-                                          <Icon icon="solar:check-circle-bold" className="text-lg text-green-500" />
-                                        ) : (
-                                          <span className={`text-sm font-bold text-${accentColor}`}>{idx + 1}</span>
-                                        )}
-                                      </div>
-                                      <div className="flex-1 min-w-0">
+                                    <div className={isSelected ? 'text-center space-y-3' : 'flex items-center gap-4'}>
+                                      {!isSelected && (
+                                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${isCompleted ? 'bg-green-500/15' : `bg-${accentColor}/15`}`}>
+                                          {isCompleted ? (
+                                            <Icon icon="solar:check-circle-bold" className="text-lg text-green-500" />
+                                          ) : (
+                                            <span className={`text-sm font-bold text-${accentColor}`}>{idx + 1}</span>
+                                          )}
+                                        </div>
+                                      )}
+                                      <div className={`min-w-0 ${isSelected ? 'space-y-2' : 'flex-1'}`}>
                                         {isReadAloud ? (
                                           <>
-                                            <p className={`font-arabic leading-loose font-semibold ${isCompleted ? 'text-muted-foreground' : 'text-white'} ${isSelected ? 'text-3xl' : 'text-2xl'}`} dir="rtl">{item.arabic_text}</p>
-                                            {item.english_text && <p className="text-sm text-muted-foreground mt-1">{item.english_text}</p>}
+                                            <p
+                                              className={`font-arabic font-semibold ${isCompleted ? 'text-muted-foreground' : 'text-white'} ${isSelected ? 'text-3xl leading-loose' : 'text-2xl leading-loose'}`}
+                                              dir="rtl"
+                                            >
+                                              {isSelected ? displayArabic : item.arabic_text}
+                                            </p>
+                                            {item.english_text && (
+                                              <p className={`${isSelected ? 'text-sm text-muted-foreground max-w-md mx-auto leading-relaxed' : 'text-sm text-muted-foreground mt-1'}`}>
+                                                {isSelected ? displayEnglish : item.english_text}
+                                              </p>
+                                            )}
                                           </>
                                         ) : (
-                                          <>
-                                            <p className={`leading-relaxed ${isCompleted ? 'text-muted-foreground' : 'text-foreground'} ${isSelected ? 'text-lg font-bold' : 'text-sm'}`}>{item.english_text}</p>
-                                            {isSelected && item.arabic_text && <p className="text-sm font-arabic text-muted-foreground mt-1" dir="rtl">{item.arabic_text}</p>}
-                                          </>
+                                          <p className={`leading-relaxed ${isCompleted ? 'text-muted-foreground' : 'text-foreground'} ${isSelected ? 'text-xl font-bold max-w-lg mx-auto' : 'text-sm'}`}>
+                                            {isSelected ? displayEnglish : item.english_text}
+                                          </p>
                                         )}
                                         {isCompleted && !isSelected && <p className="text-[10px] text-green-500 font-bold mt-1">Already submitted</p>}
                                       </div>
@@ -6265,8 +6302,14 @@ function App() {
                                     {/* Show daily question text inline */}
                                     {isDailyQ && activeItem && (
                                       <div className="bg-card border border-primary/30 rounded-2xl p-5">
-                                        <p className="text-foreground text-lg font-bold leading-relaxed">{activeItem.question_en}</p>
-                                        {activeItem.question_ar && <p className="text-sm font-arabic text-muted-foreground mt-2" dir="rtl">{activeItem.question_ar}</p>}
+                                        {activeItem.question_ar && (
+                                          <p className="text-2xl font-arabic font-semibold text-foreground leading-loose text-center" dir="rtl">
+                                            {activeItem.question_ar}
+                                          </p>
+                                        )}
+                                        <p className="text-sm text-muted-foreground leading-relaxed text-center mt-2">
+                                          {activeItem.question_en}
+                                        </p>
                                       </div>
                                     )}
 
@@ -7629,13 +7672,9 @@ function App() {
       <div className="scenario-enter">
         <ScenarioChat
           scenarioData={scenarioData}
-          scenarioCompleted={scenarioCompleted}
           user={user}
+          markScenarioCompletedForToday={markScenarioCompletedForToday}
           onComplete={() => {
-            setScenarioCompleted(true);
-            const today = new Date().toISOString().slice(0, 10);
-            supabase.from('user_daily_stats').update({ scenario_completed: true })
-              .eq('user_id', user.id).eq('date', today);
             triggerHeavyHaptic();
           }}
           onExit={() => setScenarioPhase(false)}
@@ -7654,7 +7693,7 @@ function App() {
     // Loading state
     if (loadingWotd) {
       return (
-        <div className="min-h-screen bg-background text-foreground font-sans flex items-center justify-center">
+        <div className="h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex items-center justify-center">
           <div className="flex flex-col items-center gap-4">
             <Leapfrog size="50" speed="2.5" color="var(--primary)" />
             <p className="text-muted-foreground text-sm font-medium">Loading today's word...</p>
@@ -7666,7 +7705,7 @@ function App() {
     // No word found
     if (!currentWotd) {
       return (
-        <div className="min-h-screen bg-background text-foreground font-sans flex flex-col items-center justify-center text-center px-8">
+        <div className="h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col items-center justify-center text-center px-8">
           <Icon icon="solar:sad-circle-bold" className="text-6xl text-muted-foreground mb-4" />
           <h2 className="font-heading text-xl font-bold mb-2">No Word Available</h2>
           <p className="text-sm text-muted-foreground mb-8">Check back soon for today's phrase!</p>
@@ -7683,7 +7722,7 @@ function App() {
     // PHASE: INTRO
     if (wotdPhase === "intro") {
       return (
-        <div className={`min-h-screen bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <div className={`h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Back button */}
           <header className="px-6 pt-12 pb-6">
             <button
@@ -7702,12 +7741,13 @@ function App() {
             <p className="text-muted-foreground text-sm">Let's take a look at today's phrase</p>
           </main>
 
-          <footer className="px-6" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 2rem)' }}>
+          <footer className="px-6 flex-shrink-0" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 2rem)' }}>
             <button
-              className="btn-primary" style={{ width: "100%" }}
+              className="prebook-continue-btn" style={{ width: "100%" }}
               onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setWotdPhase("word"); }}
             >
               Let's Go!
+              <Icon icon="solar:arrow-right-linear" />
             </button>
           </footer>
         </div>
@@ -7717,9 +7757,9 @@ function App() {
     // PHASE: WORD DISPLAY
     if (wotdPhase === "word") {
       return (
-        <div className={`min-h-screen bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <div className={`h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Header */}
-          <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
+          <header className="px-6 pt-12 pb-4 flex items-center justify-between bg-background">
             <button
               className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center"
               onClick={() => { triggerHaptic(); setTransitionDirection("back"); setWotdPhase("intro"); }}
@@ -7732,19 +7772,12 @@ function App() {
             <div className="w-10" />
           </header>
 
-          <main className="flex-1 px-6 py-6 flex flex-col justify-center space-y-6">
+          <main className="flex-1 px-6 py-6 flex flex-col justify-center space-y-6 min-h-0">
             {/* Arabic Card */}
             <div>
               <p className="text-xs text-muted-foreground font-bold uppercase tracking-wider mb-2 text-right">عربي:</p>
               <div className="bg-card rounded-3xl p-8 border border-border/50 shadow-md" dir="rtl">
                 <p className="text-3xl font-arabic leading-relaxed text-center">{currentWotd.arabic_text}</p>
-                <button
-                  className="mt-4 mx-auto flex items-center gap-2 bg-primary/10 text-primary px-4 py-2 rounded-full text-xs font-bold uppercase tracking-wider border border-primary/20 active:scale-95 transition-all"
-                  onClick={(e) => { e.stopPropagation(); speakAiAudio(currentWotd.arabic_text); }}
-                >
-                  <Icon icon="solar:volume-loud-bold" className="text-base" />
-                  Listen
-                </button>
               </div>
             </div>
 
@@ -7757,21 +7790,30 @@ function App() {
             </div>
           </main>
 
-          <footer className="px-6 pt-4" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 2rem)' }}>
-            <button
-              className="btn-primary" style={{ width: "100%" }}
-              onClick={() => {
-                triggerHaptic();
-                setTransitionDirection("forward");
-                if (wotdExamples.length > 0) {
-                  setWotdPhase("examples");
-                } else {
-                  setWotdPhase("complete");
-                }
-              }}
-            >
-              {wotdExamples.length > 0 ? "See Examples" : "Continue"}
-            </button>
+          <footer className="px-6 pt-4 flex-shrink-0" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 2rem)' }}>
+            <div className="prebook-action-row">
+              <button
+                className="prebook-audio-btn"
+                onClick={() => { triggerHaptic(); speakAiAudio(currentWotd.arabic_text); }}
+              >
+                <Icon icon="solar:volume-loud-bold" />
+              </button>
+              <button
+                className="prebook-continue-btn"
+                onClick={() => {
+                  triggerHaptic();
+                  setTransitionDirection("forward");
+                  if (wotdExamples.length > 0) {
+                    setWotdPhase("examples");
+                  } else {
+                    setWotdPhase("complete");
+                  }
+                }}
+              >
+                {wotdExamples.length > 0 ? "See Examples" : "Continue"}
+                <Icon icon="solar:arrow-right-linear" />
+              </button>
+            </div>
           </footer>
         </div>
       );
@@ -7782,9 +7824,9 @@ function App() {
       const currentExample = wotdExamples[wotdExampleIndex];
 
       return (
-        <div className={`min-h-screen bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <div className={`h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Header */}
-          <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
+          <header className="px-6 pt-12 pb-4 flex items-center justify-between bg-background">
             <button
               className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center"
               onClick={() => { triggerHaptic(); setTransitionDirection("back"); setWotdPhase("word"); }}
@@ -7797,19 +7839,12 @@ function App() {
             <div className="w-10" />
           </header>
 
-          <main key={wotdExampleIndex} className="flex-1 px-6 py-6 flex flex-col justify-center space-y-6 swipe-in">
+          <main key={wotdExampleIndex} className="flex-1 px-6 py-6 flex flex-col justify-center space-y-6 swipe-in min-h-0">
             {/* Arabic */}
             <div>
               <p className="text-xs text-muted-foreground font-bold uppercase tracking-wider mb-2 text-right">عربي:</p>
               <div className="bg-card rounded-3xl p-6 border border-border/50 shadow-md" dir="rtl">
                 <p className="text-2xl font-arabic leading-relaxed text-center">{currentExample.example_arabic}</p>
-                <button
-                  className="mt-4 mx-auto flex items-center gap-2 bg-primary/10 text-primary px-4 py-2 rounded-full text-xs font-bold uppercase tracking-wider border border-primary/20 active:scale-95 transition-all"
-                  onClick={(e) => { e.stopPropagation(); speakAiAudio(currentExample.example_arabic); }}
-                >
-                  <Icon icon="solar:volume-loud-bold" className="text-base" />
-                  Listen
-                </button>
               </div>
             </div>
 
@@ -7832,17 +7867,16 @@ function App() {
             )}
           </main>
 
-          <footer className="px-6 pt-4" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 2rem)' }}>
-            <div className="flex items-center gap-3">
+          <footer className="px-6 pt-4 flex-shrink-0" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 2rem)' }}>
+            <div className="prebook-action-row">
               <button
-                className="w-14 h-14 rounded-2xl bg-card border border-border/50 flex items-center justify-center active:scale-[0.95] transition-all disabled:opacity-30"
-                onClick={() => { if (wotdExampleIndex > 0) { triggerHaptic(); setWotdExampleIndex(i => i - 1); } }}
-                disabled={wotdExampleIndex === 0}
+                className="prebook-audio-btn"
+                onClick={() => { triggerHaptic(); speakAiAudio(currentExample.example_arabic); }}
               >
-                <MdArrowBackIosNew className="text-foreground" />
+                <Icon icon="solar:volume-loud-bold" />
               </button>
               <button
-                className="btn-primary" style={{ flex: 1 }}
+                className="prebook-continue-btn"
                 onClick={() => {
                   triggerHaptic();
                   setTransitionDirection("forward");
@@ -7853,14 +7887,8 @@ function App() {
                   }
                 }}
               >
-                {wotdExampleIndex === wotdExamples.length - 1 ? "FINISH" : "CONTINUE"}
-              </button>
-              <button
-                className="w-12 h-12 rounded-2xl bg-card border border-border/50 flex items-center justify-center active:scale-[0.95] transition-all disabled:opacity-30"
-                onClick={() => { if (wotdExampleIndex < wotdExamples.length - 1) { triggerHaptic(); setWotdExampleIndex(i => i + 1); } }}
-                disabled={wotdExampleIndex === wotdExamples.length - 1}
-              >
-                <MdArrowForwardIos className="text-foreground" />
+                {wotdExampleIndex === wotdExamples.length - 1 ? "Finish" : "Continue"}
+                <Icon icon="solar:arrow-right-linear" />
               </button>
             </div>
           </footer>
@@ -7891,7 +7919,7 @@ function App() {
       };
 
       return (
-        <div className={`min-h-screen bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <div className={`h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Decorative top gradient */}
           <div className="relative w-full pt-16 pb-8 flex flex-col items-center">
             <div className="absolute inset-0 bg-gradient-to-b from-primary/10 via-primary/5 to-transparent" />
@@ -7904,7 +7932,7 @@ function App() {
             </div>
           </div>
 
-          <main className="flex-1 px-6 flex flex-col items-center justify-center">
+          <main className="flex-1 px-6 flex flex-col items-center justify-center min-h-0">
             {/* Word card */}
             <div className="bg-card rounded-3xl p-8 border border-border/50 shadow-lg w-full max-w-sm mb-6 relative overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-primary via-chart-3 to-secondary" />
@@ -7914,13 +7942,6 @@ function App() {
               {currentWotd.transliteration && (
                 <p className="text-sm text-primary/60 text-center mt-2 italic">{currentWotd.transliteration}</p>
               )}
-              <button
-                className="mt-5 mx-auto flex items-center gap-2 bg-primary/10 text-primary px-4 py-2 rounded-full text-xs font-bold border border-primary/20 active:scale-95 transition-all"
-                onClick={(e) => { e.stopPropagation(); speakAiAudio(currentWotd.arabic_text); }}
-              >
-                <Icon icon="solar:volume-loud-bold" className="text-base" />
-                Listen
-              </button>
             </div>
 
             {/* Stats row */}
@@ -7939,19 +7960,27 @@ function App() {
             )}
           </main>
 
-          <footer className="px-6 space-y-3" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 1.5rem)' }}>
+          <footer className="px-6 space-y-3 flex-shrink-0" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 1.5rem)' }}>
+            <div className="prebook-action-row">
+              <button
+                className="prebook-audio-btn"
+                onClick={() => { triggerHaptic(); speakAiAudio(currentWotd.arabic_text); }}
+              >
+                <Icon icon="solar:volume-loud-bold" />
+              </button>
+              <button
+                className="prebook-continue-btn"
+                onClick={handleShare}
+              >
+                <Icon icon="solar:share-bold" />
+                Share
+              </button>
+            </div>
             <button
-              className="w-full bg-card border border-border/50 text-foreground font-bold py-4 rounded-2xl flex items-center justify-center gap-2 active:scale-[0.98] transition-all"
-              onClick={handleShare}
-            >
-              <Icon icon="solar:share-bold" className="text-lg" />
-              Share
-            </button>
-            <button
-              className="w-full bg-primary text-primary-foreground font-bold py-4 rounded-2xl flex items-center justify-center gap-2 shadow-[0_4px_16px_rgba(224,159,62,0.3)] active:scale-[0.98] transition-all"
+              className="prebook-continue-btn" style={{ width: "100%" }}
               onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); resetWotdFlow(); }}
             >
-              <Icon icon="solar:home-2-bold" className="text-lg" />
+              <Icon icon="solar:home-2-bold" />
               Return Home
             </button>
           </footer>
@@ -8044,7 +8073,7 @@ function App() {
               <p className="muted">No vocabulary added yet for this lesson.</p>
               <button
                 className="btn-primary"
-                onClick={() => { triggerHaptic(); setPicturePhase("picture"); }}
+                onClick={() => { triggerHaptic(); openPictureDescribePractice(); }}
               >
                 Continue to Picture
               </button>
@@ -8094,7 +8123,7 @@ function App() {
                     onClick={() => {
                       triggerHaptic();
                       if (pictureVocabIndex === pictureVocab.length - 1) {
-                        setPicturePhase("picture");
+                        openPictureDescribePractice();
                       } else {
                         setPictureVocabIndex(i => i + 1);
                       }
@@ -8126,7 +8155,7 @@ function App() {
           <header className="picture-describe-header">
             <button
               className="picture-back-btn"
-              onClick={() => { triggerHaptic(); setPicturePhase("vocab"); setPictureVocabIndex(0); }}
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(true); }}
             >
               <MdArrowBackIosNew style={{ fontSize: '1.1rem' }} />
             </button>
@@ -8163,6 +8192,32 @@ function App() {
                         background: pictureRecordingTime >= PICTURE_MAX_RECORD_SECONDS - 4 ? '#ef4444' : pictureRecordingTime >= PICTURE_MAX_RECORD_SECONDS - 8 ? '#eab308' : '#ef4444',
                       }}
                     />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {showPictureHint && !pictureCheckingAnswer && !pictureRecording && (
+              <div className="picture-hint-panel-shell">
+                <div className="picture-hint-panel">
+                  <div className="picture-hint-panel-header">
+                    <h3>Vocabulary Hint</h3>
+                    <button
+                      type="button"
+                      className="picture-hint-close-btn"
+                      onClick={() => { triggerHaptic(); setShowPictureHint(false); }}
+                    >
+                      <Icon icon="solar:close-circle-bold" className="text-xl" />
+                    </button>
+                  </div>
+                  <div className="picture-hint-panel-list">
+                    {pictureVocab.map((item, idx) => (
+                      <div key={idx} className="picture-hint-item">
+                        <span className="hint-arabic">{item.arabic_text || item.arabic}</span>
+                        <span className="hint-divider">-</span>
+                        <span className="hint-english">{item.english_text || item.english}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               </div>
@@ -8211,7 +8266,7 @@ function App() {
               ) : (
                 <div className="flex items-center justify-center gap-12">
                   {/* Hint Button */}
-                  {!pictureRecording && (
+                  {!pictureRecording && pictureVocab.length > 0 && (
                     <button
                       onClick={() => { triggerHaptic(); setShowPictureHint(!showPictureHint); }}
                       className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-colors active:scale-95 border ${
@@ -8254,26 +8309,6 @@ function App() {
             <p style={{ color: '#dc2626', textAlign: 'center', fontSize: '0.85rem', margin: '0 1rem 0.5rem', padding: '0.5rem 1rem', background: 'rgba(220,38,38,0.08)', borderRadius: '8px' }}>
               {speechError}
             </p>
-          )}
-          {/* Hint Overlay */}
-          {showPictureHint && (
-            <div className="picture-hint-overlay" onClick={() => setShowPictureHint(false)}>
-              <div className="picture-hint-modal" onClick={(e) => e.stopPropagation()}>
-                <h3>💡 Vocabulary Hint</h3>
-                <div className="picture-hint-list">
-                  {pictureVocab.map((item, idx) => (
-                    <div key={idx} className="picture-hint-item">
-                      <span className="hint-arabic">{item.arabic_text || item.arabic}</span>
-                      <span className="hint-divider">—</span>
-                      <span className="hint-english">{item.english_text || item.english}</span>
-                    </div>
-                  ))}
-                </div>
-                <button className="btn-primary" onClick={() => setShowPictureHint(false)}>
-                  Got it!
-                </button>
-              </div>
-            </div>
           )}
         </div>
       );
@@ -8589,6 +8624,20 @@ function App() {
                         </div>
                       </div>
                     )}
+                    {/* Failed result (one attempt only) */}
+                    {challengeCompleted[idx] && challengeResult[idx] && !challengeResult[idx].good && (
+                      <div style={{ textAlign: 'center', padding: '0.5rem', borderRadius: '0.75rem', background: 'rgba(239,68,68,0.08)' }}>
+                        <div style={{ color: '#ef4444', fontSize: '0.85rem', fontWeight: 600 }}>
+                          {challengeResult[idx].feedback}
+                        </div>
+                      </div>
+                    )}
+                    {/* Skipped (no result) */}
+                    {challengeCompleted[idx] && !challengeResult[idx] && (
+                      <div style={{ textAlign: 'center', padding: '0.5rem', borderRadius: '0.75rem', background: 'rgba(156,163,175,0.08)' }}>
+                        <div style={{ color: 'var(--muted-foreground)', fontSize: '0.83rem' }}>Skipped</div>
+                      </div>
+                    )}
                     {challengeChecking && idx === pictureFeedbackIndex && (
                       <div style={{ textAlign: 'center', color: 'var(--muted-foreground)', fontSize: '0.8rem' }}>
                         <span style={{ animation: 'pulse 1s ease-in-out infinite' }}>Checking your response...</span>
@@ -8694,39 +8743,15 @@ function App() {
                     </div>
                   )}
                 </div>
-                <div style={{ display: 'flex', gap: '0.75rem' }}>
-                  <button
-                    style={{
-                      flex: 1, padding: '0.9rem', borderRadius: '1rem', background: 'var(--muted)', border: '1px solid var(--border)',
-                      color: 'var(--foreground)', fontWeight: 700, fontSize: '0.88rem', cursor: 'pointer'
-                    }}
-                    onClick={() => {
-                      triggerHaptic();
-                      setPicturePhase("picture");
-                      setPictureTranscript("");
-                      setPictureMatchPercent(0);
-                      setPictureMatchedWords([]);
-                      setPictureMissedWords([]);
-                      setPictureFeedbackSteps([]);
-                      setPictureFeedbackIndex(0);
-                      setPictureScore(null);
-                      setPictureVocabStats(null);
-                      setChallengeCompleted({});
-                      setChallengeResult({});
-                    }}
-                  >
-                    🔄 Try Again
-                  </button>
-                  <button
-                    style={{
-                      flex: 1, padding: '0.9rem', borderRadius: '1rem', background: 'var(--primary)', border: 'none',
-                      color: 'white', fontWeight: 700, fontSize: '0.88rem', cursor: 'pointer'
-                    }}
-                    onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(true); }}
-                  >
-                    ✓ Done
-                  </button>
-                </div>
+                <button
+                  style={{
+                    width: '100%', padding: '0.9rem', borderRadius: '1rem', background: 'var(--primary)', border: 'none',
+                    color: 'white', fontWeight: 700, fontSize: '0.88rem', cursor: 'pointer'
+                  }}
+                  onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(true); }}
+                >
+                  ✓ Done
+                </button>
               </>
             )}
           </div>
