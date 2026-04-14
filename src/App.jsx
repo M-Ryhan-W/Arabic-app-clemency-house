@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useMemo } from "react";
 import ScenarioChat from "./ScenarioChat";
+import PreBookLesson from "./PreBookLesson";
 import { supabase } from "./supabaseClient";
 import { Leapfrog } from 'ldrs/react';
 import 'ldrs/react/Leapfrog.css';
@@ -8,7 +9,7 @@ import { Capacitor } from '@capacitor/core';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import { DotLottieReact } from '@lottiefiles/dotlottie-react';
-import { MdArrowBackIosNew } from "react-icons/md";
+import { MdArrowBackIosNew, MdArrowForwardIos } from "react-icons/md";
 import { Icon } from "@iconify/react";
 import { motion, AnimatePresence } from 'motion/react';
 import { TextToSpeech } from '@capacitor-community/text-to-speech';
@@ -133,12 +134,18 @@ const playRewardSound = () => {
 };
 
 const MAX_AUDIO_BASE64_LENGTH = 5 * 1024 * 1024; // ~3.75MB raw audio, reasonable max for speech
+const COMMUNITY_RETENTION_DAYS = 7;
 
 // ===== HAPTIC + SOUND HELPERS =====
 
 // Light tap (buttons, navigation)
 const triggerHaptic = async () => {
   playClickSound();
+  try { await Haptics.impact({ style: ImpactStyle.Light }); } catch (e) { }
+};
+
+// Haptic only — no audio click (used before TTS to avoid audio session conflict)
+const triggerHapticOnly = async () => {
   try { await Haptics.impact({ style: ImpactStyle.Light }); } catch (e) { }
 };
 
@@ -339,7 +346,109 @@ if (typeof navigator !== 'undefined') {
 
 
 
+// Compare two semver strings: returns -1 if a < b, 0 if equal, 1 if a > b
+function compareSemver(a, b) {
+  const pa = (a || '0.0.0').split('.').map(Number);
+  const pb = (b || '0.0.0').split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const na = pa[i] || 0, nb = pb[i] || 0;
+    if (na < nb) return -1;
+    if (na > nb) return 1;
+  }
+  return 0;
+}
+
 function App() {
+  // ============ FORCE UPDATE STATE ============
+  const [forceUpdate, setForceUpdate] = useState(null); // null = not checked yet / ok, { update_url } = blocked
+
+  useEffect(() => {
+    const checkVersion = async () => {
+      // Only check on native (Android) — web uses a different strategy
+      if (!Capacitor.isNativePlatform()) return;
+
+      try {
+        const info = await CapacitorApp.getInfo(); // { version: "1.0.0", build: "1", ... }
+        const localVersion = info.version;
+
+        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://efpanaidmaztxszshlmp.supabase.co';
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+
+        const res = await fetch(`${supabaseUrl}/functions/v1/app-metadata`, {
+          signal: controller.signal,
+          headers: { 'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY || '' },
+        });
+        clearTimeout(timeout);
+
+        if (!res.ok) return; // If endpoint fails, let the app proceed
+
+        const metadata = await res.json();
+        const minVersion = metadata.android?.minimum_required_version;
+        const updateUrl = metadata.android?.update_url;
+
+        if (minVersion && compareSemver(localVersion, minVersion) < 0) {
+          setForceUpdate({ update_url: updateUrl });
+          // Cache for offline fallback
+          localStorage.setItem('force_update_metadata', JSON.stringify(metadata.android));
+        } else {
+          localStorage.removeItem('force_update_metadata');
+        }
+      } catch {
+        // Network failure — check cached metadata as fallback
+        try {
+          const cached = JSON.parse(localStorage.getItem('force_update_metadata'));
+          if (cached) {
+            const info = await CapacitorApp.getInfo();
+            if (compareSemver(info.version, cached.minimum_required_version) < 0) {
+              setForceUpdate({ update_url: cached.update_url });
+            }
+          }
+        } catch {}
+      }
+    };
+
+    checkVersion();
+  }, []);
+
+  // ============ WEB STALENESS CHECK ============
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) return;
+    if (typeof __APP_BUILD_TIMESTAMP__ === 'undefined') return;
+
+    const checkWebFreshness = async () => {
+      try {
+        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://efpanaidmaztxszshlmp.supabase.co';
+        const res = await fetch(`${supabaseUrl}/functions/v1/app-metadata`, {
+          headers: { 'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY || '' },
+        });
+        if (!res.ok) return;
+        const metadata = await res.json();
+        const serverBuild = metadata.web?.current_build;
+        if (serverBuild && new Date(serverBuild) > new Date(__APP_BUILD_TIMESTAMP__)) {
+          if (metadata.web?.force_reload) {
+            window.location.reload();
+          }
+          // For non-forced updates, could show a banner — for now, just reload on force
+        }
+      } catch {}
+    };
+
+    // Check when tab regains focus
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') checkWebFreshness();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    // Also check every 10 minutes
+    const interval = setInterval(checkWebFreshness, 10 * 60 * 1000);
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      clearInterval(interval);
+    };
+  }, []);
+
   // ============ SPLASH SCREEN STATE ============
   const [showSplash, setShowSplash] = useState(true);
   const [activeTab, setActiveTab] = useState("home"); // "home" | "courses" | "speaking" | "profile"
@@ -354,6 +463,9 @@ function App() {
   const [loadingLessons, setLoadingLessons] = useState(false);
 
   const [activeLesson, setActiveLesson] = useState(null);
+  const [prebookItems, setPrebookItems] = useState([]);
+  const [loadingPrebookItems, setLoadingPrebookItems] = useState(false);
+  const [prebookLoadError, setPrebookLoadError] = useState('');
 
   // NEW: Dedicated Streaks Page state
   const [showStreaksPage, setShowStreaksPage] = useState(false);
@@ -435,6 +547,40 @@ function App() {
   const [hideInstruction, setHideInstruction] = useState(false);
   const [isSlowSpeed, setIsSlowSpeed] = useState(false);
   const scenarioTtsCache = useRef({});
+  // Persistent TTS cache (localStorage, LRU ~40 entries).
+  // Survives app restarts so previously-played audio plays instantly
+  // with zero network.
+  const TTS_PERSIST_KEY = 'tts_cache_v1';
+  const TTS_PERSIST_MAX = 40;
+  const loadPersistTts = () => {
+    try {
+      const raw = localStorage.getItem(TTS_PERSIST_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  };
+  const getPersistTts = (text) => {
+    const c = loadPersistTts();
+    const entry = c[text];
+    if (!entry) return null;
+    entry.t = Date.now();
+    try { localStorage.setItem(TTS_PERSIST_KEY, JSON.stringify(c)); } catch {}
+    return entry.a;
+  };
+  const setPersistTts = (text, audioBase64) => {
+    try {
+      const c = loadPersistTts();
+      c[text] = { a: audioBase64, t: Date.now() };
+      const keys = Object.keys(c);
+      if (keys.length > TTS_PERSIST_MAX) {
+        keys.sort((k1, k2) => c[k1].t - c[k2].t);
+        keys.slice(0, keys.length - TTS_PERSIST_MAX).forEach(k => delete c[k]);
+      }
+      localStorage.setItem(TTS_PERSIST_KEY, JSON.stringify(c));
+    } catch {
+      // Quota exceeded — reset with just this one entry
+      try { localStorage.setItem(TTS_PERSIST_KEY, JSON.stringify({ [text]: { a: audioBase64, t: Date.now() } })); } catch {}
+    }
+  };
   const aiHelperCache = useRef(new Map()); // Map<blockId, { translation?: string, vocab?: string }>
 
   // AUTH STATE
@@ -443,10 +589,21 @@ function App() {
   const [authPassword, setAuthPassword] = useState("");
   const [authMode, setAuthMode] = useState("signin"); // "signin" | "signup"
   const [authError, setAuthError] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [authForgotMode, setAuthForgotMode] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
 
   // Sync Daily Stats from Supabase on Login
   useEffect(() => {
     if (!user) return;
+    let savedPictureCompleted = false;
+    // Restore picture-of-the-day completion from localStorage
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const saved = localStorage.getItem('picture_completed_date');
+      savedPictureCompleted = saved === today;
+      setPictureCompleted(savedPictureCompleted);
+    } catch {}
     const fetchDailyStats = async () => {
       const today = new Date().toISOString().slice(0, 10);
       const { data, error } = await supabase.from('user_daily_stats')
@@ -459,12 +616,22 @@ function App() {
         setDailyGoalMinutes(data.daily_goal_minutes);
         setDailySecondsSpent(data.total_minutes_spent * 60);
         setScenarioCompleted(data.scenario_completed);
+        const pictureDone = Boolean(data.picture_completed) || savedPictureCompleted;
+        setPictureCompleted(pictureDone);
+        if (savedPictureCompleted && !data.picture_completed) {
+          supabase.from('user_daily_stats').update({ picture_completed: true })
+            .eq('user_id', user.id).eq('date', today)
+            .then(({ error: pictureSyncError }) => {
+              if (pictureSyncError) console.error('user_daily_stats picture sync failed:', JSON.stringify(pictureSyncError));
+            });
+        }
       } else if (error?.code === 'PGRST116') {
         // Not found, create it
-        await supabase.from('user_daily_stats').insert({ user_id: user.id, date: today, daily_goal_minutes: 20 });
+        await supabase.from('user_daily_stats').insert({ user_id: user.id, date: today, daily_goal_minutes: 20, picture_completed: savedPictureCompleted });
         setDailyGoalMinutes(20);
         setDailySecondsSpent(0);
         setScenarioCompleted(false);
+        setPictureCompleted(savedPictureCompleted);
       }
 
       // Fetch all historical dates for the Streaks page
@@ -490,7 +657,7 @@ function App() {
           const today = new Date().toISOString().slice(0, 10);
           supabase.from('user_daily_stats').update({ total_minutes_spent: mins })
             .eq('user_id', user.id).eq('date', today)
-            .then(({ error }) => { if (error) console.error(error) });
+            .then(({ error }) => { if (error) console.error('user_daily_stats sync failed:', JSON.stringify(error)); });
         }
         return updated;
       });
@@ -519,13 +686,24 @@ function App() {
     selectedStage: null,
     showStreaksPage: false,
     activePictureLesson: null,
-    user: null
+    user: null,
+    showTeacherDashboard: false,
+    showTeacherStudentPosts: false
   });
 
   // TRANSITION OVERLAY STATE
   const [transitioning, setTransitioning] = useState(false);
   const [transitionDirection, setTransitionDirection] = useState("forward"); // "forward" | "back"
   const transitionTimerRef = useRef(null);
+  const [tabTransitionKey, setTabTransitionKey] = useState(0);
+  const [tabDirection, setTabDirection] = useState('forward');
+  const tabOrder = { home: 0, courses: 1, community: 2, profile: 3 };
+  const switchTab = (newTab) => {
+    if (newTab === activeTab) return;
+    setTabDirection(tabOrder[newTab] > tabOrder[activeTab] ? 'forward' : 'back');
+    setTabTransitionKey(k => k + 1);
+    setActiveTab(newTab);
+  };
 
   // LESSON CONTENT CACHE (for preloading)
   const lessonContentCache = useRef(new Map()); // Map<lessonId, { questions, vocab, explanations, grammarNotes, speakingExercises, blocks }>
@@ -545,6 +723,100 @@ function App() {
   const [speakingItemCorrect, setSpeakingItemCorrect] = useState(false);
   const [speakingLessonComplete, setSpeakingLessonComplete] = useState(false);
   const [speakingLessonProgress, setSpeakingLessonProgress] = useState([]); // [{speaking_lesson_id}, ...]
+
+  // ✅ COMMUNITY STATE
+  const [userProfile, setUserProfile] = useState(null);
+  const [userRoles, setUserRoles] = useState([]);
+  const [showProfileSetup, setShowProfileSetup] = useState(false);
+  const [profileSetupName, setProfileSetupName] = useState('');
+  const [profileSetupAvatar, setProfileSetupAvatar] = useState('');
+  const [communityView, setCommunityView] = useState('feed'); // 'feed' | 'exercise' | 'post_detail'
+  const [dailyExercises, setDailyExercises] = useState(null);
+  const [loadingExercises, setLoadingExercises] = useState(false);
+  const [activeExerciseType, setActiveExerciseType] = useState(null); // 'read_aloud' | 'translate' | 'daily_question'
+  const [activeExerciseIndex, setActiveExerciseIndex] = useState(null);
+  const [communityPosts, setCommunityPosts] = useState([]);
+  const [loadingCommunityPosts, setLoadingCommunityPosts] = useState(false);
+  const [selectedPost, setSelectedPost] = useState(null);
+  const [postCorrections, setPostCorrections] = useState([]);
+  const [loadingCorrections, setLoadingCorrections] = useState(false);
+  const [userCompletions, setUserCompletions] = useState({ read_aloud: 0, translate: 0, daily_question: 0 });
+  const [communityInputMode, setCommunityInputMode] = useState('type'); // 'record' | 'type'
+  const [communityTypedAnswer, setCommunityTypedAnswer] = useState('');
+  const [submittingPost, setSubmittingPost] = useState(false);
+  const [communityFilter, setCommunityFilter] = useState('all');
+  const [correctionText, setCorrectionText] = useState('');
+  const [submittingCorrection, setSubmittingCorrection] = useState(false);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [reportTarget, setReportTarget] = useState(null);
+  const [reportReason, setReportReason] = useState('');
+  const [confirmModal, setConfirmModal] = useState(null); // { title, message, variant, onConfirm }
+  const [deletingCorrectionId, setDeletingCorrectionId] = useState(null);
+  const [userReactions, setUserReactions] = useState({}); // { post_id: 'perfect', correction_id: 'upvote' }
+  const [playingPostId, setPlayingPostId] = useState(null);
+  const [comAudioProgress, setComAudioProgress] = useState(0);
+  const [comAudioDuration, setComAudioDuration] = useState(0);
+  const [comAudioTime, setComAudioTime] = useState(0);
+  const communityAudioRef = useRef(null);
+  const communityExerciseRef = useRef(false);
+  const correctionRecordingRef = useRef(false);
+  const [recordedAudioUrl, setRecordedAudioUrl] = useState(null);
+  const previewAudioRef = useRef(null);
+  const [previewPlaying, setPreviewPlaying] = useState(false);
+  const [previewProgress, setPreviewProgress] = useState(0);
+  const [previewTime, setPreviewTime] = useState(0);
+  const [previewDuration, setPreviewDuration] = useState(0);
+  const previewDurationRef = useRef(0);
+  const [showMyPosts, setShowMyPosts] = useState(false);
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
+  const [myPosts, setMyPosts] = useState([]);
+  const [loadingMyPosts, setLoadingMyPosts] = useState(false);
+  const [deletingPostId, setDeletingPostId] = useState(null);
+  const [showTeacherDashboard, setShowTeacherDashboard] = useState(false);
+  const [teacherDashboardData, setTeacherDashboardData] = useState(null);
+  const [loadingTeacherDashboard, setLoadingTeacherDashboard] = useState(false);
+  const [teacherDashboardError, setTeacherDashboardError] = useState('');
+  const [showTeacherStudentPosts, setShowTeacherStudentPosts] = useState(false);
+  const [teacherSelectedStudent, setTeacherSelectedStudent] = useState(null);
+  const [teacherStudentPosts, setTeacherStudentPosts] = useState([]);
+  const [loadingTeacherStudentPosts, setLoadingTeacherStudentPosts] = useState(false);
+  const [teacherStudentPostsError, setTeacherStudentPostsError] = useState('');
+  const [moderatingTargetKey, setModeratingTargetKey] = useState(null);
+  const [recordingCountdown, setRecordingCountdown] = useState(null);
+  const recordingTimerRef = useRef(null);
+  const recordingIntervalRef = useRef(null);
+  const recordingCancelledRef = useRef(false);
+  const [completedPrompts, setCompletedPrompts] = useState(new Set());
+  const [aiFeedbackLoading, setAiFeedbackLoading] = useState(new Set());
+  const [infoToast, setInfoToast] = useState(null); // { message, icon }
+  const infoToastTimerRef = useRef(null);
+  const showInfoToast = (message, icon = 'solar:info-circle-bold') => {
+    if (infoToastTimerRef.current) clearTimeout(infoToastTimerRef.current);
+    setInfoToast({ message, icon });
+    infoToastTimerRef.current = setTimeout(() => setInfoToast(null), 2500);
+  };
+  const [pictureCompleted, setPictureCompleted] = useState(false);
+  const [correctionInputMode, setCorrectionInputMode] = useState('text');
+  const [refreshingFeed, setRefreshingFeed] = useState(false);
+  const [leaderboard, setLeaderboard] = useState([]);
+  const isTeacher = userRoles.includes('teacher');
+  const isAdmin = userRoles.includes('admin');
+  const canManageCommunity = isTeacher || isAdmin;
+  const canViewTeacherDashboard = canManageCommunity;
+
+  useEffect(() => {
+    if (user) return;
+    setUserProfile(null);
+    setUserRoles([]);
+    setShowTeacherDashboard(false);
+    setTeacherDashboardData(null);
+    setTeacherDashboardError('');
+    setShowTeacherStudentPosts(false);
+    setTeacherSelectedStudent(null);
+    setTeacherStudentPosts([]);
+    setTeacherStudentPostsError('');
+    setModeratingTargetKey(null);
+  }, [user]);
 
   // ✅ WORD OF THE DAY STATE
   const [wotdPhase, setWotdPhase] = useState("intro"); // "intro" | "word" | "examples" | "complete"
@@ -573,6 +845,7 @@ function App() {
   const [pictureMatchedWords, setPictureMatchedWords] = useState([]);
   const [pictureMissedWords, setPictureMissedWords] = useState([]);
   const [showPictureHint, setShowPictureHint] = useState(false);
+  const [picturePreviewUrl, setPicturePreviewUrl] = useState(null);
   const [pictureRecording, setPictureRecording] = useState(false);
   const [pictureCheckingAnswer, setPictureCheckingAnswer] = useState(false);
   const [pictureRecordingTime, setPictureRecordingTime] = useState(0);
@@ -593,6 +866,7 @@ function App() {
   const [analysisStep, setAnalysisStep] = useState(0); // for animated loading messages
   const analysisTimerRef = useRef(null);
   const pictureAudioRef = useRef(null);
+  const scenarioAudioRef = useRef(null);
   const challengeRecorderRef = useRef(null);
   const challengeStreamRef = useRef(null);
 
@@ -678,7 +952,7 @@ function App() {
   const speakAiAudio = async (text, onComplete) => {
     if (!text) return;
     try {
-      // Check cache first
+      // L1: in-memory cache (same session)
       if (scenarioTtsCache.current[text]) {
         if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
         const audio = new Audio(`data:audio/mp3;base64,${scenarioTtsCache.current[text]}`);
@@ -688,6 +962,19 @@ function App() {
         return;
       }
 
+      // L2: persistent client cache (localStorage — survives restarts)
+      const persisted = getPersistTts(text);
+      if (persisted) {
+        scenarioTtsCache.current[text] = persisted;
+        if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
+        const audio = new Audio(`data:audio/mp3;base64,${persisted}`);
+        scenarioAudioRef.current = audio;
+        if (onComplete) audio.onended = onComplete;
+        audio.play().catch(e => console.error("Persisted audio play failed:", e));
+        return;
+      }
+
+      // L3: network — hits edge function → DB cache or Google TTS
       const { data, error } = await supabase.functions.invoke("scenario-chat", {
         body: { action: "generate-tts", text }
       });
@@ -695,6 +982,7 @@ function App() {
       const parsed = typeof data === 'string' ? JSON.parse(data) : data;
       if (parsed.audioBase64) {
         scenarioTtsCache.current[text] = parsed.audioBase64;
+        setPersistTts(text, parsed.audioBase64);
         if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
         const audio = new Audio(`data:audio/mp3;base64,${parsed.audioBase64}`);
         scenarioAudioRef.current = audio;
@@ -712,54 +1000,68 @@ function App() {
     }
   };
 
-  const speakArabic = async (text) => {
-    if (!text) return;
+  const speakWithTTS = async (text, lang, rate) => {
+    if (!text) { console.warn('TTS: no text'); return; }
     if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
-    try {
-      await TextToSpeech.speak({
-        text,
-        lang: 'ar',
-        rate: 0.85,
-        volume: 1.0,
-      });
-    } catch (e) {
-      // Fallback to Web Speech API
+    // Suspend shared AudioContext to release audio focus for system TTS
+    if (_sharedAudioCtx && _sharedAudioCtx.state === 'running') {
+      try { _sharedAudioCtx.suspend(); } catch (_) {}
+    }
+
+    const isNative = Capacitor.isNativePlatform();
+    console.log(`TTS: text="${text.substring(0,30)}..." lang=${lang} native=${isNative}`);
+
+    if (isNative) {
       try {
-        window.speechSynthesis?.cancel();
+        try { await TextToSpeech.stop(); } catch (_) {}
+        console.log('TTS: calling native speak...');
+        await TextToSpeech.speak({ text, lang, rate, volume: 1.0 });
+        console.log('TTS: native speak finished OK');
+        return;
+      } catch (e) {
+        console.warn('TTS: native failed:', e?.message || e);
+        // Try with just the base language code (e.g. 'ar' instead of 'ar-SA')
+        try {
+          const baseLang = lang.split('-')[0];
+          console.log(`TTS: retrying native with lang=${baseLang}`);
+          await TextToSpeech.speak({ text, lang: baseLang, rate, volume: 1.0 });
+          console.log('TTS: native retry OK');
+          return;
+        } catch (e2) {
+          console.warn('TTS: native retry also failed:', e2?.message || e2);
+        }
+      }
+    }
+
+    // Web: use speechSynthesis directly
+    if (window.speechSynthesis) {
+      try {
+        window.speechSynthesis.cancel();
+        await new Promise(r => setTimeout(r, 50));
         const utter = new SpeechSynthesisUtterance(text);
-        utter.lang = 'ar';
-        utter.rate = 0.85;
-        const voices = window.speechSynthesis?.getVoices() || [];
-        const arVoice = voices.find(v => v.lang.startsWith('ar'));
-        if (arVoice) utter.voice = arVoice;
-        window.speechSynthesis?.speak(utter);
-      } catch (e2) { /* TTS not available */ }
+        utter.lang = lang;
+        utter.rate = rate;
+        utter.volume = 1.0;
+        const voices = window.speechSynthesis.getVoices() || [];
+        console.log(`TTS: web voices available: ${voices.length}, looking for ${lang}`);
+        const match = voices.find(v => v.lang === lang) || voices.find(v => v.lang.startsWith(lang.split('-')[0]));
+        if (match) {
+          console.log(`TTS: matched voice: ${match.name} (${match.lang})`);
+          utter.voice = match;
+        } else {
+          console.log('TTS: no matching voice, using default');
+        }
+        utter.onerror = (ev) => console.warn('TTS: utterance error:', ev.error);
+        utter.onend = () => console.log('TTS: utterance finished');
+        window.speechSynthesis.speak(utter);
+      } catch (e) { console.warn('TTS: web failed:', e); }
+    } else {
+      console.warn('TTS: speechSynthesis not available');
     }
   };
 
-  const speakEnglish = async (text) => {
-    if (!text) return;
-    try {
-      await TextToSpeech.speak({
-        text,
-        lang: 'en-US',
-        rate: 0.95,
-        volume: 1.0,
-      });
-    } catch (e) {
-      // Fallback to Web Speech API
-      try {
-        window.speechSynthesis?.cancel();
-        const utter = new SpeechSynthesisUtterance(text);
-        utter.lang = 'en-US';
-        utter.rate = 0.95;
-        const voices = window.speechSynthesis?.getVoices() || [];
-        const enVoice = voices.find(v => v.lang.startsWith('en'));
-        if (enVoice) utter.voice = enVoice;
-        window.speechSynthesis?.speak(utter);
-      } catch (e2) { /* TTS not available */ }
-    }
-  };
+  const speakArabic = (text) => speakWithTTS(text, 'ar-SA', 0.85);
+  const speakEnglish = (text) => speakWithTTS(text, 'en-US', 0.95);
 
   // ---------- AI HELPER (FAB + Sheet) ----------
 
@@ -904,6 +1206,32 @@ function App() {
     const completed = stageLessons.filter((l) => isLessonCompleted(l.id)).length;
     const percent = Math.round((completed / total) * 100);
     return { completed, total, percent };
+  }
+
+  function isPrebookStage(stageId) {
+    const stageLessons = allLessons.filter((lesson) => lesson.stage_id === stageId);
+    return stageLessons.length > 0 && stageLessons.every((lesson) => lesson.lesson_format === "prebook");
+  }
+
+  function getCoreStages() {
+    return stages.filter((stage) => !isPrebookStage(stage.id));
+  }
+
+  function isStageUnlocked(stageId) {
+    if (isPrebookStage(stageId)) return true;
+
+    const coreStages = getCoreStages();
+    const stageIndex = coreStages.findIndex((stage) => stage.id === stageId);
+    if (stageIndex <= 0) return true;
+
+    const previousStage = coreStages[stageIndex - 1];
+    const previousProgress = getStageProgress(previousStage.id);
+    return previousProgress.completed === previousProgress.total && previousProgress.total > 0;
+  }
+
+  function isLessonUnlocked(stageLessons, lessonIndex, stageId) {
+    if (isPrebookStage(stageId)) return true;
+    return lessonIndex === 0 || isLessonCompleted(stageLessons[lessonIndex - 1]?.id);
   }
 
   function isSpeakingLessonCompleted(lessonId) {
@@ -1111,14 +1439,23 @@ function App() {
     stateRefs.current = {
       activeLesson,
       currentWotd,
+      wotdPhase,
       practiceMode,
       selectedStage,
       showStreaksPage,
       activePictureLesson,
       activeSpeakingLesson,
-      user
+      user,
+      communityView,
+      showMyPosts,
+      showLeaderboard,
+      showTeacherDashboard,
+      showTeacherStudentPosts,
+      activeTab,
+      activeExerciseType,
+      activeExerciseIndex
     };
-  }, [activeLesson, currentWotd, practiceMode, selectedStage, showStreaksPage, activePictureLesson, activeSpeakingLesson, user]);
+  }, [activeLesson, currentWotd, wotdPhase, practiceMode, selectedStage, showStreaksPage, activePictureLesson, activeSpeakingLesson, user, communityView, showMyPosts, showLeaderboard, showTeacherDashboard, showTeacherStudentPosts, activeTab, activeExerciseType, activeExerciseIndex]);
 
   // Native Android hardware back button handling via Capacitor
   useEffect(() => {
@@ -1137,20 +1474,35 @@ function App() {
           return;
         }
 
-        // 2. Inside Word of the Day
-        if (state.currentWotd) {
-          setCurrentWotd(null);
+        // 2. Inside Word of the Day — navigate back through phases
+        if (state.practiceMode === "wotd") {
+          setTransitionDirection("back");
+          if (state.wotdPhase === "examples") {
+            setWotdPhase("word");
+          } else if (state.wotdPhase === "word") {
+            setWotdPhase("intro");
+          } else {
+            // intro or complete — exit to home
+            setTransitionDirection("back");
+            setPracticeMode(null);
+            resetWotdFlow();
+          }
           return;
         }
 
-        // 2.5. Inside Scenario Chat
+        // 2.5. Inside Scenario Chat — handled by ScenarioChat's own listener
         if (scenarioPhase) {
-          setScenarioPhase(false);
           return;
         }
 
-        // 3. Inside Picture Describe Lesson
+        // 3. Inside Picture Describe Lesson — go back to home
         if (state.activePictureLesson) {
+          setTransitionDirection("back");
+          exitPictureToHome();
+          return;
+        }
+        // (legacy cleanup kept for safety)
+        if (false) {
           setPicturePhase("lessons");
           setActivePictureLesson(null);
           setPictureVocab([]);
@@ -1193,23 +1545,88 @@ function App() {
 
         // 4. Inside Speaking Practice sub-menu
         if (state.practiceMode) {
+          setTransitionDirection("back");
           setPracticeMode(null);
           return;
         }
 
         // 5. Inside a specific Stage (Book view)
         if (state.selectedStage) {
+          setTransitionDirection("back");
           setSelectedStage(null);
           return;
         }
 
         // 6. Inside Streaks Page
         if (state.showStreaksPage) {
+          setTransitionDirection("back");
           setShowStreaksPage(false);
           return;
         }
 
-        // 7. On Home Root (None of the above are active)
+        // 7. Inside My Posts overlay
+        if (state.showMyPosts) {
+          setTransitionDirection("back");
+          setShowMyPosts(false);
+          return;
+        }
+
+        // 7b. Inside Leaderboard overlay
+        if (state.showLeaderboard) {
+          setTransitionDirection("back");
+          setShowLeaderboard(false);
+          return;
+        }
+
+        // 7c. Inside Teacher student posts overlay
+        if (state.showTeacherStudentPosts) {
+          setTransitionDirection("back");
+          setShowTeacherStudentPosts(false);
+          return;
+        }
+
+        // 7d. Inside Teacher Dashboard overlay
+        if (state.showTeacherDashboard) {
+          setTransitionDirection("back");
+          setShowTeacherDashboard(false);
+          return;
+        }
+
+        // 8a. Community feed with exercise expanded (inline)
+        if (state.activeTab === 'community' && state.communityView === 'feed' && state.activeExerciseType) {
+          cleanupPreviewAudio();
+          if (state.activeExerciseType === 'daily_question' || state.activeExerciseIndex === null) {
+            setActiveExerciseType(null);
+            setActiveExerciseIndex(null);
+            communityExerciseRef.current = false;
+            setCommunityTypedAnswer('');
+            setRecordedAudio(null);
+          } else {
+            setActiveExerciseIndex(null);
+            setCommunityTypedAnswer('');
+            setRecordedAudio(null);
+          }
+          return;
+        }
+
+        // 8b. Inside Community sub-view (post_detail)
+        if (state.activeTab === 'community' && state.communityView !== 'feed') {
+          setTransitionDirection("back");
+          if (state.communityView === 'post_detail') {
+            if (communityAudioRef.current) { communityAudioRef.current.pause(); communityAudioRef.current = null; }
+            setCommunityView('feed');
+            setSelectedPost(null);
+            setPostCorrections([]);
+          } else {
+            setCommunityView('feed');
+            setActiveExerciseType(null);
+            setActiveExerciseIndex(null);
+            communityExerciseRef.current = false;
+          }
+          return;
+        }
+
+        // 9. On Home Root (None of the above are active)
         if (state.user) {
           setShowExitSheet(true);
         }
@@ -1224,6 +1641,183 @@ function App() {
       }
     };
   }, []); // Register only ONCE
+
+  // Web browser back button handling via history API (mirrors Capacitor back button)
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) return; // Only for web
+
+    // Determine if we're in any sub-screen
+    const isInSubScreen = () => {
+      const s = stateRefs.current;
+      return !!(s.activeLesson || s.practiceMode || s.selectedStage || s.showStreaksPage ||
+        s.activePictureLesson || s.activeSpeakingLesson || s.showMyPosts || s.showLeaderboard ||
+        s.showTeacherDashboard || s.showTeacherStudentPosts || scenarioPhase ||
+        (s.activeTab === 'community' && (s.activeExerciseType || s.communityView !== 'feed')));
+    };
+
+    // Push a history guard entry so back button triggers popstate instead of leaving
+    const pushGuard = () => {
+      if (isInSubScreen()) {
+        window.history.pushState({ appGuard: true }, '');
+      }
+    };
+
+    const handlePopState = (e) => {
+      const state = stateRefs.current;
+
+      // 1. Inside a core lesson
+      if (state.activeLesson) {
+        setShowExitModal(true);
+        pushGuard();
+        return;
+      }
+
+      // 2. Inside Word of the Day
+      if (state.practiceMode === "wotd") {
+        setTransitionDirection("back");
+        if (state.wotdPhase === "examples") {
+          setWotdPhase("word");
+        } else if (state.wotdPhase === "word") {
+          setWotdPhase("intro");
+        } else {
+          setTransitionDirection("back");
+          setPracticeMode(null);
+          resetWotdFlow();
+        }
+        pushGuard();
+        return;
+      }
+
+      // 2.5. Inside Scenario Chat
+      if (scenarioPhase) {
+        pushGuard();
+        return;
+      }
+
+      // 3. Inside Picture Describe Lesson
+      if (state.activePictureLesson) {
+        setTransitionDirection("back");
+        exitPictureToHome();
+        pushGuard();
+        return;
+      }
+
+      // 3.5. Inside Speaking Lesson
+      if (state.activeSpeakingLesson) {
+        backToSpeakingLessons();
+        pushGuard();
+        return;
+      }
+
+      // 4. Inside Speaking Practice sub-menu
+      if (state.practiceMode) {
+        setTransitionDirection("back");
+        setPracticeMode(null);
+        return;
+      }
+
+      // 5. Inside a specific Stage (Book view)
+      if (state.selectedStage) {
+        setTransitionDirection("back");
+        setSelectedStage(null);
+        return;
+      }
+
+      // 6. Inside Streaks Page
+      if (state.showStreaksPage) {
+        setTransitionDirection("back");
+        setShowStreaksPage(false);
+        return;
+      }
+
+      // 7. Inside My Posts overlay
+      if (state.showMyPosts) {
+        setTransitionDirection("back");
+        setShowMyPosts(false);
+        return;
+      }
+
+      // 7b. Inside Leaderboard overlay
+      if (state.showLeaderboard) {
+        setTransitionDirection("back");
+        setShowLeaderboard(false);
+        return;
+      }
+
+      // 7c. Inside Teacher student posts overlay
+      if (state.showTeacherStudentPosts) {
+        setTransitionDirection("back");
+        setShowTeacherStudentPosts(false);
+        return;
+      }
+
+      // 7d. Inside Teacher Dashboard overlay
+      if (state.showTeacherDashboard) {
+        setTransitionDirection("back");
+        setShowTeacherDashboard(false);
+        return;
+      }
+
+      // 8a. Community feed with exercise expanded
+      if (state.activeTab === 'community' && state.communityView === 'feed' && state.activeExerciseType) {
+        cleanupPreviewAudio();
+        if (state.activeExerciseType === 'daily_question' || state.activeExerciseIndex === null) {
+          setActiveExerciseType(null);
+          setActiveExerciseIndex(null);
+          communityExerciseRef.current = false;
+          setCommunityTypedAnswer('');
+          setRecordedAudio(null);
+        } else {
+          setActiveExerciseIndex(null);
+          setCommunityTypedAnswer('');
+          setRecordedAudio(null);
+        }
+        pushGuard();
+        return;
+      }
+
+      // 8b. Inside Community sub-view (post_detail)
+      if (state.activeTab === 'community' && state.communityView !== 'feed') {
+        setTransitionDirection("back");
+        if (state.communityView === 'post_detail') {
+          if (communityAudioRef.current) { communityAudioRef.current.pause(); communityAudioRef.current = null; }
+          setCommunityView('feed');
+          setSelectedPost(null);
+          setPostCorrections([]);
+        } else {
+          setCommunityView('feed');
+          setActiveExerciseType(null);
+          setActiveExerciseIndex(null);
+          communityExerciseRef.current = false;
+        }
+        return;
+      }
+
+      // 9. On Home Root — let browser navigate away naturally (don't prevent)
+    };
+
+    window.addEventListener('popstate', handlePopState);
+
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [scenarioPhase]); // scenarioPhase is read directly, not from refs
+
+  // Push/remove browser history guard when entering/leaving sub-screens (web only)
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) return;
+
+    const inSubScreen = !!(activeLesson || practiceMode || selectedStage || showStreaksPage ||
+      activePictureLesson || activeSpeakingLesson || showMyPosts || showLeaderboard ||
+      showTeacherDashboard || showTeacherStudentPosts || scenarioPhase ||
+      (activeTab === 'community' && (activeExerciseType || communityView !== 'feed')));
+
+    if (inSubScreen && (!window.history.state || !window.history.state.appGuard)) {
+      window.history.pushState({ appGuard: true }, '');
+    }
+  }, [activeLesson, practiceMode, selectedStage, showStreaksPage, activePictureLesson,
+    activeSpeakingLesson, showMyPosts, showLeaderboard, showTeacherDashboard,
+    showTeacherStudentPosts, scenarioPhase, activeTab, activeExerciseType, communityView]);
 
   // Cleanup on unmount — prevent leaked timers, mic locks, and orphaned audio
   useEffect(() => {
@@ -1284,7 +1878,7 @@ function App() {
     });
 
     if (error) {
-      console.error(error);
+      console.error('signUp failed:', JSON.stringify(error));
       setAuthError(error.message);
     } else {
       setAuthError("Check your email to confirm your account.");
@@ -1302,9 +1896,27 @@ function App() {
     });
 
     if (error) {
-      console.error(error);
+      console.error('signIn failed:', JSON.stringify(error));
       setAuthError(error.message);
     } else {
+      setAuthError("");
+    }
+  }
+
+  async function handleForgotPassword(e) {
+    if (e) e.preventDefault();
+    triggerHaptic();
+    setAuthError("");
+    if (!authEmail) {
+      setAuthError("Please enter your email address first.");
+      return;
+    }
+    const { error } = await supabase.auth.resetPasswordForEmail(authEmail);
+    if (error) {
+      console.error('resetPasswordForEmail failed:', JSON.stringify(error));
+      setAuthError(error.message);
+    } else {
+      setResetSent(true);
       setAuthError("");
     }
   }
@@ -1312,7 +1924,14 @@ function App() {
   async function handleSignOut() {
     await supabase.auth.signOut();
     setUser(null);
+    setUserProfile(null);
+    setUserRoles([]);
     setLessonProgress([]);
+    setShowTeacherDashboard(false);
+    setTeacherDashboardData(null);
+    setShowTeacherStudentPosts(false);
+    setTeacherSelectedStudent(null);
+    setTeacherStudentPosts([]);
   }
 
 
@@ -1381,7 +2000,7 @@ function App() {
 
     try {
       // Fetch all content in parallel for speed
-      const [questionsRes, vocabRes, explRes, notesRes, speakingRes, blocksRes] = await Promise.all([
+      const [questionsRes, vocabRes, explRes, notesRes, speakingRes, blocksRes, prebookRes] = await Promise.all([
         supabase.from("questions").select("id, question_type, prompt_text, order").eq("lesson_id", lessonId).order("order", { ascending: true }),
         supabase.from("lesson_vocab").select("*").eq("lesson_id", lessonId).order("order", { ascending: true }),
         supabase.from("lesson_explanations").select("*").eq("lesson_id", lessonId).order("order", { ascending: true }),
@@ -1389,6 +2008,9 @@ function App() {
         supabase.from("lesson_speaking_exercises").select("*").eq("lesson_id", lessonId).order("order_index", { ascending: true }),
         lessonFormat === "blocks"
           ? supabase.from("lesson_blocks").select(`id, lesson_id, block_type, order_index, text_ar, text_en, speaker_id, audio_url, start_time_seconds, end_time_seconds, speakers (id, display_name_ar, avatar_url, bubble_side)`).eq("lesson_id", lessonId).order("order_index", { ascending: true })
+          : Promise.resolve({ data: [], error: null }),
+        lessonFormat === "prebook"
+          ? supabase.from("prebook_items").select("*").eq("lesson_id", lessonId).order("order_index", { ascending: true })
           : Promise.resolve({ data: [], error: null })
       ]);
 
@@ -1396,19 +2018,75 @@ function App() {
       const questionsWithOptions = await attachOptionsToQuestions(questionsRes.data || []);
 
       // Store in cache
+      const blocks = blocksRes.data || [];
       lessonContentCache.current.set(lessonId, {
         questions: questionsWithOptions,
         vocab: vocabRes.data || [],
         explanations: explRes.data || [],
         grammarNotes: notesRes.data || [],
         speakingExercises: speakingRes.data || [],
-        blocks: blocksRes.data || []
+        blocks,
+        prebookItems: prebookRes.data || []
       });
+
+      // Preload avatar images in background
+      const avatarUrls = [...new Set(blocks.map(b => b.speakers?.avatar_url).filter(Boolean))];
+      avatarUrls.forEach(url => { const img = new Image(); img.src = url; });
 
       console.log("Preloaded lesson content:", lessonId);
     } catch (err) {
       console.error("Error preloading lesson:", lessonId, err);
     }
+  }
+
+  async function loadPrebookItemsForLesson(lesson) {
+    const { data: directItems, error: directError } = await supabase
+      .from('prebook_items')
+      .select('*')
+      .eq('lesson_id', lesson.id)
+      .order('order_index', { ascending: true });
+
+    if (directError) {
+      throw directError;
+    }
+
+    if ((directItems || []).length > 0) {
+      return directItems;
+    }
+
+    const { data: matchingLessons, error: matchingLessonsError } = await supabase
+      .from('lessons')
+      .select('id')
+      .eq('lesson_format', 'prebook')
+      .eq('title', lesson.title)
+      .neq('id', lesson.id)
+      .order('id', { ascending: true });
+
+    if (matchingLessonsError) {
+      throw matchingLessonsError;
+    }
+
+    const fallbackLessonIds = (matchingLessons || []).map((row) => row.id);
+    if (!fallbackLessonIds.length) {
+      return [];
+    }
+
+    const { data: fallbackItems, error: fallbackError } = await supabase
+      .from('prebook_items')
+      .select('*')
+      .in('lesson_id', fallbackLessonIds)
+      .order('lesson_id', { ascending: true })
+      .order('order_index', { ascending: true });
+
+    if (fallbackError) {
+      throw fallbackError;
+    }
+
+    if ((fallbackItems || []).length > 0) {
+      console.warn('Resolved prebook items via duplicate lesson title fallback:', lesson.title);
+    }
+
+    return fallbackItems || [];
   }
 
   // Preload multiple lessons in background
@@ -1461,8 +2139,11 @@ function App() {
       setLoadingStages(false);
     }
 
+    if (!user) return;
     loadInitialData();
-  }, []);
+    loadUserProfile();
+    loadUserRoles();
+  }, [user]);
 
   // ---------- LOAD LESSONS FOR A STAGE ----------
 
@@ -1663,6 +2344,896 @@ function App() {
     endTransition();
   }
 
+  // ---------- COMMUNITY FUNCTIONS ----------
+
+  const AVATAR_OPTIONS = ['😊', '🧑‍🎓', '📚', '🌟', '🎯', '💡', '🔥', '🌍', '🎓', '✨', '🦊', '🐱', '🦁', '🐼', '🦉', '🐸'];
+
+  async function loadUserProfile() {
+    if (!user) return;
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", user.id)
+      .single();
+
+    if (error || !data) {
+      // Profile doesn't exist yet — show setup
+      setShowProfileSetup(true);
+      setProfileSetupName(user.email ? user.email.split('@')[0] : 'Learner');
+      setProfileSetupAvatar('😊');
+      return;
+    }
+
+    setUserProfile(data);
+    // If display_name looks auto-generated (email prefix) and no avatar, prompt setup
+    if (!data.avatar_url) {
+      setShowProfileSetup(true);
+      setProfileSetupName(data.display_name || '');
+      setProfileSetupAvatar('😊');
+    }
+  }
+
+  async function loadUserRoles() {
+    if (!user) {
+      setUserRoles([]);
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", user.id);
+
+    if (error) {
+      console.error("Error loading user roles:", error);
+      setUserRoles([]);
+      return;
+    }
+
+    setUserRoles((data || []).map((row) => row.role));
+  }
+
+  async function saveUserProfile() {
+    if (!user || !profileSetupName.trim()) return;
+    const { error } = await supabase
+      .from("profiles")
+      .upsert({
+        id: user.id,
+        display_name: profileSetupName.trim(),
+        avatar_url: profileSetupAvatar,
+        updated_at: new Date().toISOString(),
+      });
+
+    if (error) {
+      console.error("Save profile error:", error);
+      alert("Failed to save profile: " + error.message);
+    } else {
+      setUserProfile({ id: user.id, display_name: profileSetupName.trim(), avatar_url: profileSetupAvatar });
+      setShowProfileSetup(false);
+    }
+  }
+
+  async function loadTeacherDashboard() {
+    if (!user) return;
+    setLoadingTeacherDashboard(true);
+    setTeacherDashboardError('');
+
+    try {
+      const { data, error } = await supabase.functions.invoke("teacher-dashboard", {
+        body: {},
+      });
+
+      if (error || data?.error) {
+        const message = data?.error || error?.message || "Could not load teacher dashboard.";
+        console.error("Teacher dashboard error:", error || data);
+        setTeacherDashboardData(null);
+        setTeacherDashboardError(message);
+        return;
+      }
+
+      setTeacherDashboardData(data);
+      if (Array.isArray(data?.roles)) {
+        setUserRoles(data.roles);
+      }
+    } catch (err) {
+      console.error("loadTeacherDashboard error:", err);
+      setTeacherDashboardData(null);
+      setTeacherDashboardError(err.message || "Could not load teacher dashboard.");
+    } finally {
+      setLoadingTeacherDashboard(false);
+    }
+  }
+
+  async function loadTeacherStudentPosts(student) {
+    if (!user || !canManageCommunity || !student?.user_id) return;
+
+    setTeacherSelectedStudent(student);
+    setShowTeacherStudentPosts(true);
+    setLoadingTeacherStudentPosts(true);
+    setTeacherStudentPostsError('');
+
+    try {
+      const { data, error } = await supabase.functions.invoke("teacher-posts", {
+        body: {
+          student_user_id: student.user_id,
+          limit: 100,
+        },
+      });
+
+      if (error || data?.error) {
+        const message = data?.error || error?.message || "Could not load student posts.";
+        console.error("Teacher student posts error:", error || data);
+        setTeacherStudentPosts([]);
+        setTeacherStudentPostsError(message);
+        return;
+      }
+
+      setTeacherSelectedStudent(prev => ({ ...prev, ...(data?.student || {}) }));
+      setTeacherStudentPosts(data?.posts || []);
+    } catch (err) {
+      console.error("loadTeacherStudentPosts error:", err);
+      setTeacherStudentPosts([]);
+      setTeacherStudentPostsError(err.message || "Could not load student posts.");
+    } finally {
+      setLoadingTeacherStudentPosts(false);
+    }
+  }
+
+  function openTeacherStudentPost(post) {
+    setShowTeacherStudentPosts(false);
+    setShowTeacherDashboard(false);
+    setTransitionDirection("forward");
+    switchTab("community");
+    openPostDetail(post);
+  }
+
+  async function loadDailyExercises() {
+    setLoadingExercises(true);
+    try {
+      const { data, error } = await supabase.rpc('get_daily_exercises');
+      if (error) {
+        console.error("Error loading daily exercises:", error);
+      } else {
+        setDailyExercises(data);
+      }
+
+      // Check which exercises user already completed today
+      if (user) {
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        const { data: myPosts } = await supabase
+          .from("community_posts")
+          .select("activity_type, prompt_text")
+          .eq("user_id", user.id)
+          .gte("created_at", todayStart.toISOString());
+
+        if (myPosts) {
+          const counts = { read_aloud: 0, translate: 0, daily_question: 0 };
+          const prompts = new Set();
+          myPosts.forEach(p => {
+            if (counts[p.activity_type] !== undefined) counts[p.activity_type]++;
+            if (p.prompt_text) prompts.add(p.prompt_text);
+          });
+          setUserCompletions(counts);
+          setCompletedPrompts(prompts);
+        }
+      }
+    } catch (err) {
+      console.error("loadDailyExercises error:", err);
+    }
+    setLoadingExercises(false);
+  }
+
+  async function loadCommunityPosts(filter = 'all') {
+    setLoadingCommunityPosts(true);
+    try {
+      const cutoff = new Date(Date.now() - COMMUNITY_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+      let query = supabase
+        .from("community_posts")
+        .select("*")
+        .gte("created_at", cutoff)
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (filter !== 'all') {
+        query = query.eq("activity_type", filter);
+      }
+
+      const { data, error } = await query;
+      if (error) {
+        console.error("Error loading community posts:", error);
+      } else {
+        // Fetch profiles for all unique user_ids
+        const posts = data || [];
+        if (posts.length > 0) {
+          const userIds = [...new Set(posts.map(p => p.user_id))];
+          const postIds = posts.map(p => p.id);
+          const [{ data: profiles }, { data: corrRows }] = await Promise.all([
+            supabase.from("profiles").select("id, display_name, avatar_url").in("id", userIds),
+            supabase.from("community_corrections").select("post_id, is_ai").in("post_id", postIds),
+          ]);
+          const profileMap = {};
+          (profiles || []).forEach(p => { profileMap[p.id] = p; });
+          const countMap = {};
+          const aiSet = new Set();
+          (corrRows || []).forEach(c => {
+            countMap[c.post_id] = (countMap[c.post_id] || 0) + 1;
+            if (c.is_ai) aiSet.add(c.post_id);
+          });
+          posts.forEach(p => {
+            p.profiles = profileMap[p.user_id] || { display_name: 'Learner', avatar_url: null };
+            p.corrections_count = countMap[p.id] || 0;
+            p.has_ai_feedback = aiSet.has(p.id);
+          });
+        }
+        setCommunityPosts(posts);
+      }
+
+      // Load user's reactions
+      if (user) {
+        const { data: reactions } = await supabase
+          .from("community_reactions")
+          .select("post_id, correction_id, reaction_type")
+          .eq("user_id", user.id);
+
+        if (reactions) {
+          const rMap = {};
+          reactions.forEach(r => {
+            if (r.post_id) rMap[`post_${r.post_id}`] = r.reaction_type;
+            if (r.correction_id) rMap[`corr_${r.correction_id}`] = r.reaction_type;
+          });
+          setUserReactions(rMap);
+        }
+      }
+    } catch (err) {
+      console.error("loadCommunityPosts error:", err);
+    }
+    setLoadingCommunityPosts(false);
+  }
+
+  async function submitCommunityPost(answerText, audioBase64 = null) {
+    if (!user || !activeExerciseType || !dailyExercises) {
+      console.error("submitCommunityPost: guard failed", { user: !!user, activeExerciseType, dailyExercises: !!dailyExercises });
+      return;
+    }
+    setSubmittingPost(true);
+
+    try {
+      let exercises, currentExercise, promptText, questionId = null;
+
+      if (activeExerciseType === 'read_aloud') {
+        exercises = dailyExercises.read_aloud || [];
+        currentExercise = exercises[activeExerciseIndex];
+        promptText = currentExercise?.arabic_text || '';
+      } else if (activeExerciseType === 'translate') {
+        exercises = dailyExercises.translate || [];
+        currentExercise = exercises[activeExerciseIndex];
+        promptText = currentExercise?.english_text || '';
+      } else {
+        currentExercise = dailyExercises.daily_question;
+        promptText = currentExercise?.question_en || '';
+        questionId = currentExercise?.id;
+      }
+
+      const insertPayload = {
+        user_id: user.id,
+        activity_type: activeExerciseType,
+        daily_question_id: questionId,
+        prompt_text: promptText,
+        answer_text: answerText || null,
+        audio_url: audioBase64 || null,
+      };
+
+      const { error } = await supabase.from("community_posts").insert(insertPayload);
+
+      if (error) {
+        console.error("Error submitting post:", error);
+        alert("Failed to post: " + (error.message || "Unknown error"));
+      } else {
+        // Update completion count
+        setUserCompletions(prev => ({ ...prev, [activeExerciseType]: (prev[activeExerciseType] || 0) + 1 }));
+
+        // Always go back to feed after posting
+        cleanupPreviewAudio();
+        setCommunityView('feed');
+        setActiveExerciseType(null);
+        setActiveExerciseIndex(null);
+        setCommunityTypedAnswer('');
+        setRecordedAudio(null);
+        communityExerciseRef.current = false;
+        loadCommunityPosts(communityFilter);
+      }
+    } catch (err) {
+      console.error("submitCommunityPost error:", err);
+      alert("Something went wrong: " + (err.message || "Unknown error"));
+    }
+    setSubmittingPost(false);
+  }
+
+  async function loadMyPosts() {
+    if (!user) return;
+    setLoadingMyPosts(true);
+    try {
+      const { data, error } = await supabase
+        .from("community_posts")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(100);
+      if (error) {
+        console.error("Error loading my posts:", error);
+      } else {
+        setMyPosts(data || []);
+      }
+    } catch (err) {
+      console.error("loadMyPosts error:", err);
+    }
+    setLoadingMyPosts(false);
+  }
+
+  function showConfirm({ title, message, variant = 'danger', confirmLabel = 'Delete', onConfirm }) {
+    setConfirmModal({ title, message, variant, confirmLabel, onConfirm });
+  }
+
+  async function deleteMyCorrection(correctionId, postId) {
+    if (!user) return;
+    setDeletingCorrectionId(correctionId);
+    try {
+      const { error } = await supabase
+        .from("community_corrections")
+        .delete()
+        .eq("id", correctionId)
+        .eq("user_id", user.id);
+      if (error) {
+        console.error("Error deleting correction:", error);
+        showInfoToast('Failed to delete correction', 'solar:danger-triangle-bold');
+      } else {
+        setPostCorrections(prev => prev.filter(c => c.id !== correctionId));
+        if (postId) {
+          setCommunityPosts(prev => prev.map(p =>
+            p.id === postId ? { ...p, corrections_count: Math.max(0, (p.corrections_count || 0) - 1) } : p
+          ));
+        }
+        showInfoToast('Correction deleted', 'solar:trash-bin-trash-bold');
+      }
+    } catch (err) {
+      console.error("deleteMyCorrection error:", err);
+    }
+    setDeletingCorrectionId(null);
+  }
+
+  async function deleteMyPost(postId) {
+    if (!user) return;
+    setDeletingPostId(postId);
+    try {
+      const { error } = await supabase
+        .from("community_posts")
+        .delete()
+        .eq("id", postId)
+        .eq("user_id", user.id);
+      if (error) {
+        console.error("Error deleting post:", error);
+        alert("Failed to delete: " + (error.message || "Unknown error"));
+      } else {
+        setMyPosts(prev => prev.filter(p => p.id !== postId));
+        setCommunityPosts(prev => prev.filter(p => p.id !== postId));
+      }
+    } catch (err) {
+      console.error("deleteMyPost error:", err);
+    }
+    setDeletingPostId(null);
+  }
+
+  async function moderateCommunityItem({ targetType, targetId, postId = null, isAi = false, reason = '' }) {
+    if (!user || !canManageCommunity) return;
+
+    const key = `${targetType}_${targetId}`;
+    setModeratingTargetKey(key);
+
+    try {
+      const { data, error } = await supabase.functions.invoke("moderate-community", {
+        body: {
+          target_type: targetType,
+          target_id: targetId,
+          reason,
+        },
+      });
+
+      if (error || data?.error) {
+        throw new Error(data?.error || error?.message || "Moderation failed.");
+      }
+
+      const resolvedPostId = data?.post_id || postId;
+      const deletedAi = data?.is_ai ?? isAi;
+
+      if (targetType === 'post') {
+        setCommunityPosts(prev => prev.filter(post => post.id !== targetId));
+        setMyPosts(prev => prev.filter(post => post.id !== targetId));
+
+        if (selectedPost?.id === targetId) {
+          if (communityAudioRef.current) {
+            communityAudioRef.current.pause();
+            communityAudioRef.current = null;
+          }
+          cleanupPreviewAudio();
+          setPlayingPostId(null);
+          setComAudioProgress(0);
+          setComAudioTime(0);
+          setCommunityView('feed');
+          setSelectedPost(null);
+          setPostCorrections([]);
+          setCorrectionText('');
+          setCorrectionInputMode('text');
+          setRecordedAudio(null);
+          communityExerciseRef.current = false;
+          correctionRecordingRef.current = false;
+        }
+      } else {
+        setPostCorrections(prev => prev.filter(corr => corr.id !== targetId));
+
+        if (resolvedPostId) {
+          setCommunityPosts(prev => prev.map(post => (
+            post.id === resolvedPostId
+              ? {
+                ...post,
+                corrections_count: Math.max(0, (post.corrections_count || 0) - 1),
+                has_ai_feedback: deletedAi ? false : post.has_ai_feedback,
+              }
+              : post
+          )));
+          setSelectedPost(prev => (
+            prev && prev.id === resolvedPostId
+              ? { ...prev, has_ai_feedback: deletedAi ? false : prev.has_ai_feedback }
+              : prev
+          ));
+        }
+      }
+
+      showInfoToast(targetType === 'post' ? 'Post deleted' : 'Correction deleted', 'solar:trash-bin-trash-bold');
+
+      await loadCommunityPosts(communityFilter);
+      if (showTeacherDashboard) {
+        await loadTeacherDashboard();
+      }
+    } catch (err) {
+      console.error("moderateCommunityItem error:", err);
+      alert(err.message || "Moderation failed.");
+    } finally {
+      setModeratingTargetKey(null);
+    }
+  }
+
+  async function togglePerfectReaction(postId) {
+    if (!user) return;
+    const key = `post_${postId}`;
+    const existing = userReactions[key];
+
+    if (existing === 'perfect') {
+      // Remove reaction
+      await supabase.from("community_reactions")
+        .delete()
+        .eq("user_id", user.id)
+        .eq("post_id", postId)
+        .eq("reaction_type", "perfect");
+
+      setUserReactions(prev => { const n = { ...prev }; delete n[key]; return n; });
+      setCommunityPosts(prev => prev.map(p => p.id === postId ? { ...p, perfect_count: Math.max(0, p.perfect_count - 1) } : p));
+    } else {
+      // Add reaction
+      await supabase.from("community_reactions").insert({
+        user_id: user.id,
+        post_id: postId,
+        reaction_type: "perfect",
+      });
+
+      setUserReactions(prev => ({ ...prev, [key]: 'perfect' }));
+      setCommunityPosts(prev => prev.map(p => p.id === postId ? { ...p, perfect_count: p.perfect_count + 1 } : p));
+    }
+  }
+
+  async function openPostDetail(post) {
+    setSelectedPost(post);
+    setTransitionDirection("forward");
+    setCommunityView('post_detail');
+    setLoadingCorrections(true);
+
+    const { data, error } = await supabase
+      .from("community_corrections")
+      .select("*")
+      .eq("post_id", post.id)
+      .order("created_at", { ascending: true });
+
+    if (!error) {
+      const corrections = data || [];
+      if (corrections.length > 0) {
+        const userIds = [...new Set(corrections.map(c => c.user_id))];
+        const { data: profiles } = await supabase.from("profiles").select("id, display_name, avatar_url").in("id", userIds);
+        const profileMap = {};
+        (profiles || []).forEach(p => { profileMap[p.id] = p; });
+        corrections.forEach(c => { c.profiles = profileMap[c.user_id] || { display_name: 'Learner', avatar_url: null }; });
+      }
+      setPostCorrections(corrections);
+    }
+    setLoadingCorrections(false);
+  }
+
+  async function requestAiFeedback(postId) {
+    if (!user) return;
+    setAiFeedbackLoading(prev => { const s = new Set(prev); s.add(postId); return s; });
+    try {
+      const { data: session } = await supabase.auth.getSession();
+      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL || 'https://efpanaidmaztxszshlmp.supabase.co'}/functions/v1/community-ai-feedback`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.session?.access_token}`,
+        },
+        body: JSON.stringify({ post_id: postId }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok && !json.skipped) {
+        console.error("AI feedback failed:", json);
+        alert(json.error || "AI feedback failed. Please try again.");
+        return;
+      }
+
+      // Mark this post as having AI feedback so the button disables everywhere
+      setCommunityPosts(prev => prev.map(p => p.id === postId ? { ...p, has_ai_feedback: true, corrections_count: (p.corrections_count || 0) + 1 } : p));
+      if (selectedPost?.id === postId) {
+        setSelectedPost(prev => prev ? { ...prev, has_ai_feedback: true } : prev);
+        // Reload corrections so the AI message appears in post detail
+        const { data } = await supabase
+          .from("community_corrections")
+          .select("*")
+          .eq("post_id", postId)
+          .order("created_at", { ascending: true });
+        if (data) {
+          const userIds = [...new Set(data.map(c => c.user_id))];
+          const { data: profiles } = await supabase.from("profiles").select("id, display_name, avatar_url").in("id", userIds);
+          const profileMap = {};
+          (profiles || []).forEach(p => { profileMap[p.id] = p; });
+          data.forEach(c => { c.profiles = profileMap[c.user_id] || { display_name: 'Learner', avatar_url: null }; });
+          setPostCorrections(data);
+        }
+      }
+      // Success toast
+      showInfoToast(json.skipped ? 'AI feedback already exists' : 'AI feedback ready!', 'solar:magic-stick-3-bold');
+    } catch (e) {
+      console.error("AI feedback request error:", e);
+      alert("AI feedback failed. Please try again.");
+    } finally {
+      setAiFeedbackLoading(prev => { const s = new Set(prev); s.delete(postId); return s; });
+    }
+  }
+
+  async function submitCorrection(postId, audioBase64 = null) {
+    if (!user || (!correctionText.trim() && !audioBase64)) return;
+    setSubmittingCorrection(true);
+
+    try {
+      const insertPayload = {
+        post_id: postId,
+        user_id: user.id,
+        correction_text: correctionText.trim() || (audioBase64 ? '[Voice feedback]' : ''),
+      };
+      if (audioBase64) insertPayload.audio_url = audioBase64;
+
+      const { data, error } = await supabase
+        .from("community_corrections")
+        .insert(insertPayload)
+        .select("*")
+        .single();
+
+      if (error) {
+        console.error("Error submitting correction:", error);
+        alert("Failed to post correction: " + (error.message || "Unknown error"));
+        return;
+      }
+
+      if (data) {
+        data.profiles = userProfile || { display_name: 'Learner', avatar_url: null };
+        setPostCorrections(prev => [...prev, data]);
+        setCorrectionText('');
+        cleanupPreviewAudio();
+        setRecordedAudio(null);
+        setCorrectionInputMode('text');
+        correctionRecordingRef.current = false;
+        communityExerciseRef.current = false;
+      }
+    } catch (err) {
+      console.error("submitCorrection error:", err);
+      alert("Something went wrong: " + (err.message || "Unknown error"));
+    } finally {
+      setSubmittingCorrection(false);
+    }
+  }
+
+  async function refreshCommunityFeed() {
+    setRefreshingFeed(true);
+    await Promise.all([
+      loadCommunityPosts(communityFilter),
+      loadDailyExercises(),
+      loadLeaderboard(),
+    ]);
+    setRefreshingFeed(false);
+  }
+
+  async function loadLeaderboard() {
+    try {
+      const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const { data: posts } = await supabase
+        .from("community_posts")
+        .select("user_id")
+        .gte("created_at", weekAgo);
+
+      if (!posts || posts.length === 0) { setLeaderboard([]); return; }
+
+      const countMap = {};
+      posts.forEach(p => { countMap[p.user_id] = (countMap[p.user_id] || 0) + 1; });
+      const sorted = Object.entries(countMap).sort((a, b) => b[1] - a[1]).slice(0, 5);
+      const userIds = sorted.map(([id]) => id);
+
+      const { data: profiles } = await supabase
+        .from("profiles")
+        .select("id, display_name, avatar_url")
+        .in("id", userIds);
+
+      const profileMap = {};
+      (profiles || []).forEach(p => { profileMap[p.id] = p; });
+
+      setLeaderboard(sorted.map(([id, count]) => ({
+        user_id: id,
+        count,
+        display_name: profileMap[id]?.display_name || 'Learner',
+        avatar_url: profileMap[id]?.avatar_url || null,
+      })));
+    } catch (err) {
+      console.error("loadLeaderboard error:", err);
+    }
+  }
+
+  async function toggleCorrectionVote(correctionId, voteType) {
+    if (!user) return;
+    const key = `corr_${correctionId}`;
+    const existing = userReactions[key];
+
+    if (existing === voteType) {
+      await supabase.from("community_reactions")
+        .delete()
+        .eq("user_id", user.id)
+        .eq("correction_id", correctionId)
+        .eq("reaction_type", voteType);
+
+      setUserReactions(prev => { const n = { ...prev }; delete n[key]; return n; });
+      setPostCorrections(prev => prev.map(c => {
+        if (c.id === correctionId) {
+          return { ...c, [voteType === 'upvote' ? 'upvotes' : 'downvotes']: Math.max(0, c[voteType === 'upvote' ? 'upvotes' : 'downvotes'] - 1) };
+        }
+        return c;
+      }));
+    } else {
+      // Remove old vote if switching
+      if (existing) {
+        await supabase.from("community_reactions")
+          .delete()
+          .eq("user_id", user.id)
+          .eq("correction_id", correctionId);
+      }
+
+      await supabase.from("community_reactions").insert({
+        user_id: user.id,
+        correction_id: correctionId,
+        reaction_type: voteType,
+      });
+
+      setUserReactions(prev => ({ ...prev, [key]: voteType }));
+      setPostCorrections(prev => prev.map(c => {
+        if (c.id === correctionId) {
+          const updated = { ...c };
+          if (voteType === 'upvote') {
+            updated.upvotes = (updated.upvotes || 0) + 1;
+            if (existing === 'downvote') updated.downvotes = Math.max(0, (updated.downvotes || 0) - 1);
+          } else {
+            updated.downvotes = (updated.downvotes || 0) + 1;
+            if (existing === 'upvote') updated.upvotes = Math.max(0, (updated.upvotes || 0) - 1);
+          }
+          return updated;
+        }
+        return c;
+      }));
+    }
+  }
+
+  async function submitReport() {
+    if (!user || !reportTarget || !reportReason.trim()) return;
+    await supabase.from("community_reports").insert({
+      reporter_id: user.id,
+      post_id: reportTarget.type === 'post' ? reportTarget.id : null,
+      correction_id: reportTarget.type === 'correction' ? reportTarget.id : null,
+      reason: reportReason.trim(),
+    });
+    setShowReportModal(false);
+    setReportTarget(null);
+    setReportReason('');
+  }
+
+  function getTimeAgo(dateStr) {
+    if (!dateStr) return 'Never';
+    const diff = Date.now() - new Date(dateStr).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ago`;
+  }
+
+  function formatAudioTime(sec) {
+    if (!sec || !isFinite(sec)) return '0:00';
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  }
+
+  function formatMinutesSpent(totalMinutes) {
+    const mins = Math.max(0, Number(totalMinutes || 0));
+    if (mins < 60) return `${mins}m`;
+    const hours = Math.floor(mins / 60);
+    const remainder = mins % 60;
+    if (remainder === 0) return `${hours}h`;
+    return `${hours}h ${remainder}m`;
+  }
+
+  function formatDashboardDate(dateStr) {
+    if (!dateStr) return 'No activity yet';
+    return new Date(dateStr).toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  }
+
+  function getTeacherLeaderboard(metric, limit = 3) {
+    const students = teacherDashboardData?.students || [];
+    return [...students]
+      .sort((a, b) => {
+        const aValue = Number(a?.stats?.[metric] || 0);
+        const bValue = Number(b?.stats?.[metric] || 0);
+        if (bValue !== aValue) return bValue - aValue;
+        return (b?.stats?.active_days_last_30 || 0) - (a?.stats?.active_days_last_30 || 0);
+      })
+      .slice(0, limit);
+  }
+
+  function formatLeaderboardValue(metric, value) {
+    if (metric === 'minutes_last_7_days') return formatMinutesSpent(value);
+    if (metric === 'current_streak') return `${value || 0}d`;
+    return `${value || 0}`;
+  }
+
+  async function playCommunityAudio(postId, audioUrl) {
+    // If same post is playing, toggle pause/play
+    if (playingPostId === postId && communityAudioRef.current) {
+      if (communityAudioRef.current.paused) {
+        communityAudioRef.current.play();
+        setPlayingPostId(postId);
+      } else {
+        communityAudioRef.current.pause();
+        setPlayingPostId(null);
+      }
+      return;
+    }
+    // Stop any existing audio
+    if (communityAudioRef.current) {
+      communityAudioRef.current.pause();
+      communityAudioRef.current.removeAttribute('src');
+    }
+    const src = audioUrl.startsWith('data:') ? audioUrl : `data:audio/webm;base64,${audioUrl}`;
+
+    // Decode audio data via AudioContext to get accurate duration
+    // (WebM from MediaRecorder has broken duration metadata)
+    let realDuration = 0;
+    try {
+      const res = await fetch(src);
+      const arrayBuf = await res.arrayBuffer();
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const decoded = await audioCtx.decodeAudioData(arrayBuf);
+      realDuration = decoded.duration;
+      audioCtx.close();
+    } catch (e) {
+      console.warn('Could not decode audio for duration:', e);
+    }
+
+    const audio = new Audio(src);
+    communityAudioRef.current = audio;
+    comRealDurationRef.current = realDuration;
+    setPlayingPostId(postId);
+    setComAudioProgress(0);
+    setComAudioTime(0);
+    setComAudioDuration(realDuration);
+
+    audio.addEventListener('timeupdate', () => {
+      const dur = comRealDurationRef.current;
+      const t = dur > 0 ? Math.min(audio.currentTime, dur) : audio.currentTime;
+      setComAudioTime(t);
+      if (dur > 0) setComAudioProgress(Math.min((t / dur) * 100, 100));
+    });
+    audio.addEventListener('ended', () => {
+      setPlayingPostId(null);
+      setComAudioProgress(0);
+      setComAudioTime(0);
+    });
+    audio.play().catch(err => console.error("Audio play error:", err));
+  }
+
+  const comRealDurationRef = useRef(0);
+
+  function seekCommunityAudio(val, postId) {
+    if (playingPostId !== postId || !communityAudioRef.current) return;
+    const dur = comRealDurationRef.current;
+    if (dur > 0) {
+      communityAudioRef.current.currentTime = (val / 100) * dur;
+    }
+  }
+
+  // ---------- RECORDING PREVIEW PLAYER ----------
+
+  function playPreviewAudio() {
+    if (!recordedAudioUrl) return;
+    if (previewAudioRef.current) {
+      if (previewPlaying) {
+        previewAudioRef.current.pause();
+        setPreviewPlaying(false);
+        return;
+      }
+      previewAudioRef.current.play();
+      setPreviewPlaying(true);
+      return;
+    }
+    const audio = new Audio(recordedAudioUrl);
+    previewAudioRef.current = audio;
+    setPreviewPlaying(true);
+    setPreviewProgress(0);
+    setPreviewTime(0);
+
+    audio.addEventListener('timeupdate', () => {
+      const dur = previewDurationRef.current;
+      // Clamp to real duration — WebM metadata can report bogus currentTime
+      const t = dur > 0 ? Math.min(audio.currentTime, dur) : audio.currentTime;
+      setPreviewTime(t);
+      if (dur > 0) setPreviewProgress(Math.min((t / dur) * 100, 100));
+    });
+    audio.addEventListener('ended', () => {
+      setPreviewPlaying(false);
+      setPreviewProgress(0);
+      setPreviewTime(0);
+    });
+    audio.play().catch(err => console.error("Preview play error:", err));
+  }
+
+  function seekPreviewAudio(val) {
+    if (!previewAudioRef.current) return;
+    const dur = previewDurationRef.current;
+    if (dur > 0) {
+      previewAudioRef.current.currentTime = (val / 100) * dur;
+    }
+  }
+
+  function cleanupPreviewAudio() {
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      previewAudioRef.current = null;
+    }
+    if (recordedAudioUrl) URL.revokeObjectURL(recordedAudioUrl);
+    setRecordedAudioUrl(null);
+    setPreviewPlaying(false);
+    setPreviewProgress(0);
+    setPreviewTime(0);
+    setPreviewDuration(0);
+    previewDurationRef.current = 0;
+  }
+
   // ---------- WORD OF THE DAY FUNCTIONS ----------
 
   async function loadWordOfTheDay() {
@@ -1713,12 +3284,57 @@ function App() {
           .eq("word_id", wordData.id)
           .order("order_index", { ascending: true });
         setWotdExamples(examplesData || []);
+        // Prime TTS caches from any audio stored on the rows.
+        // This is the cross-device fast path — first student of the day
+        // populates these columns via writeback; everyone after gets the
+        // audio inline with the word query, zero extra network.
+        primeWotdAudio(wordData, examplesData || []);
       }
     } catch (err) {
       console.error("Error in loadWordOfTheDay:", err);
     }
 
     setLoadingWotd(false);
+  }
+
+  // Prime client caches from audio_base64 columns on wotd rows.
+  // For any row missing audio, kick off a background prewarm that
+  // (a) returns the audio to cache here and
+  // (b) asks the edge function to write it back onto the row for future users.
+  function primeWotdAudio(wordRow, examplesRows) {
+    if (!wordRow) return;
+    const prewarm = (text, table, id) => {
+      if (!text) return;
+      if (scenarioTtsCache.current[text]) return;
+      const persisted = getPersistTts(text);
+      if (persisted) { scenarioTtsCache.current[text] = persisted; return; }
+      // Fire-and-forget background prewarm
+      supabase.functions.invoke("scenario-chat", {
+        body: { action: "generate-tts", text, writeback: { table, id } }
+      }).then(({ data, error }) => {
+        if (error) return;
+        const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+        if (parsed?.audioBase64) {
+          scenarioTtsCache.current[text] = parsed.audioBase64;
+          setPersistTts(text, parsed.audioBase64);
+        }
+      }).catch(() => {});
+    };
+
+    if (wordRow.audio_base64) {
+      scenarioTtsCache.current[wordRow.arabic_text] = wordRow.audio_base64;
+      setPersistTts(wordRow.arabic_text, wordRow.audio_base64);
+    } else {
+      prewarm(wordRow.arabic_text, "word_of_the_day", wordRow.id);
+    }
+    for (const ex of examplesRows) {
+      if (ex.audio_base64) {
+        scenarioTtsCache.current[ex.example_arabic] = ex.audio_base64;
+        setPersistTts(ex.example_arabic, ex.audio_base64);
+      } else {
+        prewarm(ex.example_arabic, "word_of_the_day_examples", ex.id);
+      }
+    }
   }
 
   function resetWotdFlow() {
@@ -1756,21 +3372,65 @@ function App() {
 
   // ---------- PICTURE DESCRIBE FUNCTIONS ----------
 
-  async function loadPictureDescribeLessons() {
+  async function prefetchPicturePreview() {
+    try {
+      const { count } = await supabase
+        .from("picture_describe_lessons")
+        .select("*", { count: "exact", head: true });
+      const totalLessons = count || 1;
+      const startDate = new Date('2026-02-05T00:00:00Z');
+      const today = new Date();
+      const daysDiff = Math.floor((today - startDate) / (1000 * 60 * 60 * 24));
+      const lessonOrderIndex = (daysDiff % totalLessons) + 1;
+      const { data: lesson } = await supabase
+        .from("picture_describe_lessons")
+        .select("image_url")
+        .eq("order_index", lessonOrderIndex)
+        .single();
+      if (lesson?.image_url) setPicturePreviewUrl(lesson.image_url);
+    } catch (e) {
+      console.error("Error prefetching picture preview:", e);
+    }
+  }
+
+  async function loadPictureOfTheDay() {
     setLoadingPictureLessons(true);
     try {
-      const { data, error } = await supabase
+      // Get total count of picture lessons
+      const { count } = await supabase
+        .from("picture_describe_lessons")
+        .select("*", { count: "exact", head: true });
+
+      const totalLessons = count || 1;
+
+      // Calculate which lesson to show today (same approach as WOTD)
+      const startDate = new Date('2026-02-05T00:00:00Z');
+      const today = new Date();
+      const daysDiff = Math.floor((today - startDate) / (1000 * 60 * 60 * 24));
+      const lessonOrderIndex = (daysDiff % totalLessons) + 1;
+
+      // Fetch today's lesson
+      const { data: lesson, error } = await supabase
         .from("picture_describe_lessons")
         .select("*")
-        .order("order_index", { ascending: true });
+        .eq("order_index", lessonOrderIndex)
+        .single();
 
-      if (error) {
-        console.error("Error loading picture describe lessons:", error);
+      if (error || !lesson) {
+        console.error("Error loading picture of the day:", error);
+        // Fallback to first lesson
+        const { data: fallback } = await supabase
+          .from("picture_describe_lessons")
+          .select("*")
+          .order("order_index", { ascending: true })
+          .limit(1)
+          .single();
+        if (fallback) openPictureDescribeLesson(fallback);
       } else {
-        setPictureDescribeLessons(data || []);
+        openPictureDescribeLesson(lesson);
       }
     } catch (err) {
-      console.error("Error in loadPictureDescribeLessons:", err);
+      console.error("Error in loadPictureOfTheDay:", err);
     }
     setLoadingPictureLessons(false);
   }
@@ -1891,6 +3551,32 @@ function App() {
           return;
         }
 
+        // Check audio volume before sending — detect silence client-side
+        try {
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const arrayBuffer = await audioBlob.arrayBuffer();
+          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+          const channelData = audioBuffer.getChannelData(0);
+          // Calculate RMS (root mean square) volume
+          let sumSquares = 0;
+          for (let i = 0; i < channelData.length; i++) {
+            sumSquares += channelData[i] * channelData[i];
+          }
+          const rms = Math.sqrt(sumSquares / channelData.length);
+          console.log('Picture audio RMS volume:', rms);
+          audioCtx.close();
+
+          // RMS below 0.01 means effectively silence
+          if (rms < 0.01) {
+            console.log('Picture recording: detected silence (RMS too low)');
+            setPictureCheckingAnswer(false);
+            setPicturePhase("silence");
+            return;
+          }
+        } catch (e) {
+          console.warn('Audio volume check failed, proceeding anyway:', e);
+        }
+
         // Convert blob to base64
         const reader = new FileReader();
         reader.onloadend = async () => {
@@ -1974,7 +3660,7 @@ function App() {
             exerciseType: "picture-describe",
             vocabList: pictureVocab.map(v => v.arabic_text),
             lessonContext: activePictureLesson?.title || "",
-            imageUrl: activePictureLesson?.image_url || ""
+            imageDescription: activePictureLesson?.image_description || ""
           }
         }
       );
@@ -2000,10 +3686,47 @@ function App() {
         return;
       }
 
+      // CHECK 1: AI detected non-Arabic language
+      if (parsed?.is_arabic === false) {
+        console.log("AI detected non-Arabic speech:", parsed.language_detected, "transcript:", parsed.transcript);
+        setPictureCheckingAnswer(false);
+        setPicturePhase("not_arabic");
+        return;
+      }
+
       const transcript = parsed?.transcript || "";
 
       console.log("Picture describe transcript:", transcript);
       setPictureTranscript(transcript);
+
+      // CHECK 2: Silence / too few words
+      const trimmed = transcript.trim();
+      const wordCount = trimmed ? trimmed.split(/\s+/).length : 0;
+      console.log("Picture describe word count:", wordCount);
+
+      if (!trimmed || wordCount <= 2) {
+        setPictureCheckingAnswer(false);
+        setPicturePhase("silence");
+        return;
+      }
+
+      // CHECK 3: Fallback — verify transcript actually contains Arabic characters
+      const arabicChars = (trimmed.match(/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/g) || []).length;
+      const totalLetters = (trimmed.match(/[a-zA-Z\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/g) || []).length;
+      const arabicRatio = totalLetters > 0 ? arabicChars / totalLetters : 0;
+      console.log("Arabic ratio:", arabicRatio, "arabic:", arabicChars, "total:", totalLetters);
+      if (arabicRatio < 0.5) {
+        setPictureCheckingAnswer(false);
+        setPicturePhase("not_arabic");
+        return;
+      }
+
+      // CLIENT-SIDE too-short detection (under 8 words)
+      if (wordCount < 8) {
+        setPictureCheckingAnswer(false);
+        setPicturePhase("too_short");
+        return;
+      }
 
       // Calculate match percentage
       const { percent, matched, missed } = calculateVocabMatch(transcript);
@@ -2011,24 +3734,49 @@ function App() {
       setPictureMatchedWords(matched);
       setPictureMissedWords(missed);
 
-      // Check if passed (use lesson threshold or default 70%)
-      const threshold = activePictureLesson?.pass_threshold || 70;
-
-      // Always go to feedback phase — no more pass/fail
+      // Always go to feedback phase
       setPicturePhase("feedback");
       setPictureFeedbackIndex(0);
       triggerHaptic();
 
+      // Mark picture of the day as completed for today
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        localStorage.setItem('picture_completed_date', today);
+        setPictureCompleted(true);
+        supabase.from('user_daily_stats').update({ picture_completed: true })
+          .eq('user_id', user.id).eq('date', today)
+          .then(({ error }) => {
+            if (error) console.error('user_daily_stats picture completion sync failed:', JSON.stringify(error));
+          });
+      } catch {}
+
       setPictureCheckingAnswer(false);
+
+      // Store rating label (fair/good/excellent)
+      setPictureScore(parsed.rating || null);
 
       // Process AI feedback steps from the response
       if (parsed?.steps && Array.isArray(parsed.steps)) {
-        setPictureFeedbackSteps(parsed.steps);
-        setPictureScore(parsed.score ?? null);
-        // Store vocab stats separately (keep score as a number)
-        if (parsed.vocabUsed != null) {
-          setPictureVocabStats({ vocabUsed: parsed.vocabUsed, vocabTotal: parsed.vocabTotal });
+        // Remove any AI-generated speak_challenge (we use DB follow-up instead)
+        let steps = parsed.steps.filter(s => s.type !== 'speak_challenge');
+
+        // Append DB follow-up question as the last step
+        if (activePictureLesson?.follow_up_question) {
+          steps.push({
+            type: 'speak_challenge',
+            prompt: activePictureLesson.follow_up_question,
+            promptTranslation: activePictureLesson.follow_up_translation || '',
+            starterWords: activePictureLesson.follow_up_starters || []
+          });
         }
+
+        setPictureFeedbackSteps(steps);
+        // Derive vocab stats from the vocab_check step's used[] array (single source of truth)
+        const vocabStep = steps.find(s => s.type === 'vocab_check');
+        const usedCount = vocabStep?.used?.length ?? parsed.vocabUsed ?? 0;
+        const totalCount = parsed.vocabTotal ?? pictureVocab.length;
+        setPictureVocabStats({ vocabUsed: usedCount, vocabTotal: totalCount });
       } else {
         // Fallback: create basic feedback from old format
         const fallbackSteps = [];
@@ -2041,9 +3789,18 @@ function App() {
           });
         }
         fallbackSteps.push({ type: 'vocab_check', used: matched.map(w => w.arabic_text || w.arabic), missed: missed.map(w => w.arabic_text || w.arabic), analysis: `You used ${percent}% of the target vocabulary.` });
-        fallbackSteps.push({ type: 'summary', message: parsed?.encouragement || 'Keep practicing! Every attempt makes you stronger. 💪' });
+        // Append DB follow-up question
+        if (activePictureLesson?.follow_up_question) {
+          fallbackSteps.push({
+            type: 'speak_challenge',
+            prompt: activePictureLesson.follow_up_question,
+            promptTranslation: activePictureLesson.follow_up_translation || '',
+            starterWords: activePictureLesson.follow_up_starters || []
+          });
+        }
         setPictureFeedbackSteps(fallbackSteps);
-        setPictureScore(parsed?.overallScore ? (parsed.overallScore / 10) : (percent / 10));
+        const fallbackPercent = parsed?.overallScore ?? percent;
+        setPictureScore(fallbackPercent >= 75 ? 'excellent' : fallbackPercent >= 50 ? 'good' : 'fair');
       }
     } catch (err) {
       console.error("Error processing picture audio:", err);
@@ -2073,6 +3830,22 @@ function App() {
     }
     setLoadingAiFeedback(false);
   };
+
+  function exitPictureToHome(skipConfirm = false) {
+    const inProgress = picturePhase === "picture" || picturePhase === "recording" || picturePhase === "feedback";
+    if (!skipConfirm && inProgress) {
+      showConfirm({
+        title: 'Exit Practice?',
+        message: 'Your progress will be lost if you leave now.',
+        variant: 'warning',
+        confirmLabel: 'Exit',
+        onConfirm: () => { setPracticeMode(null); resetPictureDescribeFlow(); },
+      });
+      return;
+    }
+    setPracticeMode(null);
+    resetPictureDescribeFlow();
+  }
 
   function resetPictureDescribeFlow() {
     setPicturePhase("lessons");
@@ -2123,8 +3896,25 @@ function App() {
       const chunks = [];
       recorder.ondataavailable = (e) => chunks.push(e.data);
       recorder.onstop = async () => {
-        // Convert to base64 and send to edge function
         const blob = new Blob(chunks, { type: 'audio/webm' });
+
+        // Check audio volume — detect silence before sending to AI
+        try {
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const arrayBuffer = await blob.arrayBuffer();
+          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+          const channelData = audioBuffer.getChannelData(0);
+          let sumSq = 0;
+          for (let i = 0; i < channelData.length; i++) sumSq += channelData[i] * channelData[i];
+          const rms = Math.sqrt(sumSq / channelData.length);
+          audioCtx.close();
+          if (rms < 0.01) {
+            setChallengeResult(prev => ({ ...prev, [stepIdx]: { good: false, feedback: "We didn't hear anything — tap the mic and try again.", silent: true } }));
+            setChallengeChecking(false);
+            return;
+          }
+        } catch (e) { console.warn('Challenge audio check failed:', e); }
+
         const reader = new FileReader();
         reader.onloadend = async () => {
           const base64 = reader.result;
@@ -2145,10 +3935,13 @@ function App() {
             if (!error && data) {
               const parsed = typeof data === "string" ? JSON.parse(data) : data;
               const pass = parsed?.pass === true;
-              const feedback = parsed?.feedback || (pass ? "Good!" : "That wasn't quite right.");
+              const isSilent = !parsed?.transcript || parsed.transcript.trim() === "";
+              const feedback = isSilent
+                ? "We didn't hear anything — tap the mic and try speaking in Arabic."
+                : (parsed?.feedback || (pass ? "Good!" : "That wasn't quite right."));
               setChallengeResult(prev => ({
                 ...prev,
-                [stepIdx]: { good: pass, feedback }
+                [stepIdx]: { good: pass, feedback, silent: isSilent }
               }));
 
               if (pass) {
@@ -2215,7 +4008,7 @@ function App() {
         .select("lesson_id, hearts_left, completed_at");
 
       if (error) {
-        console.error("Error loading lesson progress:", error);
+        console.error("Error loading lesson progress:", JSON.stringify(error));
         setLessonProgress([]);
       } else {
         setLessonProgress(data || []);
@@ -2227,7 +4020,7 @@ function App() {
         .select("speaking_lesson_id, completed_at");
 
       if (speakingError) {
-        console.error("Error loading speaking lesson progress:", speakingError);
+        console.error("Error loading speaking lesson progress:", JSON.stringify(speakingError));
         setSpeakingLessonProgress([]);
       } else {
         setSpeakingLessonProgress(speakingData || []);
@@ -2236,6 +4029,7 @@ function App() {
 
     fetchProgress();
     loadTodayScenario();
+    prefetchPicturePreview();
   }, [user]);
 
   // Reset quiz state
@@ -2325,8 +4119,31 @@ function App() {
         // Stop all tracks to release the microphone
         stream.getTracks().forEach(track => track.stop());
 
+        // If recording was cancelled (user backed out), discard everything
+        if (recordingCancelledRef.current) {
+          recordingCancelledRef.current = false;
+          audioChunksRef.current = [];
+          return;
+        }
+
         const recordedMime = mediaRecorder.mimeType || 'audio/webm;codecs=opus';
         const audioBlob = new Blob(audioChunksRef.current, { type: recordedMime });
+
+        // Create blob URL for audio preview playback
+        const blobUrl = URL.createObjectURL(audioBlob);
+        setRecordedAudioUrl(blobUrl);
+
+        // Decode to get accurate duration for preview player
+        try {
+          const arrayBuf = await audioBlob.arrayBuffer();
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const decoded = await audioCtx.decodeAudioData(arrayBuf);
+          setPreviewDuration(decoded.duration);
+          previewDurationRef.current = decoded.duration;
+          audioCtx.close();
+        } catch (e) {
+          console.warn('Could not decode audio for preview duration:', e);
+        }
 
         // Convert blob to base64
         const reader = new FileReader();
@@ -2335,6 +4152,9 @@ function App() {
           const base64Audio = base64String.split(',')[1];
           setRecordedAudio(base64Audio);
           console.log('Audio recorded (' + recordedMime + ' base64), length:', base64Audio.length);
+
+          // Skip auto-send when recording for community exercises
+          if (communityExerciseRef.current) return;
 
           // For Speaking Practice mode, pass the current item's arabic_text
           const currentSpeakingItem = speakingLessonItems[currentSpeakingItemIndex];
@@ -2356,6 +4176,25 @@ function App() {
           }
         }, 10000);
       }
+
+      // Community exercise / correction feedback recording limits
+      if (communityExerciseRef.current && (activeExerciseType || correctionRecordingRef.current)) {
+        const maxSec = activeExerciseType === 'daily_question' ? 60 : 20;
+        setRecordingCountdown(maxSec);
+        // Countdown interval
+        recordingIntervalRef.current = setInterval(() => {
+          setRecordingCountdown(prev => {
+            if (prev <= 1) return 0;
+            return prev - 1;
+          });
+        }, 1000);
+        // Auto-stop timeout
+        recordingTimerRef.current = setTimeout(() => {
+          if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+            stopRecording();
+          }
+        }, maxSec * 1000);
+      }
     } catch (err) {
       console.error("Start recording error:", err);
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
@@ -2371,6 +4210,10 @@ function App() {
   };
 
   const stopRecording = async () => {
+    // Clear community recording timers
+    if (recordingTimerRef.current) { clearTimeout(recordingTimerRef.current); recordingTimerRef.current = null; }
+    if (recordingIntervalRef.current) { clearInterval(recordingIntervalRef.current); recordingIntervalRef.current = null; }
+    setRecordingCountdown(null);
     try {
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
@@ -2383,6 +4226,39 @@ function App() {
       setIsRecording(false);
     }
   };
+
+  // Cancel an in-progress recording without processing/sending the audio.
+  // Used when the user navigates away from an exercise/correction mid-recording.
+  const cancelRecording = () => {
+    if (recordingTimerRef.current) { clearTimeout(recordingTimerRef.current); recordingTimerRef.current = null; }
+    if (recordingIntervalRef.current) { clearInterval(recordingIntervalRef.current); recordingIntervalRef.current = null; }
+    setRecordingCountdown(null);
+    try {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        recordingCancelledRef.current = true;
+        mediaRecorderRef.current.stop();
+      }
+    } catch (e) {
+      console.warn('Failed to cancel recording:', e);
+    }
+    setIsRecording(false);
+    audioChunksRef.current = [];
+  };
+
+  // Safety net: if the user leaves a community exercise (back button, tab
+  // switch, post submit, etc.) while a recording is in progress, cancel it
+  // so the mic isn't left live in the background.
+  useEffect(() => {
+    if (!activeExerciseType && communityExerciseRef.current && !correctionRecordingRef.current && isRecording) {
+      cancelRecording();
+    }
+  }, [activeExerciseType, isRecording]);
+
+  useEffect(() => {
+    if (activeTab !== 'community' && isRecording && communityExerciseRef.current) {
+      cancelRecording();
+    }
+  }, [activeTab, isRecording]);
 
   // Send recorded audio to Supabase Edge Function
   // expectedTextOverride: optional text to compare against (for Speaking Practice mode)
@@ -2515,6 +4391,9 @@ function App() {
     setExplanations([]);
     setGrammarNotes([]);
     setSpeakingExercises([]);
+    setPrebookItems([]);
+    setLoadingPrebookItems(lesson.lesson_format === 'prebook');
+    setPrebookLoadError('');
     setVocabIndex(0);
     setGrammarIndex(0);
     setExplanationIndex(0);
@@ -2547,9 +4426,24 @@ function App() {
         setExplanations(cached.explanations);
         setGrammarNotes(cached.grammarNotes);
         setSpeakingExercises(cached.speakingExercises);
+        if (lesson.lesson_format === 'prebook') {
+          const cachedPrebookItems = cached.prebookItems || [];
+          let resolvedPrebookItems = cachedPrebookItems;
+
+          if (!resolvedPrebookItems.length) {
+            resolvedPrebookItems = await loadPrebookItemsForLesson(lesson);
+          }
+
+          setPrebookItems(resolvedPrebookItems);
+          setLoadingPrebookItems(false);
+          setPrebookLoadError(resolvedPrebookItems.length ? '' : 'This lesson has no items yet.');
+        }
 
         if (lesson.lesson_format === "blocks") {
           setLessonBlocks(cached.blocks);
+          // Preload avatar images so they're ready before audio plays
+          const avatarUrls = [...new Set((cached.blocks || []).map(b => b.speakers?.avatar_url).filter(Boolean))];
+          avatarUrls.forEach(url => { const img = new Image(); img.src = url; });
         }
       } else {
         console.log("Fetching content for lesson:", lesson.id);
@@ -2659,9 +4553,27 @@ function App() {
             setLessonBlocks([]);
           } else {
             setLessonBlocks(blocks || []);
+            // Preload avatar images so they're ready before audio plays
+            const avatarUrls = [...new Set((blocks || []).map(b => b.speakers?.avatar_url).filter(Boolean))];
+            avatarUrls.forEach(url => { const img = new Image(); img.src = url; });
           }
 
           setLoadingBlocks(false);
+        }
+
+        // ✅ Load prebook items for Foundations lessons
+        if (lesson.lesson_format === 'prebook') {
+          try {
+            const pbItems = await loadPrebookItemsForLesson(lesson);
+            setPrebookItems(pbItems || []);
+            setPrebookLoadError((pbItems || []).length ? '' : 'This lesson has no items yet.');
+          } catch (pbErr) {
+            console.error('Error loading prebook items:', pbErr);
+            setPrebookItems([]);
+            setPrebookLoadError('Failed to load lesson content.');
+          }
+
+          setLoadingPrebookItems(false);
         }
       }
     } catch (err) {
@@ -2670,6 +4582,11 @@ function App() {
       setVocabItems([]);
       setExplanations([]);
       setLessonBlocks([]);
+      if (lesson.lesson_format === 'prebook') {
+        setPrebookItems([]);
+        setLoadingPrebookItems(false);
+        setPrebookLoadError('Failed to load lesson content.');
+      }
     } finally {
       setLoadingQuestions(false);
       endTransition(); // ✅ end overlay once data work is done
@@ -2685,6 +4602,9 @@ function App() {
     resetAudio();
     resetLessonFlow();
     setQuestions([]);
+    setPrebookItems([]);
+    setLoadingPrebookItems(false);
+    setPrebookLoadError('');
     setPracticeMode(null);
     setActiveTab("home");
 
@@ -2960,6 +4880,32 @@ function App() {
     );
   }
 
+  // ---------- FORCE UPDATE SCREEN ----------
+
+  if (forceUpdate) {
+    return (
+      <div style={{
+        position: 'fixed', inset: 0, zIndex: 99999,
+        background: '#0D1B2A',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        padding: '2rem', textAlign: 'center', fontFamily: 'inherit',
+      }}>
+        <img src="/clemency-icon.png" alt="Clemency House" style={{ width: 160, height: 160, objectFit: 'contain', marginBottom: '2.5rem', filter: 'brightness(1.6)' }} />
+        <h1 style={{ fontSize: '1.5rem', fontWeight: 700, color: '#F8F9FA', marginBottom: '0.75rem' }}>Update Required</h1>
+        <p style={{ fontSize: '1rem', color: '#A3B1C6', lineHeight: 1.6, maxWidth: 320, marginBottom: '2.5rem' }}>
+          A new version of Clemency House is available. Please update to continue using the app.
+        </p>
+        <button
+          onClick={() => { window.open(forceUpdate.update_url, '_system'); }}
+          className="btn-primary"
+          style={{ padding: '1rem 2.5rem', fontSize: '1.1rem' }}
+        >
+          Download Update
+        </button>
+      </div>
+    );
+  }
+
   // ---------- SPLASH SCREEN ----------
 
   if (showSplash) {
@@ -2974,142 +4920,196 @@ function App() {
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-background text-foreground flex flex-col items-center justify-center p-6 relative overflow-hidden font-sans">
-        {/* Background Decorative Elements */}
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/10 rounded-full blur-[120px]" />
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-secondary/10 rounded-full blur-[120px]" />
+      <div className="h-[100dvh] bg-background text-foreground flex flex-col font-sans relative overflow-hidden">
+        {/* Noise texture */}
+        <div className="noise-overlay" />
 
-        <div className="w-full max-w-md z-10 space-y-8 animate-in fade-in zoom-in duration-500">
-          {/* Logo & Header */}
-          <div className="flex flex-col items-center text-center space-y-4">
-            <div className="w-24 h-24 bg-card rounded-[2rem] border border-border/50 shadow-xl flex items-center justify-center p-4 active:scale-95 transition-transform duration-300">
-              <img
-                src="/clemency-icon.png"
-                alt="Ihya Institute Logo"
-                className="w-full h-full object-contain"
-              />
+        {/* Large floating Arabic calligraphy watermark */}
+        <div className="absolute top-[8%] right-[-15%] auth-watermark" style={{ fontSize: '12rem', fontFamily: "'Amiri', serif", color: 'rgba(224,159,62,0.05)', lineHeight: 1 }}>
+          عربي
+        </div>
+        <div className="absolute bottom-[15%] left-[-10%] auth-watermark" style={{ fontSize: '8rem', fontFamily: "'Amiri', serif", color: 'rgba(229,107,111,0.04)', lineHeight: 1, animationDelay: '-3s' }}>
+          لغة
+        </div>
+
+        {/* Warm radial glow behind form */}
+        <div className="absolute top-[20%] left-1/2 -translate-x-1/2 w-[500px] h-[500px] rounded-full auth-glow" style={{ background: 'radial-gradient(circle, rgba(224,159,62,0.08) 0%, transparent 70%)' }} />
+        <div className="absolute bottom-[10%] left-1/2 -translate-x-1/2 w-[400px] h-[300px] rounded-full" style={{ background: 'radial-gradient(circle, rgba(229,107,111,0.04) 0%, transparent 70%)' }} />
+
+        <div className="flex-1 flex flex-col justify-center px-8 w-full max-w-sm mx-auto relative z-10">
+          {/* Logo & Hero */}
+          <div className="text-center mb-10 auth-fade-up">
+            <div className="flex justify-center mb-5">
+              <div className="relative">
+                <div className="absolute inset-0 rounded-full blur-2xl" style={{ background: 'radial-gradient(circle, rgba(224,159,62,0.2) 0%, transparent 70%)', transform: 'scale(2)' }} />
+                <img src="/clemency-icon.png" alt="Ihya Institute" className="w-20 h-20 object-contain brightness-[1.6] relative z-10" />
+              </div>
             </div>
-            <div>
-              <h1 className="font-heading text-3xl font-bold tracking-tight">Ihya Arabic</h1>
-              <p className="text-muted-foreground mt-2 text-sm font-medium tracking-wide">
-                Start your journey towards mastering Arabic
-              </p>
-            </div>
+            <h1 className="text-[2rem] font-semibold tracking-tight leading-[1.2] mb-3" style={{ fontFamily: "var(--font-display)" }}>
+              Discover the{' '}
+              <span className="relative inline-block">
+                <span style={{ color: '#E09F3E' }}>soul</span>
+                <span className="absolute -bottom-1 left-0 right-0 h-[2px] rounded-full" style={{ background: 'linear-gradient(90deg, transparent, #E09F3E, transparent)' }} />
+              </span>
+              {' '}of Arabic
+            </h1>
+            <p className="text-muted-foreground text-[13px] leading-relaxed max-w-[260px] mx-auto">
+              Master pronunciation, script & heritage at your own pace
+            </p>
           </div>
 
-          {/* Auth Card */}
-          <div className="bg-card/40 backdrop-blur-2xl border border-border/50 rounded-[2.5rem] p-8 shadow-2xl relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-primary via-secondary to-primary" />
+          {/* Form section title */}
+          <div className="text-center mb-5 auth-fade-up auth-fade-up-delay-1">
+            <h2 className="text-lg font-bold tracking-tight" style={{ fontFamily: "var(--font-display)" }}>
+              {authForgotMode ? "Reset password" : authMode === "signin" ? "Welcome back" : "Create account"}
+            </h2>
+            <p className="text-muted-foreground/70 text-xs mt-1.5 tracking-wide">
+              {authForgotMode
+                ? "We'll send a reset link to your email"
+                : authMode === "signin"
+                ? "Sign in to continue your progress"
+                : "Start your Arabic journey today"}
+            </p>
+          </div>
 
-            <div className="mb-8">
-              <h2 className="font-heading text-xl font-bold">
-                {authMode === "signin" ? "Welcome back" : "Join the adventure"}
-              </h2>
-              <p className="text-muted-foreground text-sm mt-1">
-                {authMode === "signin"
-                  ? "Sign in to continue your progress"
-                  : "Create an account to start learning"}
-              </p>
+          <form
+            onSubmit={authForgotMode ? handleForgotPassword : (authMode === "signin" ? handleSignIn : handleSignUp)}
+            className="space-y-3"
+          >
+            {/* Email input */}
+            <div className="auth-input-group auth-fade-up auth-fade-up-delay-2">
+              <div className="relative group flex items-center rounded-2xl border border-border/30 bg-card/40 backdrop-blur-sm focus-within:border-primary/50 focus-within:bg-card/70 transition-all duration-300">
+                <div className="pl-4 text-muted-foreground/40 group-focus-within:text-primary transition-colors duration-300 flex-shrink-0">
+                  <Icon icon="solar:letter-bold" className="text-[15px]" />
+                </div>
+                <input
+                  type="email"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  required
+                  className="w-full bg-transparent py-3.5 pl-3 pr-4 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide"
+                  placeholder="your@email.com"
+                />
+              </div>
             </div>
 
-            <form
-              onSubmit={authMode === "signin" ? handleSignIn : handleSignUp}
-              className="space-y-5"
+            {/* Password input */}
+            <div
+              className="auth-input-group auth-fade-up auth-fade-up-delay-3"
+              style={authForgotMode ? { opacity: 0, height: 0, overflow: 'hidden', margin: 0 } : {}}
             >
-              <div className="space-y-2">
-                <label className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground ml-1">
-                  Email Address
-                </label>
-                <div className="relative group">
-                  <div className="absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground group-focus-within:text-primary transition-colors">
-                    <Icon icon="solar:letter-bold" className="text-xl" />
-                  </div>
-                  <input
-                    type="email"
-                    value={authEmail}
-                    onChange={(e) => setAuthEmail(e.target.value)}
-                    required
-                    className="w-full bg-background/50 border border-border/50 rounded-2xl py-4 pl-12 pr-4 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
-                    placeholder="explorer@arabic.id"
-                  />
+              <div className="relative group flex items-center rounded-2xl border border-border/30 bg-card/40 backdrop-blur-sm focus-within:border-primary/50 focus-within:bg-card/70 transition-all duration-300">
+                <div className="pl-4 text-muted-foreground/40 group-focus-within:text-primary transition-colors duration-300 flex-shrink-0">
+                  <Icon icon="solar:lock-password-bold" className="text-[15px]" />
                 </div>
+                <input
+                  type={showPassword ? "text" : "password"}
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  required={!authForgotMode}
+                  className="w-full bg-transparent py-3.5 pl-3 pr-2 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide"
+                  placeholder="••••••••"
+                  tabIndex={authForgotMode ? -1 : 0}
+                />
+                <button
+                  type="button"
+                  className="pr-4 pl-2 text-muted-foreground/40 active:text-primary transition-colors flex-shrink-0"
+                  onClick={() => setShowPassword(!showPassword)}
+                  tabIndex={-1}
+                >
+                  <Icon icon={showPassword ? "solar:eye-bold" : "solar:eye-closed-bold"} className="text-[15px]" />
+                </button>
               </div>
+            </div>
 
-              <div className="space-y-2">
-                <label className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground ml-1">
-                  Password
-                </label>
-                <div className="relative group">
-                  <div className="absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground group-focus-within:text-primary transition-colors">
-                    <Icon icon="solar:lock-password-bold" className="text-xl" />
-                  </div>
-                  <input
-                    type="password"
-                    value={authPassword}
-                    onChange={(e) => setAuthPassword(e.target.value)}
-                    required
-                    className="w-full bg-background/50 border border-border/50 rounded-2xl py-4 pl-12 pr-4 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
-                    placeholder="••••••••"
-                  />
-                </div>
+            {/* Forgot password */}
+            <div className="text-right" style={authMode !== "signin" || authForgotMode ? { opacity: 0, height: 0, overflow: 'hidden', margin: 0 } : {}}>
+              <button
+                type="button"
+                className="text-[11px] text-muted-foreground/50 active:text-primary transition-colors tracking-wide"
+                onClick={() => { triggerHaptic(); setAuthForgotMode(true); setAuthError(""); setResetSent(false); }}
+                tabIndex={authMode !== "signin" || authForgotMode ? -1 : 0}
+              >
+                Forgot password?
+              </button>
+            </div>
+
+            {authError && (
+              <div className="bg-destructive/8 border border-destructive/15 text-destructive text-xs font-semibold p-3 rounded-xl flex items-center justify-center gap-2 text-center backdrop-blur-sm">
+                <Icon icon="solar:danger-bold" className="text-base flex-shrink-0" />
+                <span>{authError}</span>
               </div>
+            )}
 
-              {authError && (
-                <div className="bg-destructive/10 border border-destructive/20 text-destructive text-xs font-bold p-4 rounded-2xl flex items-center gap-3 animate-in fade-in slide-in-from-top-2">
-                  <Icon icon="solar:danger-bold" className="text-lg flex-shrink-0" />
-                  <span>{authError}</span>
-                </div>
-              )}
+            {resetSent && (
+              <div className="bg-green/8 border border-green/15 text-green text-xs font-semibold p-3 rounded-xl flex items-center justify-center gap-2 text-center backdrop-blur-sm">
+                <Icon icon="solar:check-circle-bold" className="text-base flex-shrink-0" />
+                <span>Reset link sent! Check your email.</span>
+              </div>
+            )}
 
+            <div className="auth-fade-up auth-fade-up-delay-4">
               <button
                 type="submit"
-                className="w-full bg-primary text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-2 shadow-[0_8px_24px_rgba(224,159,62,0.3)] active:scale-[0.98] transition-all mt-4 text-sm uppercase tracking-wider"
+                className="w-full font-bold py-4 rounded-2xl flex items-center justify-center gap-2.5 active:scale-[0.97] transition-all text-sm tracking-wide relative overflow-hidden group"
+                style={{ background: 'linear-gradient(135deg, #E09F3E, #D4922F)', color: '#0D1B2A', boxShadow: '0 8px 32px rgba(224,159,62,0.25), inset 0 1px 0 rgba(255,255,255,0.15)' }}
               >
-                {authMode === "signin" ? (
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent translate-x-[-100%] group-active:translate-x-[100%] transition-transform duration-700" />
+                {authForgotMode ? (
                   <>
-                    <Icon icon="solar:login-bold" className="text-lg" />
-                    Sign In
+                    <Icon icon="solar:letter-bold" className="text-base relative z-10" />
+                    <span className="relative z-10">Send Reset Link</span>
                   </>
                 ) : (
                   <>
-                    <Icon icon="solar:user-plus-bold" className="text-lg" />
-                    Create Account
+                    <Icon icon={authMode === "signin" ? "solar:login-bold" : "solar:user-plus-bold"} className="text-base relative z-10" />
+                    <span className="relative z-10">{authMode === "signin" ? "Sign In" : "Create Account"}</span>
                   </>
                 )}
               </button>
-            </form>
+            </div>
+          </form>
 
-            <div className="mt-8 pt-6 border-t border-border/30 text-center">
+          {/* Back to sign in (forgot mode) */}
+          {authForgotMode && (
+            <div className="text-center mt-4">
               <button
                 type="button"
-                className="text-sm font-bold text-muted-foreground hover:text-primary transition-colors flex items-center justify-center gap-2 mx-auto"
-                onClick={() => {
-                  triggerHaptic();
-                  setAuthMode(authMode === "signin" ? "signup" : "signin");
-                }}
+                className="text-xs text-muted-foreground/60 active:text-primary transition-colors tracking-wide"
+                onClick={() => { triggerHaptic(); setAuthForgotMode(false); setAuthError(""); setResetSent(false); }}
               >
-                {authMode === "signin"
-                  ? "Don't have an account? Sign up"
-                  : "Already a member? Sign in"}
-                <Icon icon="solar:alt-arrow-right-bold" className="text-xs" />
+                ← Back to sign in
               </button>
             </div>
-          </div>
+          )}
 
-          {/* Features Row */}
-          <div className="grid grid-cols-2 gap-3 pb-8">
-            <div className="bg-card/30 backdrop-blur-md border border-border/30 rounded-2.5xl p-4 flex flex-col items-center text-center gap-2">
-              <div className="bg-primary/20 w-8 h-8 rounded-lg flex items-center justify-center border border-primary/20">
-                <Icon icon="solar:book-bookmark-bold" className="text-primary text-sm" />
-              </div>
-              <span className="text-[10px] font-bold text-muted-foreground tracking-tight uppercase">Dialogue Lessons</span>
+          {/* Switch auth mode */}
+          {!authForgotMode && (
+            <div className="text-center mt-6 auth-fade-up auth-fade-up-delay-5">
+              <button
+                type="button"
+                className="text-[13px] text-muted-foreground/60 active:text-primary transition-colors"
+                onClick={() => { triggerHaptic(); setAuthMode(authMode === "signin" ? "signup" : "signin"); setAuthError(""); setResetSent(false); }}
+              >
+                {authMode === "signin"
+                  ? <>Don't have an account? <span className="font-bold" style={{ color: '#E09F3E' }}>Sign up</span></>
+                  : <>Already a member? <span className="font-bold" style={{ color: '#E09F3E' }}>Sign in</span></>}
+              </button>
             </div>
-            <div className="bg-card/30 backdrop-blur-md border border-border/30 rounded-2.5xl p-4 flex flex-col items-center text-center gap-2">
-              <div className="bg-secondary/20 w-8 h-8 rounded-lg flex items-center justify-center border border-secondary/20">
-                <Icon icon="solar:medal-star-bold" className="text-secondary text-sm" />
+          )}
+
+          {/* Feature pills */}
+          <div className="flex justify-center gap-2.5 mt-10 auth-fade-up auth-fade-up-delay-5">
+            {[
+              { icon: "solar:pen-bold-duotone", label: "Lessons" },
+              { icon: "solar:microphone-3-bold-duotone", label: "AI Practice" },
+              { icon: "solar:cup-hot-bold-duotone", label: "Culture" },
+            ].map((f) => (
+              <div key={f.label} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-border/20 text-muted-foreground/50 backdrop-blur-sm" style={{ background: 'rgba(20,36,56,0.4)' }}>
+                <Icon icon={f.icon} className="text-xs" style={{ color: 'rgba(224,159,62,0.6)' }} />
+                <span className="text-[10px] font-semibold tracking-wider uppercase">{f.label}</span>
               </div>
-              <span className="text-[10px] font-bold text-muted-foreground tracking-tight uppercase">Track Progress</span>
-            </div>
+            ))}
           </div>
         </div>
       </div>
@@ -3129,12 +5129,12 @@ function App() {
     });
 
     return (
-      <div className="min-h-screen bg-background text-foreground font-sans">
+      <div className={`min-h-screen bg-background text-foreground font-sans ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
         {/* Header */}
-        <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+        <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
           <button
             className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center"
-            onClick={() => { triggerHaptic(); setShowStreaksPage(false); }}
+            onClick={() => { triggerHaptic(); setTransitionDirection("back"); setShowStreaksPage(false); }}
           >
             <MdArrowBackIosNew className="text-foreground" />
           </button>
@@ -3218,14 +5218,15 @@ function App() {
     // Helper: find next incomplete lesson
     const nextLesson = (() => {
       if (!allLessons || allLessons.length === 0) return null;
+      const coreLessons = allLessons.filter((lesson) => lesson.lesson_format !== 'prebook');
+      for (const lesson of coreLessons) {
+        if (!isLessonCompleted(lesson.id)) return lesson;
+      }
       for (const lesson of allLessons) {
         if (!isLessonCompleted(lesson.id)) return lesson;
       }
       return null;
     })();
-
-    // Helper: find which stage the next lesson belongs to
-    const nextLessonStage = nextLesson ? stages.find(s => s.id === nextLesson.stage_id) : null;
 
     // Completed lesson count
     const completedLessonCount = lessonProgress.length;
@@ -3235,15 +5236,15 @@ function App() {
 
         {/* ========== HOME TAB ========== */}
         {activeTab === "home" && (
-          <>
-            <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+          <div key={`tab-${tabTransitionKey}`} className={tabDirection === 'back' ? 'tab-slide-left' : 'tab-slide-right'}>
+            <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
               <div className="flex flex-col items-start">
                 <p className="text-base font-medium text-muted-foreground font-arabic tracking-wide" dir="rtl">مرحباً</p>
-                <h1 className="font-heading text-xl font-bold">{user.email?.split("@")[0] || "Explorer"}</h1>
+                <h1 className="font-heading text-xl font-bold">{userProfile?.display_name || user.email?.split("@")[0] || "Explorer"}</h1>
               </div>
               <div
                 className="flex items-center gap-2 bg-secondary/10 px-3 py-1.5 rounded-full border border-secondary/20 shadow-[0_0_12px_rgba(229,107,111,0.15)] cursor-pointer"
-                onClick={() => { triggerHaptic(); setShowStreaksPage(true); }}
+                onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setShowStreaksPage(true); }}
               >
                 <Icon icon="solar:fire-bold" className="text-secondary text-lg" />
                 <span className="text-secondary font-bold text-sm tracking-wide">{currentStreak}</span>
@@ -3252,101 +5253,68 @@ function App() {
 
             <main className="px-6 space-y-8 mt-4">
               {/* Stats Grid */}
-              <section className="grid grid-cols-2 gap-3">
-                <div className="bg-card p-4 rounded-3xl flex flex-col items-center justify-center gap-1 border border-border/50 shadow-sm">
-                  <Icon icon="solar:star-fall-bold" className="text-primary text-2xl mb-1" />
-                  <span className="text-2xl font-heading font-bold">{stages.length > 0 ? `${stages.length}` : "—"}</span>
-                  <span className="text-xs text-muted-foreground font-medium">Stages</span>
-                </div>
-                <div className="bg-card p-4 rounded-3xl flex flex-col items-center justify-center gap-1 border border-border/50 shadow-sm">
-                  <Icon icon="solar:book-bookmark-bold" className="text-accent text-2xl mb-1" />
-                  <span className="text-2xl font-heading font-bold">{completedLessonCount}/{allLessons.length}</span>
-                  <span className="text-xs text-muted-foreground font-medium text-center">Lessons Completed</span>
-                </div>
-              </section>
-
-              {/* Up Next Card */}
-              {nextLesson && (
-                <section className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <h2 className="font-heading text-xl font-bold">Up Next</h2>
-                  </div>
-                  <div className="group relative overflow-hidden rounded-[2rem] bg-card border border-border/50 shadow-lg">
-                    {nextLesson.cover_image_url && (
-                      <div className="absolute inset-0 z-0">
-                        <img src={nextLesson.cover_image_url} alt="Lesson Cover" className="w-full h-full object-cover opacity-40 mix-blend-overlay" />
-                        <div className="absolute inset-0 bg-gradient-to-t from-card via-card/80 to-transparent" />
-                      </div>
-                    )}
-                    <div className="relative z-10 p-6 flex flex-col h-full justify-end min-h-[180px]">
-                      {nextLessonStage && (
-                        <div className="flex items-center gap-2 mb-3">
-                          <span className="bg-primary/20 text-primary px-3 py-1 rounded-full text-xs font-bold tracking-wider uppercase border border-primary/20">
-                            {nextLessonStage.title}
-                          </span>
-                        </div>
-                      )}
-                      <h3 className="font-heading text-2xl font-bold mb-1">{nextLesson.title}</h3>
-                      <p className="text-muted-foreground text-sm mb-6">
-                        {nextLesson.format === "dialogue" ? "Interactive dialogue lesson" : "Reading comprehension lesson"}
-                      </p>
-                      <button
-                        className="w-full bg-primary text-primary-foreground font-bold py-4 rounded-2xl flex items-center justify-center gap-2 shadow-[0_4px_16px_rgba(224,159,62,0.3)] active:scale-[0.98] transition-all"
-                        onClick={() => { triggerHaptic(); setPracticeMode("book"); openLesson(nextLesson); }}
+              <section className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  {/* Daily Goal Tile */}
+                  {(() => {
+                    const minutesSpent = Math.floor(dailySecondsSpent / 60);
+                    const progress = Math.min(minutesSpent / dailyGoalMinutes, 1);
+                    const circumference = 2 * Math.PI * 34;
+                    const dashOffset = circumference - (progress * circumference);
+                    const remaining = Math.max(0, dailyGoalMinutes - minutesSpent);
+                    return (
+                      <div
+                        className="bg-card p-4 rounded-3xl flex flex-col items-center justify-center gap-1 border border-border/50 shadow-sm cursor-pointer active:scale-[0.98] transition-all"
+                        onClick={() => { triggerHaptic(); setShowGoalPicker(!showGoalPicker); }}
                       >
-                        <Icon icon="solar:play-circle-bold" className="text-xl" />
-                        Continue Learning
+                        <div className="relative">
+                          <svg width="56" height="56" viewBox="0 0 80 80" className="-rotate-90">
+                            <circle cx="40" cy="40" r="34" fill="none" stroke="var(--muted)" strokeWidth="5" />
+                            <circle
+                              cx="40" cy="40" r="34" fill="none"
+                              stroke={progress >= 1 ? "var(--green)" : "var(--primary)"}
+                              strokeWidth="5" strokeLinecap="round"
+                              strokeDasharray={circumference}
+                              strokeDashoffset={dashOffset}
+                              style={{ transition: 'stroke-dashoffset 0.5s ease' }}
+                            />
+                          </svg>
+                          <div className="absolute inset-0 flex flex-col items-center justify-center">
+                            {progress >= 1 ? (
+                              <Icon icon="solar:check-circle-bold" className="text-green text-lg" />
+                            ) : (
+                              <>
+                                <span className="text-sm font-bold">{minutesSpent}</span>
+                                <span className="text-[8px] text-muted-foreground font-medium">/ {dailyGoalMinutes}m</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                        <span className="text-xs text-muted-foreground font-medium">
+                          {progress >= 1 ? "Goal Complete!" : "Daily Goal"}
+                        </span>
+                      </div>
+                    );
+                  })()}
+                  {/* Lessons Completed Tile */}
+                  <div className="bg-card p-4 rounded-3xl flex flex-col items-center justify-center gap-1 border border-border/50 shadow-sm">
+                    <Icon icon="solar:book-bookmark-bold" className="text-accent text-2xl mb-1" />
+                    <span className="text-2xl font-heading font-bold">{completedLessonCount}/{allLessons.length}</span>
+                    <span className="text-xs text-muted-foreground font-medium text-center">Lessons Completed</span>
+                  </div>
+                </div>
+                {/* Goal Picker - slides open below tiles */}
+                {showGoalPicker && (
+                  <div className="bg-card rounded-3xl p-4 border border-border/50 space-y-3 goal-picker-open">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-bold">Choose your daily goal:</p>
+                      <button
+                        className="text-primary text-xs font-bold uppercase tracking-widest"
+                        onClick={() => { triggerHaptic(); setShowGoalPicker(false); }}
+                      >
+                        Done
                       </button>
                     </div>
-                  </div>
-                </section>
-              )}
-
-              {/* Word of the Day */}
-              <section>
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="font-heading text-xl font-bold">Word of the Day</h2>
-                  <button
-                    className="text-muted-foreground hover:text-primary transition-colors"
-                    onClick={() => { triggerHaptic(); setPracticeMode("wotd"); loadWordOfTheDay(); }}
-                  >
-                    <Icon icon="solar:arrow-right-bold" className="text-xl" />
-                  </button>
-                </div>
-                <div
-                  className="bg-card rounded-[2rem] p-6 border border-border/50 shadow-md relative overflow-hidden flex flex-col cursor-pointer active:scale-[0.98] transition-transform"
-                  onClick={() => { triggerHaptic(); setPracticeMode("wotd"); loadWordOfTheDay(); }}
-                >
-                  <div className="absolute top-0 right-0 w-2 h-full bg-primary rounded-r-3xl" />
-                  <div dir="rtl" className="text-right mb-4">
-                    <h3 className="font-heading text-5xl text-primary leading-tight font-medium" style={{ fontFamily: "'Noto Naskh Arabic', serif" }}>
-                      كلمة
-                    </h3>
-                    <p className="text-muted-foreground text-sm mt-2 font-medium" dir="ltr">kalima</p>
-                  </div>
-                  <div className="h-px bg-border/50 w-full my-4" />
-                  <div>
-                    <p className="text-lg font-bold mb-1">Word</p>
-                    <p className="text-sm text-muted-foreground italic">noun — Tap to explore today's word</p>
-                  </div>
-                </div>
-              </section>
-
-              {/* Daily Goal */}
-              <section>
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="font-heading text-xl font-bold">Daily Goal</h2>
-                  <button
-                    className="text-primary text-xs font-bold uppercase tracking-widest"
-                    onClick={() => { triggerHaptic(); setShowGoalPicker(!showGoalPicker); }}
-                  >
-                    {showGoalPicker ? "Done" : "Edit"}
-                  </button>
-                </div>
-
-                {showGoalPicker ? (
-                  <div className="bg-card rounded-3xl p-6 border border-border/50 space-y-4">
-                    <p className="text-sm text-muted-foreground font-medium">Choose your daily goal:</p>
                     <div className="grid grid-cols-5 gap-2">
                       {[5, 10, 15, 20, 30].map(mins => (
                         <button
@@ -3369,138 +5337,137 @@ function App() {
                       ))}
                     </div>
                   </div>
-                ) : (() => {
-                  // Use tracked time spent on app today
-                  const minutesSpent = Math.floor(dailySecondsSpent / 60);
-                  const progress = Math.min(minutesSpent / dailyGoalMinutes, 1);
-                  const circumference = 2 * Math.PI * 44;
-                  const dashOffset = circumference - (progress * circumference);
-                  const remaining = Math.max(0, dailyGoalMinutes - minutesSpent);
+                )}
+              </section>
 
-                  return (
-                    <div className="bg-card rounded-3xl p-6 border border-border/50 flex items-center gap-6">
-                      {/* Circular Progress */}
-                      <div className="relative flex-shrink-0">
-                        <svg width="96" height="96" viewBox="0 0 100 100" className="-rotate-90">
-                          <circle cx="50" cy="50" r="44" fill="none" stroke="var(--muted)" strokeWidth="6" />
-                          <circle
-                            cx="50" cy="50" r="44" fill="none"
-                            stroke={progress >= 1 ? "var(--green)" : "var(--primary)"}
-                            strokeWidth="6" strokeLinecap="round"
-                            strokeDasharray={circumference}
-                            strokeDashoffset={dashOffset}
-                            style={{ transition: 'stroke-dashoffset 0.5s ease' }}
-                          />
-                        </svg>
-                        <div className="absolute inset-0 flex flex-col items-center justify-center">
-                          {progress >= 1 ? (
-                            <Icon icon="solar:check-circle-bold" className="text-green text-3xl" />
-                          ) : (
-                            <>
-                              <span className="text-xl font-bold">{minutesSpent}</span>
-                              <span className="text-[10px] text-muted-foreground font-medium">/ {dailyGoalMinutes}m</span>
-                            </>
-                          )}
-                        </div>
+              {/* Up Next Card */}
+              {nextLesson && (
+                <section className="space-y-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-1 h-6 rounded-full" style={{ background: 'linear-gradient(to bottom, #E09F3E, #E56B6F)' }} />
+                    <h2 className="text-xl font-heading font-bold">Up Next</h2>
+                  </div>
+                  <div className="upnext-card group relative overflow-hidden rounded-[2rem] border border-border/30 shadow-xl" style={{ background: 'linear-gradient(145deg, rgba(20,36,56,0.9), rgba(13,27,42,0.95))' }}>
+                    {nextLesson.cover_image_url && (
+                      <div className="absolute inset-0 z-0">
+                        <img src={nextLesson.cover_image_url} alt="Lesson Cover" className="w-full h-full object-cover opacity-25" style={{ filter: 'blur(1px)' }} />
+                        <div className="absolute inset-0" style={{ background: 'linear-gradient(160deg, rgba(13,27,42,0.4) 0%, rgba(13,27,42,0.85) 50%, rgba(13,27,42,0.98) 100%)' }} />
                       </div>
-
-                      {/* Text */}
-                      <div className="flex-1">
-                        <h3 className="font-heading font-bold text-lg mb-1">
-                          {progress >= 1 ? "Goal Complete! 🎉" : `${Math.round(progress * 100)}% done`}
-                        </h3>
-                        <p className="text-sm text-muted-foreground leading-relaxed">
-                          {progress >= 1
-                            ? "Amazing work today! Keep the momentum going."
-                            : `${remaining} min${remaining === 1 ? '' : 's'} left to reach your goal.`
-                          }
-                        </p>
-                      </div>
+                    )}
+                    {/* Decorative corner accent */}
+                    <div className="absolute top-0 right-0 w-32 h-32 opacity-[0.07]" style={{ background: 'radial-gradient(circle at top right, #E09F3E, transparent 70%)' }} />
+                    <div className="relative z-10 p-6 flex flex-col h-full min-h-[200px] items-center justify-center text-center">
+                      <h3 className="text-2xl font-heading font-bold mb-6 tracking-tight max-w-[26rem]">{nextLesson.title}</h3>
+                      <button
+                        className="w-full max-w-[22rem] font-bold py-4 rounded-2xl flex items-center justify-center active:scale-[0.97] transition-all text-sm tracking-wide relative overflow-hidden"
+                        style={{ background: 'linear-gradient(135deg, #E09F3E, #D4922F)', color: '#0D1B2A', boxShadow: '0 8px 32px rgba(224,159,62,0.2), inset 0 1px 0 rgba(255,255,255,0.12)' }}
+                        onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("book"); openLesson(nextLesson); }}
+                      >
+                        Continue Learning
+                      </button>
                     </div>
-                  );
-                })()}
+                  </div>
+                </section>
+              )}
+
+              {/* Word of the Day & Picture of the Day — side by side */}
+              <section className="grid grid-cols-2 gap-3">
+                {/* Word of the Day */}
+                <div
+                  className="relative rounded-2xl overflow-hidden cursor-pointer active:scale-[0.98] transition-all aspect-square"
+                  onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("wotd"); loadWordOfTheDay(); }}
+                >
+                  <img src="/images/wotd.png" alt="" className="absolute inset-0 w-full h-full object-cover" />
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent" />
+                  <div className="relative z-10 h-full flex flex-col justify-end p-4">
+                    <Icon icon="solar:sun-bold" className="text-amber-400 text-2xl mb-2" />
+                    <h3 className="text-sm font-extrabold text-white uppercase tracking-wide leading-tight">Word of the Day</h3>
+                    <p className="text-xs text-white/60 mt-1 font-arabic" dir="rtl">كلمة اليوم</p>
+                  </div>
+                </div>
+
+                {/* Picture of the Day */}
+                <div
+                  className={`relative rounded-2xl overflow-hidden cursor-pointer active:scale-[0.98] transition-all aspect-square ${pictureCompleted ? 'opacity-50 grayscale' : ''}`}
+                  onClick={() => {
+                    triggerHaptic();
+                    if (pictureCompleted) { showInfoToast('Already completed today', 'solar:check-circle-bold'); return; }
+                    setTransitionDirection("forward");
+                    setPracticeMode("picture-describe");
+                    loadPictureOfTheDay();
+                  }}
+                >
+                  {picturePreviewUrl ? (
+                    <img src={picturePreviewUrl} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ filter: 'blur(12px) brightness(0.4)', transform: 'scale(1.15)' }} />
+                  ) : (
+                    <div className="absolute inset-0 bg-gradient-to-br from-amber-900/60 to-red-900/60" />
+                  )}
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent" />
+                  <div className="relative z-10 h-full flex flex-col justify-end p-4">
+                    <Icon icon="solar:gallery-bold" className="text-amber-400 text-2xl mb-2" />
+                    <h3 className="text-sm font-extrabold text-white uppercase tracking-wide leading-tight">Pic of the Day</h3>
+                    <p className="text-xs text-white/60 mt-1">Describe what you see</p>
+                  </div>
+                </div>
               </section>
 
               {/* Daily Scenario */}
               {scenarioData && (
                 <section>
                   <div className="flex items-center justify-between mb-4">
-                    <h2 className="font-heading text-xl font-bold">Daily Scenario</h2>
+                    <div className="flex items-center gap-3">
+                      <div className="w-1 h-6 rounded-full" style={{ background: 'linear-gradient(to bottom, #8b5cf6, #E56B6F)' }} />
+                      <h2 className="text-xl font-heading font-bold">Daily Scenario</h2>
+                    </div>
                     {scenarioCompleted && (
-                      <span className="text-xs font-bold text-green-500 bg-green-500/10 px-3 py-1 rounded-full">✓ Done</span>
+                      <span className="text-[10px] font-bold text-green-400 bg-green-500/10 px-3 py-1.5 rounded-full border border-green-500/20 tracking-wider uppercase">Done</span>
                     )}
                   </div>
                   <div
-                    className="bg-card rounded-[2rem] p-6 border border-border/50 shadow-md relative overflow-hidden cursor-pointer active:scale-[0.98] transition-transform"
+                    className={`scenario-surface relative overflow-hidden rounded-2xl cursor-pointer active:scale-[0.97] transition-all duration-300 ${scenarioCompleted ? 'opacity-40 grayscale' : ''}`}
                     onClick={() => {
                       triggerHaptic();
                       if (scenarioCompleted) {
-                        // Show "come back tomorrow" toast
-                        setSpeechError("Come back tomorrow for a new scenario! 🌙");
-                        setTimeout(() => setSpeechError(""), 3000);
+                        showInfoToast('Already completed today', 'solar:check-circle-bold');
                         return;
                       }
                       setScenarioPhase(true);
                     }}
                   >
-                    <div className="absolute top-0 left-0 w-2 h-full rounded-l-3xl" style={{ background: 'linear-gradient(to bottom, #8b5cf6, #6366f1)' }} />
-                    <div className="flex items-center gap-4">
-                      <div className="text-4xl">{scenarioData.emoji}</div>
-                      <div className="flex-1">
-                        <h3 className="font-heading font-bold text-lg mb-0.5">{scenarioData.title}</h3>
-                        <p dir="rtl" className="text-muted-foreground text-sm" style={{ fontFamily: "'Noto Sans Arabic', sans-serif" }}>{scenarioData.titleAr}</p>
-                      </div>
-                      <div className="text-muted-foreground">
-                        {scenarioCompleted
-                          ? <Icon icon="solar:check-circle-bold" className="text-green-500 text-2xl" />
-                          : <Icon icon="solar:chat-round-dots-bold" className="text-violet-500 text-2xl" />
-                        }
+                    {/* Background pattern */}
+                    <div className="scenario-tile-bg" />
+                    <div className="relative z-10 p-5">
+                      <div className="flex items-center gap-4">
+                        <div className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl flex-shrink-0 scenario-tile-emoji">
+                          {scenarioData.emoji}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-muted-foreground/50 mb-1">Practice conversation</p>
+                          <div className="flex items-baseline gap-2.5">
+                            <h3 className="font-heading font-bold text-[15px] tracking-tight text-foreground/90">{scenarioData.title}</h3>
+                            <span className="text-muted-foreground/40 text-xs">·</span>
+                            <p dir="rtl" className="font-arabic text-sm text-muted-foreground/50 truncate">{scenarioData.titleAr}</p>
+                          </div>
+                        </div>
+                        {scenarioCompleted && (
+                          <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-green-500/10 flex items-center justify-center">
+                            <Icon icon="solar:check-circle-bold" className="text-green-400 text-base" />
+                          </div>
+                        )}
                       </div>
                     </div>
-                    {!scenarioCompleted && (
-                      <div className="mt-3 pt-3 border-t border-border/30">
-                        <p className="text-xs text-muted-foreground">🎭 Practice Arabic in a real-life conversation</p>
-                      </div>
-                    )}
                   </div>
                 </section>
               )}
 
-              {/* Quick Actions */}
-              <section className="grid grid-cols-2 gap-4">
-                <button
-                  className="bg-card p-5 rounded-[2rem] border border-border/50 shadow-sm flex flex-col items-start gap-4 active:scale-95 transition-transform text-left"
-                  onClick={() => { triggerHaptic(); setActiveTab("speaking"); loadSpeakingModes(); }}
-                >
-                  <div className="bg-chart-4/10 p-3 rounded-2xl border border-chart-4/20">
-                    <Icon icon="solar:microphone-3-bold" className="text-chart-4 text-2xl" />
-                  </div>
-                  <div>
-                    <h3 className="font-heading font-bold text-base mb-1">Speaking</h3>
-                    <p className="text-xs text-muted-foreground">Practice pronunciation</p>
-                  </div>
-                </button>
-                <button
-                  className="bg-card p-5 rounded-[2rem] border border-border/50 shadow-sm flex flex-col items-start gap-4 active:scale-95 transition-transform text-left"
-                  onClick={() => { triggerHaptic(); setPracticeMode("picture-describe"); loadPictureDescribeLessons(); }}
-                >
-                  <div className="bg-chart-2/10 p-3 rounded-2xl border border-chart-2/20">
-                    <Icon icon="solar:gallery-bold" className="text-chart-2 text-2xl" />
-                  </div>
-                  <div>
-                    <h3 className="font-heading font-bold text-base mb-1">Visuals</h3>
-                    <p className="text-xs text-muted-foreground">Describe pictures</p>
-                  </div>
-                </button>
-              </section>
             </main>
-          </>
+          </div>
         )}
 
         {/* ========== COURSES TAB ========== */}
         {activeTab === "courses" && (
-          <>
-            <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+          <div key={`tab-${tabTransitionKey}`} className={tabDirection === 'back' ? 'tab-slide-left' : 'tab-slide-right'}>
+            <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
               <div className="flex items-center gap-3">
                 <div className="bg-primary/20 p-2 rounded-xl border border-primary/30">
                   <Icon icon="solar:book-bookmark-bold" className="text-primary text-2xl" />
@@ -3509,12 +5476,13 @@ function App() {
               </div>
               {/* Current stage badge */}
               {(() => {
-                const activeStage = stages.find(s => {
+                const coreStages = getCoreStages();
+                const activeStage = coreStages.find(s => {
                   const p = getStageProgress(s.id);
                   return p.completed < p.total;
                 });
                 if (!activeStage) return null;
-                const idx = stages.indexOf(activeStage) + 1;
+                const idx = coreStages.indexOf(activeStage) + 1;
                 return (
                   <div className="flex items-center gap-2 bg-muted/50 px-3 py-1.5 rounded-full border border-border/50">
                     <Icon icon="solar:star-bold" className="text-primary text-sm" />
@@ -3532,12 +5500,13 @@ function App() {
                 stages.map((stage, stageIndex) => {
                   const progress = getStageProgress(stage.id);
                   const isCompleted = progress.completed === progress.total && progress.total > 0;
-                  const isActive = progress.completed < progress.total && (stageIndex === 0 || (() => {
-                    const prevProgress = getStageProgress(stages[stageIndex - 1].id);
-                    return prevProgress.completed === prevProgress.total && prevProgress.total > 0;
-                  })());
+                  const isPrebook = isPrebookStage(stage.id);
+                  const isUnlocked = isStageUnlocked(stage.id);
+                  const isActive = isPrebook ? true : progress.completed < progress.total && isUnlocked;
                   const isLocked = !isCompleted && !isActive;
+                  const isExpanded = expandedStageId === stage.id;
                   const progressPercent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+                  const stageTitle = stage.name || stage.title || 'Stage';
 
                   // Get lessons for this stage
                   const stageLessons = allLessons.filter(l => l.stage_id === stage.id);
@@ -3545,7 +5514,94 @@ function App() {
                   // Fallback cover images for stages without a database image
                   const stageCoverFallbacks = ['/stage-cover-1.png', '/stage-cover-2.png', '/stage-cover-3.png'];
                   const stageCoverImage = stage.cover_image_url || stageCoverFallbacks[stageIndex] || stageCoverFallbacks[0];
+                  const prebookCoverImage = '/foundations-banner.jpg';
 
+                  // ── PREBOOK STAGE (Essential Arabic) — distinct design ──
+                  if (isPrebook) {
+                    return (
+                      <section key={stage.id} className="space-y-4">
+                        <div
+                          className={`prebook-stage-card relative overflow-hidden rounded-[2rem] border shadow-md group active:scale-[0.98] transition-all cursor-pointer ${isActive
+                            ? 'border-2 border-[#2A9D8F]/50'
+                            : isLocked
+                              ? 'border-border/50 opacity-70 grayscale-[30%]'
+                              : isExpanded
+                                ? 'border-2 border-[#2A9D8F]/30'
+                                : 'border-border/50'
+                            }`}
+                          onClick={() => { triggerHaptic(); setExpandedStageId(isExpanded ? null : stage.id); }}
+                        >
+                          <div className="h-32 w-full overflow-hidden">
+                            <img src={prebookCoverImage} alt={stageTitle} className="w-full h-full object-cover" />
+                            <div className="absolute inset-0 bg-gradient-to-t from-card via-card/40 to-transparent" />
+                          </div>
+                          <div className="p-6 bg-card relative">
+                            <div className="flex justify-between items-start gap-4 mb-2">
+                              <div className="min-w-0">
+                                <h3 className="font-heading text-xl font-bold">{stageTitle}</h3>
+                                <p className="text-sm text-muted-foreground mt-2 leading-relaxed">
+                                  Learn the basics with essential vocabulary and sentence building
+                                </p>
+                              </div>
+                              {isCompleted && (
+                                <div className="bg-green-500/20 text-green-500 p-2 rounded-full border border-green-500/20">
+                                  <Icon icon="solar:check-circle-bold" className="text-xl" />
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="mt-6 flex items-center gap-3">
+                              <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full ${isCompleted ? 'bg-green-500' : isLocked ? 'bg-[#2A9D8F]/20' : 'bg-[#2A9D8F]'}`}
+                                  style={{ width: `${progressPercent}%`, boxShadow: isActive ? '0 0 8px rgba(42,157,143,0.5)' : 'none' }}
+                                />
+                              </div>
+                              <span className={`text-xs font-bold uppercase ${isCompleted ? 'text-green-500' : 'text-[#2A9D8F]'}`}>
+                                {isCompleted ? 'Completed' : `${progressPercent}%`}
+                              </span>
+                            </div>
+
+                            {/* Prebook lesson list */}
+                            {isExpanded && stageLessons.length > 0 && (
+                              <div className="mt-6 pt-4 border-t border-border/50">
+                                <div className="space-y-3">
+                                  {stageLessons.map((lesson, lessonIdx) => {
+                                    const completed = isLessonCompleted(lesson.id);
+                                    return (
+                                      <div
+                                        key={lesson.id}
+                                        className={`flex items-center justify-between p-4 rounded-2xl border transition-all cursor-pointer active:scale-[0.97] ${completed
+                                          ? 'bg-green-500/[0.04] border-green-500/20'
+                                          : 'bg-muted/30 border-border/30'
+                                          }`}
+                                        onClick={(e) => { e.stopPropagation(); triggerHaptic(); setPracticeMode("book"); openLesson(lesson); }}
+                                      >
+                                        <div className="flex items-center gap-4 min-w-0">
+                                          <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${completed
+                                            ? 'bg-green-500/10 border border-green-500/20 text-green-500'
+                                            : 'bg-muted border border-border text-muted-foreground'
+                                            }`}>
+                                            <Icon icon={completed ? "solar:check-circle-bold" : "solar:document-text-bold"} className="text-xl" />
+                                          </div>
+                                          <div className="min-w-0">
+                                            <h4 className="text-sm font-bold truncate">{lessonIdx + 1}. {lesson.title}</h4>
+                                          </div>
+                                        </div>
+                                        <Icon icon="solar:alt-arrow-right-linear" className={completed ? "text-green-500/70" : "text-muted-foreground"} />
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </section>
+                    );
+                  }
+
+                  // ── REGULAR BOOK STAGE ──
                   return (
                     <section key={stage.id} className="space-y-4">
                       <div
@@ -3553,14 +5609,14 @@ function App() {
                           ? 'border-2 border-primary/50 shadow-[0_0_24px_rgba(224,159,62,0.15)]'
                           : isLocked
                             ? 'border-border/50 opacity-70 grayscale-[30%]'
-                            : expandedStageId === stage.id
+                            : isExpanded
                               ? 'border-2 border-primary/30'
                               : 'border-border/50'
                           }`}
-                        onClick={() => { triggerHaptic(); setExpandedStageId(expandedStageId === stage.id ? null : stage.id); }}
+                        onClick={() => { triggerHaptic(); setExpandedStageId(isExpanded ? null : stage.id); }}
                       >
                         <div className="h-32 w-full overflow-hidden">
-                          <img src={stageCoverImage} alt={stage.title} className="w-full h-full object-cover" />
+                          <img src={stageCoverImage} alt={stageTitle} className="w-full h-full object-cover" />
                           <div className="absolute inset-0 bg-gradient-to-t from-card via-card/40 to-transparent" />
                         </div>
                         <div className="p-6 bg-card relative">
@@ -3571,7 +5627,7 @@ function App() {
                                   <span className="bg-primary/20 text-primary px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border border-primary/20">Active</span>
                                 </div>
                               )}
-                              <h3 className="font-heading text-xl font-bold">{stage.title}</h3>
+                              <h3 className="font-heading text-xl font-bold">{stageTitle}</h3>
                               {stage.description && <p className="text-sm text-muted-foreground mt-1 leading-relaxed">{stage.description}</p>}
                             </div>
                             {isCompleted && (
@@ -3600,23 +5656,24 @@ function App() {
                           </div>
 
                           {/* Lesson list — shown for active stage or any expanded stage */}
-                          {(isActive || expandedStageId === stage.id) && stageLessons.length > 0 && (
+                          {isExpanded && stageLessons.length > 0 && (
                             <div className="mt-6 space-y-4">
                               <div className="space-y-3 pt-4 border-t border-border/50">
-                                {stageLessons.map((lesson) => {
+                                {stageLessons.map((lesson, lessonIdx) => {
                                   const completed = isLessonCompleted(lesson.id);
-                                  const isNext = nextLesson && nextLesson.id === lesson.id;
-                                  const locked = !completed && !isNext;
+                                  const isUnlockedLesson = isLessonUnlocked(stageLessons, lessonIdx, stage.id);
+                                  const isNext = isUnlockedLesson && !completed;
+                                  const locked = !isUnlockedLesson;
                                   return (
                                     <div
                                       key={lesson.id}
-                                      className={`flex items-center justify-between p-4 bg-muted/30 rounded-2xl border cursor-pointer active:scale-[0.97] transition-all ${isNext
-                                        ? 'border-border/30 ring-1 ring-primary/30'
+                                      className={`flex items-center justify-between p-4 bg-muted/30 rounded-2xl border transition-all ${isNext
+                                        ? 'border-border/30 ring-1 ring-primary/30 cursor-pointer active:scale-[0.97]'
                                         : locked
-                                          ? 'border-border/30 opacity-60'
-                                          : 'border-border/30'
+                                          ? 'border-border/30 opacity-60 cursor-default'
+                                          : 'border-border/30 cursor-pointer active:scale-[0.97]'
                                         }`}
-                                      onClick={(e) => { e.stopPropagation(); triggerHaptic(); setPracticeMode("book"); openLesson(lesson); }}
+                                      onClick={(e) => { e.stopPropagation(); if (locked) return; triggerHaptic(); setPracticeMode("book"); openLesson(lesson); }}
                                     >
                                       <div className="flex items-center gap-4">
                                         <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${completed
@@ -3648,226 +5705,861 @@ function App() {
                 })
               )}
             </main>
-          </>
+          </div>
         )}
 
-        {/* ========== SPEAKING TAB ========== */}
-        {activeTab === "speaking" && (
-          <>
-            <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
-              <div className="flex items-center gap-3">
-                <div className="bg-chart-4/20 p-2 rounded-xl border border-chart-4/30">
-                  <Icon icon="solar:microphone-3-bold" className="text-chart-4 text-2xl" />
-                </div>
-                <h1 className="font-heading text-xl font-bold">Speaking Lab</h1>
-              </div>
-              <div className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center">
-                <Icon icon="solar:tuning-square-bold" className="text-muted-foreground" />
-              </div>
-            </header>
-            <main className="px-6 space-y-8">
-              {/* Hero banner */}
-              <section>
-                <div className="bg-gradient-to-br from-chart-4/20 to-transparent p-6 rounded-[2rem] border border-chart-4/20">
-                  <h2 className="font-heading text-lg font-bold mb-2">Refine your accent</h2>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    Practice your pronunciation with AI feedback powered by Gemini.
-                  </p>
-                </div>
-              </section>
+        {/* Floating info toast */}
+        {infoToast && (
+          <div className="info-toast-float fixed top-1/2 left-1/2 z-[9999] px-4 py-3 rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 text-white text-sm font-bold shadow-2xl flex items-center gap-2 pointer-events-none">
+            <Icon icon={infoToast.icon} className="text-base" />
+            {infoToast.message}
+          </div>
+        )}
 
-              {/* Practice Modes */}
-              <section className="space-y-6">
-                <h2 className="font-heading text-xl font-bold px-1 mb-2">Practice Modes</h2>
-                <div className="space-y-8">
+        {/* ========== COMMUNITY TAB ========== */}
+        {activeTab === "community" && (
+          <div key={`tab-${tabTransitionKey}`} className={tabDirection === 'back' ? 'tab-slide-left' : 'tab-slide-right'}>
 
-                  {/* Repeat After Me — course-style card */}
-                  <section className="space-y-4">
-                    <div
-                      className={`relative overflow-hidden rounded-[2rem] border shadow-md group active:scale-[0.98] transition-all cursor-pointer ${expandedSpeakingCard === 'repeat'
-                        ? 'border-2 border-chart-4/40'
-                        : 'border-border/50'
-                        }`}
-                      onClick={async () => {
-                        triggerHaptic();
-                        if (expandedSpeakingCard === 'repeat') {
-                          setExpandedSpeakingCard(null);
-                          setSpeakingLessons([]);
-                          setSelectedSpeakingMode(null);
-                          return;
-                        }
-                        setExpandedSpeakingCard('repeat');
-                        if (speakingModes.length === 0) await loadSpeakingModes();
-                        const modes = speakingModes.length > 0 ? speakingModes : (await supabase.from("speaking_modes").select("*")).data || [];
-                        const repeatMode = modes.find(m => m.name?.toLowerCase().includes('read')) || modes[0];
-                        if (repeatMode) loadSpeakingLessons(repeatMode.id);
-                      }}
-                    >
-                      <div className="h-32 w-full overflow-hidden">
-                        <img src="/speaking-repeat-cover.png" alt="Repeat After Me" className="w-full h-full object-cover" />
-                        <div className="absolute inset-0 bg-gradient-to-t from-card via-card/40 to-transparent" />
+            {/* --- POST DETAIL VIEW --- */}
+            {communityView === 'post_detail' && selectedPost && (
+              <div className={`min-h-screen bg-background ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+                <header className="px-6 pt-12 pb-4 flex items-center gap-3 sticky top-0 z-20 bg-background backdrop-blur-xl">
+                  <button
+                    className="w-10 h-10 rounded-xl bg-card border border-border/50 flex items-center justify-center active:scale-95 transition-all"
+                    onClick={() => { triggerHaptic(); setTransitionDirection("back"); if (communityAudioRef.current) { communityAudioRef.current.pause(); communityAudioRef.current = null; } setPlayingPostId(null); setComAudioProgress(0); setCommunityView('feed'); setSelectedPost(null); setPostCorrections([]); setCorrectionText(''); setCorrectionInputMode('text'); setRecordedAudio(null); communityExerciseRef.current = false; correctionRecordingRef.current = false; }}
+                  >
+                    <MdArrowBackIosNew className="text-foreground text-lg" />
+                  </button>
+                  <h1 className="font-heading text-lg font-bold">Community</h1>
+                </header>
+
+                <div className="px-6 pb-32">
+                  {/* Original post */}
+                  <div className="bg-card border border-border/50 rounded-2xl p-5 mb-6">
+                    <div className="flex items-center gap-3 mb-3">
+                      <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center text-lg">
+                        {selectedPost.profiles?.avatar_url || '😊'}
                       </div>
-                      <div className="p-6 bg-card relative">
-                        <div className="flex justify-between items-start">
-                          <div>
-                            <h3 className="font-heading text-xl font-bold">Repeat After Me</h3>
-                            <p className="text-sm text-muted-foreground mt-1 leading-relaxed">Listen to native speakers and match their rhythm and tone.</p>
-                          </div>
-                          <div className={`bg-chart-4/20 p-2 rounded-full border border-chart-4/20 transition-transform ${expandedSpeakingCard === 'repeat' ? 'rotate-180' : ''}`}>
-                            <Icon icon="solar:alt-arrow-down-bold" className="text-chart-4" />
+                      <div className="flex-1">
+                        <p className="text-sm font-bold">{selectedPost.profiles?.display_name || 'Learner'}</p>
+                        <p className="text-xs text-muted-foreground">{getTimeAgo(selectedPost.created_at)}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {canManageCommunity && (
+                          <button
+                            className="w-8 h-8 rounded-lg flex items-center justify-center text-destructive bg-destructive/10 active:bg-destructive/20 disabled:opacity-50"
+                            disabled={moderatingTargetKey === `post_${selectedPost.id}`}
+                            onClick={() => {
+                              triggerHaptic();
+                              showConfirm({
+                                title: 'Delete Post',
+                                message: 'Delete this post for everyone? This cannot be undone.',
+                                onConfirm: () => moderateCommunityItem({ targetType: 'post', targetId: selectedPost.id, reason: 'Admin removed community post' }),
+                              });
+                            }}
+                          >
+                            {moderatingTargetKey === `post_${selectedPost.id}`
+                              ? <Leapfrog size="12" speed="2.5" color="var(--destructive)" />
+                              : <Icon icon="solar:trash-bin-trash-bold" className="text-base" />}
+                          </button>
+                        )}
+                        <button
+                          className="w-8 h-8 rounded-lg flex items-center justify-center text-muted-foreground active:bg-muted/30"
+                          onClick={() => { triggerHaptic(); setReportTarget({ type: 'post', id: selectedPost.id }); setShowReportModal(true); }}
+                        >
+                          <Icon icon="solar:flag-linear" className="text-lg" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className={`inline-block px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider mb-3 ${
+                      selectedPost.activity_type === 'read_aloud' ? 'bg-chart-4/15 text-chart-4'
+                      : selectedPost.activity_type === 'translate' ? 'bg-chart-3/15 text-chart-3'
+                      : 'bg-blue-500/15 text-blue-400'
+                    }`}>
+                      {selectedPost.activity_type === 'read_aloud' ? 'Read Aloud' : selectedPost.activity_type === 'translate' ? 'Translate' : 'Daily Question'}
+                    </div>
+                    <p className="text-xs text-muted-foreground mb-2">{selectedPost.prompt_text}</p>
+                    <p className="text-lg font-arabic leading-relaxed" dir="rtl">{selectedPost.answer_text}</p>
+                    {selectedPost.audio_url && (
+                      <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl bg-primary/10 mt-3">
+                        <button
+                          className="w-8 h-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0 active:scale-95 transition-all"
+                          onClick={() => { triggerHaptic(); playCommunityAudio(selectedPost.id, selectedPost.audio_url); }}
+                        >
+                          <Icon icon={playingPostId === selectedPost.id ? "solar:pause-bold" : "solar:play-bold"} className="text-sm text-primary-foreground" />
+                        </button>
+                        <div className="flex-1 flex flex-col gap-1">
+                          <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            step="0.1"
+                            value={playingPostId === selectedPost.id ? comAudioProgress : 0}
+                            onChange={(e) => { seekCommunityAudio(parseFloat(e.target.value), selectedPost.id); }}
+                            className="community-audio-slider w-full"
+                          />
+                          <div className="flex justify-between">
+                            <span className="text-[10px] text-primary/70">{playingPostId === selectedPost.id ? formatAudioTime(comAudioTime) : '0:00'}</span>
+                            <span className="text-[10px] text-primary/70">{playingPostId === selectedPost.id && comAudioDuration ? formatAudioTime(comAudioDuration) : '--:--'}</span>
                           </div>
                         </div>
+                      </div>
+                    )}
+                  </div>
 
-                        {/* Expanded lesson list */}
-                        {expandedSpeakingCard === 'repeat' && (
-                          <div className="mt-6 space-y-4">
-                            <div className="space-y-3 pt-4 border-t border-border/50">
-                              {loadingSpeakingLessons ? (
-                                <div className="flex justify-center py-4"><Leapfrog size="30" speed="2.5" color="var(--chart-4)" /></div>
-                              ) : speakingLessons.length === 0 ? (
-                                <p className="text-sm text-muted-foreground py-3">No lessons found</p>
-                              ) : speakingLessons.map((lesson) => {
-                                const completed = isSpeakingLessonCompleted(lesson.id);
+                  {/* Corrections */}
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="font-heading text-sm font-bold text-muted-foreground uppercase tracking-wider">
+                      {postCorrections.length > 0 ? `Corrections (${postCorrections.length})` : 'No corrections yet'}
+                    </h3>
+                    {user && selectedPost.user_id === user.id && !postCorrections.some(c => c.is_ai) && (
+                      <button
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-br from-violet-500/15 to-indigo-500/15 border border-violet-500/30 text-violet-400 text-xs font-bold active:scale-95 transition-all disabled:opacity-60"
+                        disabled={aiFeedbackLoading.has(selectedPost.id)}
+                        onClick={() => { triggerHaptic(); requestAiFeedback(selectedPost.id); }}
+                      >
+                        {aiFeedbackLoading.has(selectedPost.id)
+                          ? <Leapfrog size="14" speed="2.5" color="#8b5cf6" />
+                          : <Icon icon="solar:magic-stick-3-bold" className="text-sm" />}
+                        Ask AI
+                      </button>
+                    )}
+                  </div>
+
+                  {loadingCorrections ? (
+                    <div className="flex justify-center py-8"><Leapfrog size="30" speed="2.5" color="var(--primary)" /></div>
+                  ) : (
+                    <div className="space-y-4">
+                      {postCorrections.map((corr, idx) => {
+                        const isBest = idx === 0 && postCorrections.length > 1 && (corr.upvotes || 0) > 0;
+                        return (
+                          <div key={corr.id} className={`bg-card border rounded-2xl p-4 ${isBest ? 'border-primary/40' : 'border-border/50'}`}>
+                            {isBest && (
+                              <div className="flex items-center gap-1.5 mb-2">
+                                <span className="text-xs">🏆</span>
+                                <span className="text-[10px] font-bold uppercase tracking-wider text-primary">Best Correction</span>
+                              </div>
+                            )}
+                            <div className="flex items-center gap-3 mb-3">
+                              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm ${corr.is_ai ? 'bg-blue-500/20' : 'bg-primary/20'}`}>
+                                {corr.is_ai ? '🤖' : (corr.profiles?.avatar_url || '😊')}
+                              </div>
+                              <div className="flex-1">
+                                <div className="flex items-center gap-2">
+                                  <p className="text-sm font-bold">{corr.is_ai ? 'AI Tutor' : (corr.profiles?.display_name || 'Learner')}</p>
+                                  {corr.is_ai && (
+                                    <span className="px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-400 text-[9px] font-bold uppercase tracking-wider">AI Generated</span>
+                                  )}
+                                </div>
+                                <p className="text-[10px] text-muted-foreground">{getTimeAgo(corr.created_at)}</p>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                {canManageCommunity && (
+                                  <button
+                                    className="w-7 h-7 rounded-lg flex items-center justify-center text-destructive bg-destructive/10 active:bg-destructive/20 disabled:opacity-50"
+                                    disabled={moderatingTargetKey === `correction_${corr.id}`}
+                                    onClick={() => {
+                                      triggerHaptic();
+                                      showConfirm({
+                                        title: 'Delete Correction',
+                                        message: 'Delete this correction for everyone? This cannot be undone.',
+                                        onConfirm: () => moderateCommunityItem({
+                                          targetType: 'correction',
+                                          targetId: corr.id,
+                                          postId: selectedPost.id,
+                                          isAi: corr.is_ai,
+                                          reason: 'Admin removed correction',
+                                        }),
+                                      });
+                                    }}
+                                  >
+                                    {moderatingTargetKey === `correction_${corr.id}`
+                                      ? <Leapfrog size="12" speed="2.5" color="var(--destructive)" />
+                                      : <Icon icon="solar:trash-bin-trash-bold" className="text-xs" />}
+                                  </button>
+                                )}
+                                {/* User can delete their own correction */}
+                                {!canManageCommunity && user && corr.user_id === user.id && !corr.is_ai && (
+                                  <button
+                                    className="w-7 h-7 rounded-lg flex items-center justify-center text-destructive bg-destructive/10 active:bg-destructive/20 disabled:opacity-50"
+                                    disabled={deletingCorrectionId === corr.id}
+                                    onClick={() => {
+                                      triggerHaptic();
+                                      showConfirm({
+                                        title: 'Delete Correction',
+                                        message: 'Remove your correction? This cannot be undone.',
+                                        onConfirm: () => deleteMyCorrection(corr.id, selectedPost.id),
+                                      });
+                                    }}
+                                  >
+                                    {deletingCorrectionId === corr.id
+                                      ? <Leapfrog size="12" speed="2.5" color="var(--destructive)" />
+                                      : <Icon icon="solar:trash-bin-trash-bold" className="text-xs" />}
+                                  </button>
+                                )}
+                                {!corr.is_ai && (
+                                  <button
+                                    className="w-7 h-7 rounded-lg flex items-center justify-center text-muted-foreground active:bg-muted/30"
+                                    onClick={() => { triggerHaptic(); setReportTarget({ type: 'correction', id: corr.id }); setShowReportModal(true); }}
+                                  >
+                                    <Icon icon="solar:flag-linear" className="text-sm" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            <p className="text-sm leading-relaxed mb-3">{corr.correction_text}</p>
+                            {corr.audio_url && (
+                              <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl bg-primary/10 mb-3" onClick={(e) => e.stopPropagation()}>
+                                <button
+                                  className="w-8 h-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0 active:scale-95 transition-all"
+                                  onClick={() => { triggerHaptic(); playCommunityAudio(corr.id, corr.audio_url); }}
+                                >
+                                  <Icon icon={playingPostId === corr.id ? "solar:pause-bold" : "solar:play-bold"} className="text-sm text-primary-foreground" />
+                                </button>
+                                <span className="text-[10px] text-primary/70">{playingPostId === corr.id ? formatAudioTime(comAudioTime) : '0:00'}</span>
+                                <input type="range" min="0" max="100" step="0.1" value={playingPostId === corr.id ? comAudioProgress : 0} onChange={(e) => { seekCommunityAudio(parseFloat(e.target.value), corr.id); }} className="community-audio-slider flex-1" />
+                                <span className="text-[10px] text-primary/70">{playingPostId === corr.id && comAudioDuration ? formatAudioTime(comAudioDuration) : '--:--'}</span>
+                              </div>
+                            )}
+                            <div className="flex items-center gap-3">
+                              <button
+                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${
+                                  userReactions[`corr_${corr.id}`] === 'upvote' ? 'bg-green-500/15 text-green-500' : 'bg-muted/30 text-muted-foreground'
+                                }`}
+                                onClick={() => { triggerHaptic(); toggleCorrectionVote(corr.id, 'upvote'); }}
+                              >
+                                <Icon icon="solar:like-bold" className="text-sm" />{corr.upvotes || 0}
+                              </button>
+                              <button
+                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${
+                                  userReactions[`corr_${corr.id}`] === 'downvote' ? 'bg-destructive/15 text-destructive' : 'bg-muted/30 text-muted-foreground'
+                                }`}
+                                onClick={() => { triggerHaptic(); toggleCorrectionVote(corr.id, 'downvote'); }}
+                              >
+                                <Icon icon="solar:dislike-bold" className="text-sm" />{corr.downvotes || 0}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Bottom correction input */}
+                <div className="fixed bottom-0 left-0 right-0 bg-card border-t border-border/50 px-6 z-[60]" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.75rem)', paddingTop: '0.75rem' }}>
+                  {/* Text / Voice toggle */}
+                  <div className="flex gap-2 mb-2 px-1">
+                    <button
+                      className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold transition-all ${correctionInputMode === 'text' ? 'bg-primary/15 text-primary' : 'text-muted-foreground'}`}
+                      onClick={() => { triggerHaptic(); setCorrectionInputMode('text'); }}
+                    >
+                      <Icon icon="solar:pen-bold" className="inline mr-1 text-xs" />Type
+                    </button>
+                    <button
+                      className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold transition-all ${correctionInputMode === 'record' ? 'bg-primary/15 text-primary' : 'text-muted-foreground'}`}
+                      onClick={() => { triggerHaptic(); setCorrectionInputMode('record'); }}
+                    >
+                      <Icon icon="solar:microphone-3-bold" className="inline mr-1 text-xs" />Speak
+                    </button>
+                  </div>
+
+                  {correctionInputMode === 'text' ? (
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="text"
+                        dir="auto"
+                        className="flex-1 bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/50"
+                        placeholder="Add a correction..."
+                        value={correctionText}
+                        onChange={(e) => setCorrectionText(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter' && correctionText.trim()) { triggerHaptic(); submitCorrection(selectedPost.id); } }}
+                      />
+                      <button
+                        className="w-11 h-11 rounded-xl bg-primary flex items-center justify-center active:scale-95 transition-all disabled:opacity-50"
+                        disabled={!correctionText.trim() || submittingCorrection}
+                        onClick={() => { triggerHaptic(); submitCorrection(selectedPost.id); }}
+                      >
+                        {submittingCorrection
+                          ? <Leapfrog size="18" speed="2.5" color="var(--primary-foreground)" />
+                          : <Icon icon="solar:plain-bold" className="text-lg text-primary-foreground" />
+                        }
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-3">
+                      {!recordedAudio ? (
+                        <>
+                          <div className="flex-1 text-center">
+                            <p className="text-xs text-muted-foreground mb-1">
+                              {isRecording ? `Recording... ${recordingCountdown != null ? `${Math.floor(recordingCountdown / 60)}:${String(recordingCountdown % 60).padStart(2, '0')}` : 'tap to stop'}` : 'Tap to record your feedback'}
+                            </p>
+                          </div>
+                          <button
+                            className={`w-11 h-11 rounded-xl flex items-center justify-center active:scale-95 transition-all ${isRecording ? 'bg-destructive animate-pulse' : 'bg-primary'}`}
+                            onClick={() => { triggerHaptic(); if (isRecording) { stopRecording(); } else { communityExerciseRef.current = true; correctionRecordingRef.current = true; startRecording(); } }}
+                          >
+                            <Icon icon={isRecording ? "solar:stop-bold" : "solar:microphone-3-bold"} className="text-lg text-white" />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <div className="flex-1 flex items-center gap-2 bg-muted/30 border border-border/50 rounded-xl px-3 py-2">
+                            <button
+                              className="w-8 h-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0 active:scale-95 transition-all"
+                              onClick={() => { triggerHaptic(); playPreviewAudio(); }}
+                            >
+                              <Icon icon={previewPlaying ? "solar:pause-bold" : "solar:play-bold"} className="text-xs text-primary-foreground" />
+                            </button>
+                            <div className="flex-1 flex flex-col gap-0.5">
+                              <input type="range" min="0" max="100" step="0.1" value={previewProgress} onChange={(e) => { seekPreviewAudio(parseFloat(e.target.value)); }} className="community-audio-slider w-full" />
+                            </div>
+                            <button
+                              className="w-7 h-7 rounded-full bg-muted/50 flex items-center justify-center flex-shrink-0 active:scale-95"
+                              onClick={() => { triggerHaptic(); cleanupPreviewAudio(); setRecordedAudio(null); correctionRecordingRef.current = false; communityExerciseRef.current = false; }}
+                            >
+                              <Icon icon="solar:trash-bin-trash-bold" className="text-xs text-destructive" />
+                            </button>
+                          </div>
+                          <button
+                            className="w-11 h-11 rounded-xl bg-primary flex items-center justify-center active:scale-95 transition-all disabled:opacity-50"
+                            disabled={submittingCorrection}
+                            onClick={() => { triggerHaptic(); submitCorrection(selectedPost.id, recordedAudio); }}
+                          >
+                            {submittingCorrection
+                              ? <Leapfrog size="18" speed="2.5" color="var(--primary-foreground)" />
+                              : <Icon icon="solar:plain-bold" className="text-lg text-primary-foreground" />
+                            }
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* --- MAIN FEED VIEW --- */}
+            {communityView === 'feed' && (
+              <>
+                <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
+                  <div className="flex items-center gap-3">
+                    {activeExerciseType && (
+                      <button
+                        className="w-10 h-10 rounded-xl bg-card border border-border/50 flex items-center justify-center active:scale-95 transition-all"
+                        onClick={() => {
+                          triggerHaptic();
+                          if (isRecording) cancelRecording();
+                          cleanupPreviewAudio();
+                          if (activeExerciseType === 'daily_question' || activeExerciseIndex === null) {
+                            setActiveExerciseType(null);
+                            setActiveExerciseIndex(null);
+                            communityExerciseRef.current = false;
+                            setCommunityTypedAnswer('');
+                            setRecordedAudio(null);
+                          } else {
+                            setActiveExerciseIndex(null);
+                            setCommunityTypedAnswer('');
+                            setRecordedAudio(null);
+                          }
+                        }}
+                      >
+                        <MdArrowBackIosNew className="text-foreground text-lg" />
+                      </button>
+                    )}
+                    {!activeExerciseType && (
+                      <div className="bg-primary/20 p-2 rounded-xl border border-primary/30">
+                        <Icon icon="solar:users-group-rounded-bold" className="text-primary text-2xl" />
+                      </div>
+                    )}
+                    <h1 className="font-heading text-xl font-bold">Community</h1>
+                  </div>
+                  {!activeExerciseType && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        className="w-10 h-10 rounded-xl bg-card border border-border/50 flex items-center justify-center active:scale-95 transition-all"
+                        onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setShowLeaderboard(true); }}
+                        aria-label="Top contributors Last 3 days"
+                      >
+                        <Icon icon="solar:cup-star-bold" className="text-lg text-amber-400" />
+                      </button>
+                      <button
+                        className="w-10 h-10 rounded-xl bg-card border border-border/50 flex items-center justify-center active:scale-95 transition-all"
+                        onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setShowMyPosts(true); loadMyPosts(); }}
+                        aria-label="My posts"
+                      >
+                        <Icon icon="solar:chat-round-dots-bold" className="text-lg text-primary" />
+                      </button>
+                    </div>
+                  )}
+                </header>
+
+                <main className="px-6 space-y-6 pb-24">
+                  {/* Daily Challenges */}
+                  <section className="space-y-3">
+                    {/* Daily Question — Hero Banner */}
+                    {(() => { const dqDone = userCompletions.daily_question >= 1; return (
+                    <div className={activeExerciseType && activeExerciseType !== 'daily_question' ? 'tile-fly-off' : 'tile-selected'}>
+                      <div
+                        className={`exercise-glow-tile relative rounded-2xl overflow-hidden transition-all ${!activeExerciseType ? 'cursor-pointer active:scale-[0.98]' : ''} ${dqDone && !activeExerciseType ? 'opacity-50 grayscale' : ''}`}
+                        style={{ height: '95px' }}
+                        onClick={() => {
+                          if (activeExerciseType) return;
+                          triggerHaptic();
+                          if (dqDone) { showInfoToast('Already submitted today', 'solar:check-circle-bold'); return; }
+                          if (!dailyExercises) loadDailyExercises();
+                          setActiveExerciseType('daily_question');
+                          setActiveExerciseIndex(0);
+                          setCommunityTypedAnswer('');
+                          communityExerciseRef.current = true;
+                        }}
+                      >
+                        <img src="/images/daily-question.png" alt="" className="absolute inset-0 w-full h-full object-cover" />
+                        <div className="absolute inset-0 bg-gradient-to-r from-background via-background/85 to-background/20" />
+                        <div className="relative z-10 h-full flex flex-col justify-center p-4">
+                          <h3 className="text-lg font-extrabold text-foreground tracking-wide uppercase drop-shadow-lg">Daily Question</h3>
+                          <p className="text-xs text-muted-foreground mt-0.5">Answer today's question in Arabic</p>
+                        </div>
+                        <span className="absolute bottom-2 right-3 z-10 text-xs font-bold text-foreground/80">{userCompletions.daily_question}/1</span>
+                      </div>
+                    </div>
+                    ); })()}
+
+                    {/* Read Aloud & Translate */}
+                    {(() => { const raDone = userCompletions.read_aloud >= 3; const trDone = userCompletions.translate >= 3; return (
+                    <div className={`${!activeExerciseType ? 'grid grid-cols-2' : 'flex flex-col'} gap-3`}>
+                      <div className={activeExerciseType && activeExerciseType !== 'read_aloud' ? 'tile-fly-off' : 'tile-selected'}>
+                        <div
+                          className={`exercise-glow-tile relative rounded-2xl overflow-hidden bg-card border border-border/50 transition-all ${!activeExerciseType ? 'cursor-pointer active:scale-[0.97]' : ''} ${raDone && !activeExerciseType ? 'opacity-50 grayscale' : ''}`}
+                          style={{ height: '130px' }}
+                          onClick={() => {
+                            if (activeExerciseType) return;
+                            triggerHaptic();
+                            if (raDone) { showInfoToast('All 3 already submitted today', 'solar:check-circle-bold'); return; }
+                            if (!dailyExercises) loadDailyExercises();
+                            setActiveExerciseType('read_aloud');
+                            setActiveExerciseIndex(null);
+                            setCommunityTypedAnswer('');
+                            communityExerciseRef.current = true;
+                          }}
+                        >
+                          <div className="relative h-[55px] overflow-hidden">
+                            <img src="/images/read-aloud.png" alt="" className="absolute inset-0 w-full h-full object-cover" />
+                            <div className="absolute inset-0 bg-gradient-to-t from-card to-transparent" />
+                          </div>
+                          <div className="px-3 pt-2 pb-2.5">
+                            <h3 className="text-sm font-extrabold text-foreground uppercase tracking-wide leading-tight">Read Aloud</h3>
+                            <p className="text-[10px] text-muted-foreground">Read Arabic sentences</p>
+                          </div>
+                          <span className="absolute bottom-2 right-3 text-[10px] font-bold text-foreground/80">{userCompletions.read_aloud}/3</span>
+                        </div>
+                      </div>
+
+                      <div className={activeExerciseType && activeExerciseType !== 'translate' ? 'tile-fly-off' : 'tile-selected'}>
+                        <div
+                          className={`exercise-glow-tile relative rounded-2xl overflow-hidden bg-card border border-border/50 transition-all ${!activeExerciseType ? 'cursor-pointer active:scale-[0.97]' : ''} ${trDone && !activeExerciseType ? 'opacity-50 grayscale' : ''}`}
+                          style={{ height: '130px' }}
+                          onClick={() => {
+                            if (activeExerciseType) return;
+                            triggerHaptic();
+                            if (trDone) { showInfoToast('All 3 already submitted today', 'solar:check-circle-bold'); return; }
+                            if (!dailyExercises) loadDailyExercises();
+                            setActiveExerciseType('translate');
+                            setActiveExerciseIndex(null);
+                            setCommunityTypedAnswer('');
+                            communityExerciseRef.current = true;
+                          }}
+                        >
+                          <div className="relative h-[55px] overflow-hidden">
+                            <img src="/images/translate.png" alt="" className="absolute inset-0 w-full h-full object-cover" />
+                            <div className="absolute inset-0 bg-gradient-to-t from-card to-transparent" />
+                          </div>
+                          <div className="px-3 pt-2 pb-2.5">
+                            <h3 className="text-sm font-extrabold text-foreground uppercase tracking-wide leading-tight">Translate</h3>
+                            <p className="text-[10px] text-muted-foreground">English to Arabic</p>
+                          </div>
+                          <span className="absolute bottom-2 right-3 text-[10px] font-bold text-foreground/80">{userCompletions.translate}/3</span>
+                        </div>
+                      </div>
+                    </div>
+                    ); })()}
+
+                    {/* ===== INLINE EXERCISE CONTENT (appears below selected tile) ===== */}
+                    {activeExerciseType && (() => {
+                      const isReadAloud = activeExerciseType === 'read_aloud';
+                      const isTranslate = activeExerciseType === 'translate';
+                      const isDailyQ = activeExerciseType === 'daily_question';
+                      const items = isReadAloud ? (dailyExercises?.read_aloud || []) : isTranslate ? (dailyExercises?.translate || []) : [dailyExercises?.daily_question].filter(Boolean);
+                      const accentColor = isReadAloud ? 'chart-4' : isTranslate ? 'chart-3' : 'primary';
+                      const current = activeExerciseIndex !== null ? items[activeExerciseIndex] : null;
+                      return (
+                        <div className="exercise-input-appear space-y-3 pt-2">
+                          {!dailyExercises ? (
+                            <div className="flex justify-center py-12"><Leapfrog size="30" speed="2.5" color="var(--primary)" /></div>
+                          ) : (
+                            <>
+                              {/* Sentence/question cards — fly off when one is selected */}
+                              {!isDailyQ && items.map((item, idx) => {
+                                const isSelected = activeExerciseIndex === idx;
+                                const isHidden = activeExerciseIndex !== null && !isSelected;
+                                const promptKey = isReadAloud ? item.arabic_text : item.english_text;
+                                const isCompleted = completedPrompts.has(promptKey);
                                 return (
                                   <div
-                                    key={lesson.id}
-                                    className="flex items-center justify-between p-4 bg-muted/30 rounded-2xl border border-border/30 cursor-pointer active:scale-[0.97] transition-all"
-                                    onClick={(e) => { e.stopPropagation(); triggerHaptic(); openSpeakingLesson(lesson); }}
+                                    key={item.id}
+                                    className={`bg-card border rounded-2xl p-5 transition-all duration-300 ${
+                                      isHidden ? 'exercise-fly-off' : ''
+                                    } ${isCompleted && !isSelected ? 'opacity-50' : ''} ${isSelected ? `border-${accentColor}/50 ring-1 ring-${accentColor}/30` : 'border-border/50 cursor-pointer active:scale-[0.98]'}`}
+                                    style={isHidden ? { pointerEvents: 'none' } : {}}
+                                    onClick={() => {
+                                      if (activeExerciseIndex !== null || isCompleted) return;
+                                      triggerHaptic();
+                                      setActiveExerciseIndex(idx);
+                                      setCommunityTypedAnswer('');
+                                      setRecordedAudio(null);
+                                    }}
                                   >
                                     <div className="flex items-center gap-4">
-                                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${completed
-                                        ? 'bg-green-500/10 border border-green-500/20 text-green-500'
-                                        : 'bg-chart-4/10 border border-chart-4/20 text-chart-4'
-                                        }`}>
-                                        <Icon icon={completed ? "solar:check-circle-bold" : "solar:microphone-3-bold"} className="text-xl" />
+                                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${isCompleted ? 'bg-green-500/15' : `bg-${accentColor}/15`}`}>
+                                        {isCompleted ? (
+                                          <Icon icon="solar:check-circle-bold" className="text-lg text-green-500" />
+                                        ) : (
+                                          <span className={`text-sm font-bold text-${accentColor}`}>{idx + 1}</span>
+                                        )}
                                       </div>
-                                      <div>
-                                        <h4 className="text-sm font-bold">{lesson.title}</h4>
-                                        {lesson.prompt_text && <p className="text-[10px] text-muted-foreground truncate max-w-[200px]">{lesson.prompt_text}</p>}
+                                      <div className="flex-1 min-w-0">
+                                        {isReadAloud ? (
+                                          <>
+                                            <p className={`font-arabic leading-loose font-semibold ${isCompleted ? 'text-muted-foreground' : 'text-white'} ${isSelected ? 'text-3xl' : 'text-2xl'}`} dir="rtl">{item.arabic_text}</p>
+                                            {item.english_text && <p className="text-sm text-muted-foreground mt-1">{item.english_text}</p>}
+                                          </>
+                                        ) : (
+                                          <>
+                                            <p className={`leading-relaxed ${isCompleted ? 'text-muted-foreground' : 'text-foreground'} ${isSelected ? 'text-lg font-bold' : 'text-sm'}`}>{item.english_text}</p>
+                                            {isSelected && item.arabic_text && <p className="text-sm font-arabic text-muted-foreground mt-1" dir="rtl">{item.arabic_text}</p>}
+                                          </>
+                                        )}
+                                        {isCompleted && !isSelected && <p className="text-[10px] text-green-500 font-bold mt-1">Already submitted</p>}
                                       </div>
+                                      {activeExerciseIndex === null && !isCompleted && (
+                                        <Icon icon="solar:alt-arrow-right-linear" className="text-muted-foreground flex-shrink-0" />
+                                      )}
                                     </div>
-                                    <Icon icon="solar:alt-arrow-right-linear" className={completed ? "text-muted-foreground" : "text-chart-4"} />
                                   </div>
                                 );
                               })}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </section>
 
-                  {/* Translate & Speak — course-style card */}
-                  <section className="space-y-4">
-                    <div
-                      className={`relative overflow-hidden rounded-[2rem] border shadow-md group active:scale-[0.98] transition-all cursor-pointer ${expandedSpeakingCard === 'translate'
-                        ? 'border-2 border-chart-3/40'
-                        : 'border-border/50'
-                        }`}
-                      onClick={async () => {
-                        triggerHaptic();
-                        if (expandedSpeakingCard === 'translate') {
-                          setExpandedSpeakingCard(null);
-                          setSpeakingLessons([]);
-                          setSelectedSpeakingMode(null);
-                          return;
-                        }
-                        setExpandedSpeakingCard('translate');
-                        if (speakingModes.length === 0) await loadSpeakingModes();
-                        const modes = speakingModes.length > 0 ? speakingModes : (await supabase.from("speaking_modes").select("*")).data || [];
-                        const translateMode = modes.find(m => m.name?.toLowerCase().includes('translat')) || modes[1] || modes[0];
-                        if (translateMode) loadSpeakingLessons(translateMode.id);
-                      }}
-                    >
-                      <div className="h-32 w-full overflow-hidden">
-                        <img src="/speaking-translate-cover.png" alt="Translate & Speak" className="w-full h-full object-cover" />
-                        <div className="absolute inset-0 bg-gradient-to-t from-card via-card/40 to-transparent" />
-                      </div>
-                      <div className="p-6 bg-card relative">
-                        <div className="flex justify-between items-start">
-                          <div>
-                            <h3 className="font-heading text-xl font-bold">Translate & Speak</h3>
-                            <p className="text-sm text-muted-foreground mt-1 leading-relaxed">Translate the English phrase into Arabic and speak it out loud.</p>
-                          </div>
-                          <div className={`bg-chart-3/20 p-2 rounded-full border border-chart-3/20 transition-transform ${expandedSpeakingCard === 'translate' ? 'rotate-180' : ''}`}>
-                            <Icon icon="solar:alt-arrow-down-bold" className="text-chart-3" />
-                          </div>
-                        </div>
-
-                        {expandedSpeakingCard === 'translate' && (
-                          <div className="mt-6 space-y-4">
-                            <div className="space-y-3 pt-4 border-t border-border/50">
-                              {loadingSpeakingLessons ? (
-                                <div className="flex justify-center py-4"><Leapfrog size="30" speed="2.5" color="var(--chart-3)" /></div>
-                              ) : speakingLessons.length === 0 ? (
-                                <p className="text-sm text-muted-foreground py-3">No lessons found</p>
-                              ) : speakingLessons.map((lesson) => {
-                                const completed = isSpeakingLessonCompleted(lesson.id);
+                              {/* Input UI — appears when sentence selected or immediately for daily question */}
+                              {((isDailyQ && items.length > 0) || (activeExerciseIndex !== null && current)) && (() => {
+                                const activeItem = isDailyQ ? items[0] : current;
                                 return (
-                                  <div
-                                    key={lesson.id}
-                                    className="flex items-center justify-between p-4 bg-muted/30 rounded-2xl border border-border/30 cursor-pointer active:scale-[0.97] transition-all"
-                                    onClick={(e) => { e.stopPropagation(); triggerHaptic(); openSpeakingLesson(lesson); }}
-                                  >
-                                    <div className="flex items-center gap-4">
-                                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${completed
-                                        ? 'bg-green-500/10 border border-green-500/20 text-green-500'
-                                        : 'bg-chart-3/10 border border-chart-3/20 text-chart-3'
-                                        }`}>
-                                        <Icon icon={completed ? "solar:check-circle-bold" : "solar:microphone-3-bold"} className="text-xl" />
+                                  <div className="exercise-input-appear space-y-4 pt-2">
+                                    {/* Show daily question text inline */}
+                                    {isDailyQ && activeItem && (
+                                      <div className="bg-card border border-primary/30 rounded-2xl p-5">
+                                        <p className="text-foreground text-lg font-bold leading-relaxed">{activeItem.question_en}</p>
+                                        {activeItem.question_ar && <p className="text-sm font-arabic text-muted-foreground mt-2" dir="rtl">{activeItem.question_ar}</p>}
                                       </div>
-                                      <div>
-                                        <h4 className="text-sm font-bold">{lesson.title}</h4>
-                                        {lesson.prompt_text && <p className="text-[10px] text-muted-foreground truncate max-w-[200px]">{lesson.prompt_text}</p>}
+                                    )}
+
+                                    <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider text-center">
+                                      {isReadAloud ? 'Read this aloud in Arabic' : isDailyQ ? 'Answer in Arabic' : 'Translate to Arabic'}
+                                    </p>
+
+                                    {!isReadAloud && (
+                                      <div className="flex bg-card border border-border/50 rounded-xl p-1">
+                                        <button
+                                          className={`flex-1 py-2.5 rounded-lg text-sm font-bold transition-all ${communityInputMode === 'type' ? 'bg-primary text-primary-foreground shadow-md' : 'text-muted-foreground'}`}
+                                          onClick={() => { triggerHaptic(); setCommunityInputMode('type'); }}
+                                        >
+                                          <Icon icon="solar:pen-bold" className="inline mr-1.5" />Type
+                                        </button>
+                                        <button
+                                          className={`flex-1 py-2.5 rounded-lg text-sm font-bold transition-all ${communityInputMode === 'record' ? 'bg-primary text-primary-foreground shadow-md' : 'text-muted-foreground'}`}
+                                          onClick={() => { triggerHaptic(); setCommunityInputMode('record'); }}
+                                        >
+                                          <Icon icon="solar:microphone-3-bold" className="inline mr-1.5" />Record
+                                        </button>
                                       </div>
-                                    </div>
-                                    <Icon icon="solar:alt-arrow-right-linear" className={completed ? "text-muted-foreground" : "text-chart-3"} />
+                                    )}
+
+                                    {(!isReadAloud && communityInputMode === 'type') ? (
+                                      <div className="space-y-4">
+                                        <textarea
+                                          dir="rtl"
+                                          lang="ar"
+                                          className="w-full bg-card border border-border/50 rounded-2xl p-4 text-lg font-arabic text-foreground placeholder:text-muted-foreground/50 resize-none focus:outline-none focus:border-primary/50 transition-colors"
+                                          rows={4}
+                                          placeholder="اكتب إجابتك هنا..."
+                                          value={communityTypedAnswer}
+                                          maxLength={500}
+                                          onChange={(e) => setCommunityTypedAnswer(e.target.value)}
+                                        />
+                                        {communityTypedAnswer.length >= 450 && (
+                                          <p className={`text-xs text-right ${communityTypedAnswer.length >= 500 ? 'text-destructive' : 'text-muted-foreground'}`}>{communityTypedAnswer.length}/500</p>
+                                        )}
+                                        <button
+                                          className="w-full bg-primary text-primary-foreground font-bold py-4 rounded-2xl flex items-center justify-center gap-2 shadow-[0_4px_16px_rgba(224,159,62,0.3)] active:scale-[0.98] transition-all disabled:opacity-50"
+                                          disabled={!communityTypedAnswer.trim() || submittingPost}
+                                          onClick={() => { triggerHaptic(); submitCommunityPost(communityTypedAnswer.trim()); }}
+                                        >
+                                          {submittingPost ? <Leapfrog size="24" speed="2.5" color="var(--primary-foreground)" /> : (
+                                            <>
+                                              <Icon icon="solar:plain-bold" className="text-xl" />
+                                              Post to Community
+                                            </>
+                                          )}
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <div className="flex flex-col items-center gap-4">
+                                        {!recordedAudio && (
+                                          <>
+                                            <p className="text-sm text-muted-foreground">
+                                              {isRecording
+                                                ? recordingCountdown != null
+                                                  ? `Recording... ${Math.floor(recordingCountdown / 60)}:${String(recordingCountdown % 60).padStart(2, '0')}`
+                                                  : 'Recording... tap to stop'
+                                                : `Tap to record (max ${activeExerciseType === 'daily_question' ? '1 min' : '20s'})`}
+                                            </p>
+                                            <button
+                                              className={`w-20 h-20 rounded-full flex items-center justify-center transition-all active:scale-95 ${isRecording
+                                                ? 'bg-destructive shadow-[0_0_24px_rgba(230,57,70,0.4)] animate-pulse'
+                                                : 'bg-primary shadow-[0_4px_16px_rgba(224,159,62,0.3)]'
+                                              }`}
+                                              onClick={() => {
+                                                triggerHaptic();
+                                                if (isRecording) { stopRecording(); } else { startRecording(); }
+                                              }}
+                                            >
+                                              <Icon icon={isRecording ? "solar:stop-bold" : "solar:microphone-3-bold"} className="text-3xl text-white" />
+                                            </button>
+                                          </>
+                                        )}
+
+                                        {recordedAudio && !isRecording && (
+                                          <div className="w-full space-y-3">
+                                            <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl bg-card border border-border/50">
+                                              <button
+                                                className="w-8 h-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0 active:scale-95 transition-all"
+                                                onClick={() => { triggerHaptic(); playPreviewAudio(); }}
+                                              >
+                                                <Icon icon={previewPlaying ? "solar:pause-bold" : "solar:play-bold"} className="text-xs text-primary-foreground" />
+                                              </button>
+                                              <div className="flex-1 flex flex-col gap-0.5">
+                                                <input
+                                                  type="range" min="0" max="100" step="0.1"
+                                                  value={previewProgress}
+                                                  onChange={(e) => { seekPreviewAudio(parseFloat(e.target.value)); }}
+                                                  className="community-audio-slider w-full"
+                                                />
+                                                <div className="flex justify-between">
+                                                  <span className="text-[10px] text-primary/70">{formatAudioTime(previewTime)}</span>
+                                                  <span className="text-[10px] text-primary/70">{previewDuration ? formatAudioTime(previewDuration) : '--:--'}</span>
+                                                </div>
+                                              </div>
+                                              <button
+                                                className="w-8 h-8 rounded-full bg-muted/50 flex items-center justify-center flex-shrink-0 active:scale-95 transition-all"
+                                                onClick={() => { triggerHaptic(); cleanupPreviewAudio(); setRecordedAudio(null); }}
+                                              >
+                                                <Icon icon="solar:refresh-bold" className="text-xs text-muted-foreground" />
+                                              </button>
+                                            </div>
+                                            <button
+                                              className="w-full bg-primary text-primary-foreground font-bold py-3.5 rounded-xl flex items-center justify-center gap-2 shadow-[0_4px_16px_rgba(224,159,62,0.3)] active:scale-[0.98] transition-all disabled:opacity-50 text-sm"
+                                              disabled={submittingPost}
+                                              onClick={() => { triggerHaptic(); cleanupPreviewAudio(); submitCommunityPost(null, recordedAudio); }}
+                                            >
+                                              {submittingPost ? <Leapfrog size="20" speed="2.5" color="var(--primary-foreground)" /> : (
+                                                <>
+                                                  <Icon icon="solar:plain-bold" className="text-base" />
+                                                  Post to Community
+                                                </>
+                                              )}
+                                            </button>
+                                          </div>
+                                        )}
+
+                                        {speechError && <p className="text-xs text-destructive text-center">{speechError}</p>}
+                                      </div>
+                                    )}
                                   </div>
                                 );
-                              })}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                              })()}
+                            </>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </section>
 
-                  {/* Picture Describe — course-style card, navigates to its own page */}
-                  <section className="space-y-4">
-                    <div
-                      className="relative overflow-hidden rounded-[2rem] border border-border/50 shadow-md group active:scale-[0.98] transition-all cursor-pointer"
-                      onClick={() => { triggerHaptic(); setPracticeMode("picture-describe"); loadPictureDescribeLessons(); }}
-                    >
-                      <div className="h-32 w-full overflow-hidden">
-                        <img src="/speaking-picture-cover.png" alt="Picture Describe" className="w-full h-full object-cover" />
-                        <div className="absolute inset-0 bg-gradient-to-t from-card via-card/40 to-transparent" />
-                      </div>
-                      <div className="p-6 bg-card relative">
-                        <div className="flex justify-between items-start">
-                          <div>
-                            <h3 className="font-heading text-xl font-bold">Picture Describe</h3>
-                            <p className="text-sm text-muted-foreground mt-1 leading-relaxed">Look at images and describe them in Arabic.</p>
-                          </div>
-                          <div className="bg-primary/20 p-2 rounded-full border border-primary/20">
-                            <Icon icon="solar:alt-arrow-right-bold" className="text-primary" />
-                          </div>
-                        </div>
-                      </div>
+                  {/* Recent Activity — flies off when exercise is active */}
+                  <section className={activeExerciseType ? 'section-fly-off' : ''}>
+                    <div className="flex items-center justify-between mb-3">
+                      <h2 className="font-heading text-sm font-bold text-muted-foreground uppercase tracking-wider">Recent Activity</h2>
+                      <button
+                        className="w-8 h-8 rounded-lg bg-card border border-border/50 flex items-center justify-center active:scale-95 transition-all"
+                        onClick={() => { triggerHaptic(); refreshCommunityFeed(); }}
+                        aria-label="Refresh feed"
+                      >
+                        <Icon icon="solar:refresh-bold" className={`text-sm text-muted-foreground ${refreshingFeed ? 'animate-spin' : ''}`} />
+                      </button>
                     </div>
+
+                    {/* Filter chips */}
+                    <div className="flex gap-2 mb-4 overflow-x-auto scrollbar-hide">
+                      {[
+                        { key: 'all', label: 'All' },
+                        { key: 'read_aloud', label: 'Read Aloud' },
+                        { key: 'translate', label: 'Translate' },
+                        { key: 'daily_question', label: 'Daily Q' },
+                      ].map(f => (
+                        <button
+                          key={f.key}
+                          className={`px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-all active:scale-95 ${
+                            communityFilter === f.key
+                              ? 'bg-primary text-primary-foreground shadow-md'
+                              : 'bg-card border border-border/50 text-muted-foreground'
+                          }`}
+                          onClick={() => { triggerHaptic(); setCommunityFilter(f.key); loadCommunityPosts(f.key); }}
+                        >
+                          {f.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Posts feed */}
+                    {loadingCommunityPosts ? (
+                      <div className="flex justify-center py-12"><Leapfrog size="30" speed="2.5" color="var(--primary)" /></div>
+                    ) : communityPosts.length === 0 ? (
+                      <div className="text-center py-12">
+                        <div className="text-4xl mb-3">📝</div>
+                        <p className="text-sm text-muted-foreground">No posts yet. Be the first!</p>
+                        <p className="text-xs text-muted-foreground/60 mt-1">Complete a challenge above to post your answer.</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        {communityPosts.map(post => (
+                          <div key={post.id} className="bg-card border border-border/50 rounded-2xl p-5 active:scale-[0.99] transition-all cursor-pointer" onClick={() => { triggerHaptic(); openPostDetail(post); }}>
+                            {/* Post header */}
+                            <div className="flex items-center gap-3 mb-3">
+                              <div className="w-9 h-9 rounded-full bg-primary/20 flex items-center justify-center text-base">
+                                {post.profiles?.avatar_url || '😊'}
+                              </div>
+                              <div className="flex-1">
+                                <p className="text-sm font-bold">{post.profiles?.display_name || 'Learner'}</p>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] text-muted-foreground">{getTimeAgo(post.created_at)}</span>
+                                {canManageCommunity && (
+                                  <button
+                                    className="w-8 h-8 rounded-lg flex items-center justify-center text-destructive bg-destructive/10 active:bg-destructive/20 disabled:opacity-50"
+                                    disabled={moderatingTargetKey === `post_${post.id}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      triggerHaptic();
+                                      showConfirm({
+                                        title: 'Delete Post',
+                                        message: 'Delete this post for everyone? This cannot be undone.',
+                                        onConfirm: () => moderateCommunityItem({ targetType: 'post', targetId: post.id, reason: 'Admin removed community post' }),
+                                      });
+                                    }}
+                                    aria-label="Delete post"
+                                    title="Delete post"
+                                  >
+                                    {moderatingTargetKey === `post_${post.id}`
+                                      ? <Leapfrog size="12" speed="2.5" color="var(--destructive)" />
+                                      : <Icon icon="solar:trash-bin-trash-bold" className="text-sm" />}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Activity badge + prompt + answer */}
+                            <div className={`inline-block px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider mb-2 ${
+                              post.activity_type === 'read_aloud' ? 'bg-chart-4/15 text-chart-4'
+                              : post.activity_type === 'translate' ? 'bg-chart-3/15 text-chart-3'
+                              : 'bg-blue-500/15 text-blue-400'
+                            }`}>
+                              {post.activity_type === 'read_aloud' ? 'Read Aloud' : post.activity_type === 'translate' ? 'Translate' : 'Daily Question'}
+                            </div>
+                            {post.prompt_text && <p className="text-xs text-muted-foreground mb-1.5 line-clamp-1">{post.prompt_text}</p>}
+                            {post.answer_text && <p className="text-sm font-arabic leading-snug line-clamp-2" dir="rtl">{post.answer_text}</p>}
+                            {post.audio_url && (
+                              <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl bg-primary/10 mb-4" onClick={(e) => e.stopPropagation()}>
+                                <button
+                                  className="w-8 h-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0 active:scale-95 transition-all"
+                                  onClick={() => { triggerHaptic(); playCommunityAudio(post.id, post.audio_url); }}
+                                >
+                                  <Icon icon={playingPostId === post.id ? "solar:pause-bold" : "solar:play-bold"} className="text-sm text-primary-foreground" />
+                                </button>
+                                <span className="text-[10px] text-primary/70 w-8 text-center flex-shrink-0">{playingPostId === post.id ? formatAudioTime(comAudioTime) : '0:00'}</span>
+                                <input
+                                  type="range"
+                                  min="0"
+                                  max="100"
+                                  step="0.1"
+                                  value={playingPostId === post.id ? comAudioProgress : 0}
+                                  onChange={(e) => { seekCommunityAudio(parseFloat(e.target.value), post.id); }}
+                                  className="community-audio-slider flex-1"
+                                />
+                                <span className="text-[10px] text-primary/70 w-8 text-center flex-shrink-0">{playingPostId === post.id && comAudioDuration ? formatAudioTime(comAudioDuration) : '--:--'}</span>
+                              </div>
+                            )}
+
+                            {/* Action buttons */}
+                            <div className="flex items-center gap-3 pt-3 border-t border-border/30">
+                              <button
+                                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all active:scale-95 ${
+                                  userReactions[`post_${post.id}`] === 'perfect'
+                                    ? 'bg-green-500/15 text-green-500 border border-green-500/30'
+                                    : 'bg-muted/30 text-muted-foreground border border-transparent'
+                                }`}
+                                onClick={(e) => { e.stopPropagation(); triggerHaptic(); togglePerfectReaction(post.id); }}
+                              >
+                                <Icon icon="solar:like-bold" className="text-sm" />
+                                Perfect{post.perfect_count > 0 ? ` (${post.perfect_count})` : ''}
+                              </button>
+                              <button
+                                className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-muted/30 text-muted-foreground transition-all active:scale-95"
+                                onClick={(e) => { e.stopPropagation(); triggerHaptic(); openPostDetail(post); }}
+                              >
+                                <Icon icon="solar:pen-bold" className="text-sm" />
+                                {post.corrections_count > 0 ? `Corrections (${post.corrections_count})` : 'Suggest Correction'}
+                              </button>
+                              {user && post.user_id === user.id && !post.has_ai_feedback && (
+                                <button
+                                  className="ml-auto w-9 h-9 rounded-xl flex items-center justify-center bg-gradient-to-br from-violet-500/15 to-indigo-500/15 border border-violet-500/30 text-violet-400 active:scale-95 transition-all disabled:opacity-60"
+                                  disabled={aiFeedbackLoading.has(post.id)}
+                                  onClick={(e) => { e.stopPropagation(); triggerHaptic(); requestAiFeedback(post.id); }}
+                                  aria-label="Ask AI tutor"
+                                  title="Ask AI tutor"
+                                >
+                                  {aiFeedbackLoading.has(post.id)
+                                    ? <Leapfrog size="14" speed="2.5" color="#8b5cf6" />
+                                    : <Icon icon="solar:magic-stick-3-bold" className="text-base" />}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </section>
-                </div>
-              </section>
-            </main>
-          </>
+
+                </main>
+              </>
+            )}
+          </div>
         )}
 
         {/* ========== PROFILE TAB ========== */}
         {activeTab === "profile" && (
-          <>
-            <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+          <div key={`tab-${tabTransitionKey}`} className={tabDirection === 'back' ? 'tab-slide-left' : 'tab-slide-right'}>
+            <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
               <div className="flex items-center gap-3">
-                <div className="bg-muted p-2 rounded-xl border border-border">
-                  <Icon icon="solar:user-circle-bold" className="text-foreground text-2xl" />
+                <div className="bg-primary/20 p-2 rounded-xl border border-primary/30">
+                  <Icon icon="solar:user-circle-bold" className="text-primary text-2xl" />
                 </div>
                 <h1 className="font-heading text-xl font-bold">Profile</h1>
               </div>
@@ -3876,11 +6568,38 @@ function App() {
               {/* Profile Card */}
               <section>
                 <div className="bg-card rounded-[2rem] p-6 border border-border/50 shadow-md flex flex-col items-center text-center">
-                  <div className="w-20 h-20 rounded-full bg-muted border-2 border-border flex items-center justify-center mb-4">
-                    <Icon icon="solar:user-circle-bold" className="text-muted-foreground text-5xl" />
-                  </div>
-                  <h2 className="font-heading text-xl font-bold">{user.email?.split("@")[0] || "Student"}</h2>
+                  <button
+                    className="relative w-20 h-20 rounded-full bg-primary/15 border-2 border-primary/30 flex items-center justify-center mb-4 active:scale-95 transition-all group"
+                    onClick={() => {
+                      triggerHaptic();
+                      setProfileSetupName(userProfile?.display_name || user.email?.split('@')[0] || 'Learner');
+                      setProfileSetupAvatar(userProfile?.avatar_url || '😊');
+                      setShowProfileSetup(true);
+                    }}
+                  >
+                    <span className="text-4xl">{userProfile?.avatar_url || '😊'}</span>
+                    <div className="absolute bottom-0 right-0 w-6 h-6 rounded-full bg-primary flex items-center justify-center shadow-md">
+                      <Icon icon="solar:pen-bold" className="text-[10px] text-primary-foreground" />
+                    </div>
+                  </button>
+                  <h2 className="font-heading text-xl font-bold">{userProfile?.display_name || user.email?.split("@")[0] || "Student"}</h2>
                   <p className="text-sm text-muted-foreground">{user.email}</p>
+                  {userRoles.length > 0 && (
+                    <div className="flex flex-wrap justify-center gap-2 mt-4">
+                      {userRoles.filter(role => role !== 'student').map(role => (
+                        <span
+                          key={role}
+                          className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                            role === 'admin'
+                              ? 'bg-destructive/15 text-destructive border border-destructive/30'
+                              : 'bg-primary/15 text-primary border border-primary/30'
+                          }`}
+                        >
+                          {role}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </section>
 
@@ -3893,7 +6612,7 @@ function App() {
                 </div>
                 <div
                   className="bg-card p-5 rounded-[2rem] border border-border/50 flex flex-col items-center gap-2 cursor-pointer active:scale-95 transition-transform"
-                  onClick={() => { triggerHaptic(); setShowStreaksPage(true); }}
+                  onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setShowStreaksPage(true); }}
                 >
                   <Icon icon="solar:fire-bold" className="text-secondary text-2xl" />
                   <span className="text-2xl font-heading font-bold">{currentStreak}</span>
@@ -3903,9 +6622,32 @@ function App() {
 
               {/* Actions */}
               <section className="space-y-3">
+                {canViewTeacherDashboard && (
+                  <button
+                    className="w-full bg-card p-4 rounded-2xl border border-border/50 flex items-center gap-4 text-left active:scale-[0.98] transition-all"
+                    onClick={() => {
+                      triggerHaptic();
+                      setTransitionDirection("forward");
+                      setShowTeacherDashboard(true);
+                      loadTeacherDashboard();
+                    }}
+                  >
+                    <Icon icon="solar:shield-user-bold" className="text-primary text-xl" />
+                    <span className="font-medium text-sm">Teacher Dashboard</span>
+                    <Icon icon="solar:alt-arrow-right-linear" className="text-muted-foreground ml-auto" />
+                  </button>
+                )}
                 <button
                   className="w-full bg-card p-4 rounded-2xl border border-border/50 flex items-center gap-4 text-left active:scale-[0.98] transition-all"
-                  onClick={() => { triggerHaptic(); setShowStreaksPage(true); }}
+                  onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setShowMyPosts(true); loadMyPosts(); }}
+                >
+                  <Icon icon="solar:chat-round-dots-bold" className="text-primary text-xl" />
+                  <span className="font-medium text-sm">My Community Posts</span>
+                  <Icon icon="solar:alt-arrow-right-linear" className="text-muted-foreground ml-auto" />
+                </button>
+                <button
+                  className="w-full bg-card p-4 rounded-2xl border border-border/50 flex items-center gap-4 text-left active:scale-[0.98] transition-all"
+                  onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setShowStreaksPage(true); }}
                 >
                   <Icon icon="solar:fire-bold" className="text-secondary text-xl" />
                   <span className="font-medium text-sm">View Streaks Calendar</span>
@@ -3920,39 +6662,481 @@ function App() {
                 </button>
               </section>
             </main>
-          </>
+
+          </div>
+        )}
+
+        {/* My Community Posts Overlay — rendered outside tab conditionals so it works from any tab */}
+        {showLeaderboard && (
+            <div className={`fixed inset-0 z-50 bg-background flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+                <header className="px-6 pt-12 pb-4 flex items-center gap-3 sticky top-0 z-20 bg-background backdrop-blur-xl border-b border-border/30">
+                  <button className="w-10 h-10 rounded-full bg-muted/50 flex items-center justify-center active:scale-95 transition-all"
+                    onClick={() => { triggerHaptic(); setTransitionDirection("back"); setShowLeaderboard(false); }}>
+                    <Icon icon="solar:alt-arrow-left-linear" className="text-lg" />
+                  </button>
+                  <div className="flex items-center gap-2">
+                    <Icon icon="solar:cup-star-bold" className="text-xl text-amber-400" />
+                    <h1 className="font-heading text-lg font-bold">Top Contributors Last 3 days</h1>
+                  </div>
+                </header>
+                <div className="flex-1 overflow-y-auto px-6 py-4 pb-20">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wider font-bold mb-3">This Week</p>
+                  {leaderboard.length === 0 ? (
+                    <div className="text-center py-16">
+                      <Icon icon="solar:cup-star-linear" className="text-4xl text-muted-foreground/40 mx-auto mb-3" />
+                      <p className="text-muted-foreground text-sm">No posts yet this week</p>
+                      <p className="text-muted-foreground/60 text-xs mt-1">Be the first to contribute!</p>
+                    </div>
+                  ) : (
+                    <div className="bg-card border border-border/50 rounded-2xl overflow-hidden">
+                      {leaderboard.map((entry, idx) => (
+                        <div key={entry.user_id} className={`flex items-center gap-3 px-4 py-4 ${idx < leaderboard.length - 1 ? 'border-b border-border/30' : ''}`}>
+                          <div className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 text-sm font-bold ${
+                            idx === 0 ? 'bg-amber-500/20 text-amber-400' : idx === 1 ? 'bg-slate-300/20 text-slate-400' : idx === 2 ? 'bg-orange-600/20 text-orange-500' : 'bg-muted/30 text-muted-foreground'
+                          }`}>
+                            {idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : idx + 1}
+                          </div>
+                          <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center text-lg flex-shrink-0">
+                            {entry.avatar_url || '😊'}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-bold truncate">{entry.display_name}</p>
+                          </div>
+                          <span className="text-sm font-bold text-primary">{entry.count} {entry.count === 1 ? 'post' : 'posts'}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+            </div>
+        )}
+
+        {showTeacherDashboard && (
+            <div className={`fixed inset-0 z-50 bg-background flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+                <header className="px-6 pt-12 pb-4 flex items-center gap-3 sticky top-0 z-20 bg-background backdrop-blur-xl border-b border-border/30">
+                  <button
+                    className="w-10 h-10 rounded-full bg-muted/50 flex items-center justify-center active:scale-95 transition-all"
+                    onClick={() => { triggerHaptic(); setTransitionDirection("back"); setShowTeacherDashboard(false); }}
+                  >
+                    <Icon icon="solar:alt-arrow-left-linear" className="text-lg" />
+                  </button>
+                  <div className="flex-1 min-w-0">
+                    <h1 className="font-heading text-lg font-bold truncate">Teacher Dashboard</h1>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">Student activity and progress</p>
+                  </div>
+                  <button
+                    className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center active:scale-95 transition-all disabled:opacity-50"
+                    onClick={() => { triggerHaptic(); loadTeacherDashboard(); }}
+                    disabled={loadingTeacherDashboard}
+                    aria-label="Refresh dashboard"
+                  >
+                    <Icon icon="solar:refresh-bold" className={`text-lg ${loadingTeacherDashboard ? 'animate-spin text-primary' : 'text-muted-foreground'}`} />
+                  </button>
+                </header>
+                <div className="flex-1 overflow-y-auto px-6 py-4 space-y-6 pb-20">
+                  {teacherDashboardError ? (
+                    <div className="bg-card border border-destructive/30 rounded-2xl p-5">
+                      <div className="flex items-start gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-destructive/15 flex items-center justify-center flex-shrink-0">
+                          <Icon icon="solar:danger-triangle-bold" className="text-destructive text-lg" />
+                        </div>
+                        <div>
+                          <p className="text-sm font-bold text-foreground mb-1">Dashboard unavailable</p>
+                          <p className="text-sm text-muted-foreground">{teacherDashboardError}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ) : loadingTeacherDashboard && !teacherDashboardData ? (
+                    <div className="flex justify-center py-12">
+                      <Leapfrog size="28" speed="2.5" color="var(--primary)" />
+                    </div>
+                  ) : (
+                    <>
+                      <section className="grid grid-cols-2 gap-3">
+                        <div className="bg-card border border-border/50 rounded-2xl p-4">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Students</p>
+                          <p className="font-heading text-3xl font-bold">{teacherDashboardData?.overview?.student_count ?? 0}</p>
+                        </div>
+                        <div className="bg-card border border-border/50 rounded-2xl p-4">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Active Today</p>
+                          <p className="font-heading text-3xl font-bold">{teacherDashboardData?.overview?.active_today ?? 0}</p>
+                        </div>
+                        <div className="bg-card border border-border/50 rounded-2xl p-4 col-span-2">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Book Lessons In Course</p>
+                          <p className="text-sm font-bold text-foreground">
+                            {teacherDashboardData?.overview?.total_book_lessons ?? 0} book
+                          </p>
+                          <p className="text-xs text-muted-foreground mt-1">Course progress is based on book lessons only.</p>
+                        </div>
+                      </section>
+
+                      <section>
+                        <div className="flex items-center justify-between mb-3">
+                          <h2 className="font-heading text-sm font-bold text-muted-foreground uppercase tracking-wider">Class Overview</h2>
+                          <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Top 3 students</span>
+                        </div>
+                        <div className="space-y-3">
+                          {[
+                            {
+                              key: 'current_streak',
+                              title: 'Streak Leaders',
+                              subtitle: 'Current streak',
+                              accent: 'text-amber-400',
+                              icon: 'solar:fire-bold',
+                            },
+                            {
+                              key: 'minutes_last_7_days',
+                              title: 'Minutes Leaders',
+                              subtitle: 'Last 7 days',
+                              accent: 'text-primary',
+                              icon: 'solar:clock-circle-bold',
+                            },
+                            {
+                              key: 'posts_last_7_days',
+                              title: 'Post Leaders',
+                              subtitle: 'Active posts in 7 days',
+                              accent: 'text-blue-400',
+                              icon: 'solar:chat-round-dots-bold',
+                            },
+                          ].map((board) => {
+                            const leaders = getTeacherLeaderboard(board.key, 3);
+                            return (
+                              <div key={board.key} className="bg-card border border-border/50 rounded-2xl p-4">
+                                <div className="flex items-center gap-2 mb-3">
+                                  <Icon icon={board.icon} className={`text-lg ${board.accent}`} />
+                                  <div>
+                                    <p className="text-sm font-bold text-foreground">{board.title}</p>
+                                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{board.subtitle}</p>
+                                  </div>
+                                </div>
+                                {leaders.length === 0 ? (
+                                  <p className="text-sm text-muted-foreground">No student data yet.</p>
+                                ) : (
+                                  <div className="space-y-2">
+                                    {leaders.map((student, idx) => (
+                                      <div key={`${board.key}_${student.user_id}`} className="flex items-center gap-3 rounded-xl bg-muted/30 border border-border/30 px-3 py-2.5">
+                                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
+                                          idx === 0 ? 'bg-amber-500/15 text-amber-400' : idx === 1 ? 'bg-slate-300/15 text-slate-300' : 'bg-orange-600/15 text-orange-400'
+                                        }`}>
+                                          {idx + 1}
+                                        </div>
+                                        <div className="w-9 h-9 rounded-full bg-primary/15 border border-primary/30 flex items-center justify-center text-base flex-shrink-0">
+                                          {student.avatar_url || '😊'}
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                          <p className="text-sm font-bold text-foreground truncate">{student.display_name || 'Learner'}</p>
+                                          <p className="text-[10px] text-muted-foreground">{student.email || 'Student'}</p>
+                                        </div>
+                                        <span className={`text-sm font-bold ${board.accent}`}>
+                                          {formatLeaderboardValue(board.key, student?.stats?.[board.key])}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </section>
+
+                      <section>
+                        <div className="flex items-center justify-between mb-3">
+                          <h2 className="font-heading text-sm font-bold text-muted-foreground uppercase tracking-wider">Students</h2>
+                          <span className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                            {teacherDashboardData?.generated_at ? `Updated ${getTimeAgo(teacherDashboardData.generated_at)}` : ''}
+                          </span>
+                        </div>
+
+                        {!teacherDashboardData?.students?.length ? (
+                          <div className="bg-card border border-border/50 rounded-2xl p-8 text-center">
+                            <Icon icon="solar:users-group-rounded-linear" className="text-4xl text-muted-foreground/40 mx-auto mb-3" />
+                            <p className="text-sm text-muted-foreground">No students to show yet.</p>
+                          </div>
+                        ) : (
+                          <div className="space-y-4">
+                            {teacherDashboardData.students.map((student) => (
+                              <div key={student.user_id} className="bg-card border border-border/50 rounded-[1.75rem] p-5">
+                                <div className="flex items-start gap-3">
+                                  <div className="w-12 h-12 rounded-full bg-primary/15 border border-primary/30 flex items-center justify-center text-xl flex-shrink-0">
+                                    {student.avatar_url || '😊'}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <h3 className="text-base font-bold text-foreground">{student.display_name || 'Learner'}</h3>
+                                      {student.stats?.was_active_today && (
+                                        <span className="px-2 py-0.5 rounded-full bg-green-500/15 text-green-500 text-[9px] font-bold uppercase tracking-wider">Active today</span>
+                                      )}
+                                    </div>
+                                    {student.email && <p className="text-xs text-muted-foreground mt-1 break-all">{student.email}</p>}
+                                    <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 text-[11px] text-muted-foreground">
+                                      <span>Last active {student.last_active_at ? getTimeAgo(student.last_active_at) : 'never'}</span>
+                                      <span>Joined {formatDashboardDate(student.joined_at)}</span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-3 mt-4">
+                                  <div className="rounded-2xl bg-muted/30 border border-border/30 p-3">
+                                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Time</p>
+                                    <p className="text-sm font-bold text-foreground">{formatMinutesSpent(student.stats?.minutes_today ?? 0)} today</p>
+                                    <p className="text-xs text-muted-foreground mt-1">{formatMinutesSpent(student.stats?.minutes_last_7_days ?? 0)} in 7 days</p>
+                                  </div>
+                                  <div className="rounded-2xl bg-muted/30 border border-border/30 p-3">
+                                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Streak</p>
+                                    <p className="text-sm font-bold text-foreground">{student.stats?.current_streak ?? 0} day streak</p>
+                                    <p className="text-xs text-muted-foreground mt-1">{student.stats?.active_days_last_30 ?? 0} active days in 30</p>
+                                  </div>
+                                  <div className="rounded-2xl bg-muted/30 border border-border/30 p-3">
+                                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Book Lessons</p>
+                                    <p className="text-sm font-bold text-foreground">
+                                      {student.stats?.book_lessons_completed ?? 0}/{teacherDashboardData?.overview?.total_book_lessons ?? 0}
+                                    </p>
+                                    <p className="text-xs text-muted-foreground mt-1">{student.stats?.book_progress_percent ?? 0}% complete</p>
+                                  </div>
+                                  <div className="rounded-2xl bg-muted/30 border border-border/30 p-3">
+                                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Active Posts</p>
+                                    <p className="text-sm font-bold text-foreground">
+                                      {student.stats?.posts_last_7_days ?? 0} this week
+                                    </p>
+                                    <p className="text-xs text-muted-foreground mt-1">{student.stats?.total_posts ?? 0} total posts</p>
+                                  </div>
+                                  <div className="rounded-2xl bg-muted/30 border border-border/30 p-3">
+                                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Daily Scenario</p>
+                                    <p className={`text-sm font-bold ${student.stats?.scenario_completed_today ? 'text-green-500' : 'text-foreground'}`}>
+                                      {student.stats?.scenario_completed_today ? 'Completed' : 'Not completed'}
+                                    </p>
+                                    <p className="text-xs text-muted-foreground mt-1">Today</p>
+                                  </div>
+                                  <div className="rounded-2xl bg-muted/30 border border-border/30 p-3">
+                                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Daily Picture</p>
+                                    <p className={`text-sm font-bold ${student.stats?.picture_completed_today ? 'text-green-500' : 'text-foreground'}`}>
+                                      {student.stats?.picture_completed_today ? 'Completed' : 'Not completed'}
+                                    </p>
+                                    <p className="text-xs text-muted-foreground mt-1">Today</p>
+                                  </div>
+                                </div>
+
+                                <div className="flex flex-wrap gap-3 mt-4 text-xs text-muted-foreground">
+                                  <span>Total time: <span className="text-foreground font-bold">{formatMinutesSpent(student.stats?.total_minutes ?? 0)}</span></span>
+                                  <span>Posts: <span className="text-foreground font-bold">{student.stats?.total_posts ?? 0}</span></span>
+                                  <span>Best streak: <span className="text-foreground font-bold">{student.stats?.longest_streak ?? 0}</span></span>
+                                </div>
+
+                                <div className="flex items-center justify-between gap-3 mt-4 pt-4 border-t border-border/30">
+                                  <span className="text-xs text-muted-foreground">
+                                    {student.stats?.was_active_today ? 'Active on the app today' : 'Not active today'}
+                                  </span>
+                                  <button
+                                    className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold active:scale-95 transition-all disabled:opacity-50"
+                                    disabled={!student.stats?.total_posts || (loadingTeacherStudentPosts && teacherSelectedStudent?.user_id === student.user_id)}
+                                    onClick={() => {
+                                      triggerHaptic();
+                                      loadTeacherStudentPosts(student);
+                                    }}
+                                  >
+                                    {loadingTeacherStudentPosts && teacherSelectedStudent?.user_id === student.user_id
+                                      ? 'Loading...'
+                                      : 'View Posts'}
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </section>
+                    </>
+                  )}
+                </div>
+            </div>
+        )}
+
+        {showTeacherStudentPosts && (
+            <div className={`fixed inset-0 z-[60] bg-background flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+                <header className="px-6 pt-12 pb-4 flex items-center gap-3 sticky top-0 z-20 bg-background backdrop-blur-xl border-b border-border/30">
+                  <button
+                    className="w-10 h-10 rounded-full bg-muted/50 flex items-center justify-center active:scale-95 transition-all"
+                    onClick={() => { triggerHaptic(); setTransitionDirection("back"); setShowTeacherStudentPosts(false); }}
+                  >
+                    <Icon icon="solar:alt-arrow-left-linear" className="text-lg" />
+                  </button>
+                  <div className="flex-1 min-w-0">
+                    <h1 className="font-heading text-lg font-bold truncate">{teacherSelectedStudent?.display_name || 'Student Posts'}</h1>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">Community posts</p>
+                  </div>
+                  <button
+                    className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center active:scale-95 transition-all disabled:opacity-50"
+                    onClick={() => { triggerHaptic(); loadTeacherStudentPosts(teacherSelectedStudent); }}
+                    disabled={loadingTeacherStudentPosts || !teacherSelectedStudent?.user_id}
+                    aria-label="Refresh posts"
+                  >
+                    <Icon icon="solar:refresh-bold" className={`text-lg ${loadingTeacherStudentPosts ? 'animate-spin text-primary' : 'text-muted-foreground'}`} />
+                  </button>
+                </header>
+                <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4 pb-20">
+                  {teacherStudentPostsError ? (
+                    <div className="bg-card border border-destructive/30 rounded-2xl p-5">
+                      <p className="text-sm font-bold text-foreground mb-1">Could not load posts</p>
+                      <p className="text-sm text-muted-foreground">{teacherStudentPostsError}</p>
+                    </div>
+                  ) : loadingTeacherStudentPosts && teacherStudentPosts.length === 0 ? (
+                    <div className="flex justify-center py-12">
+                      <Leapfrog size="28" speed="2.5" color="var(--primary)" />
+                    </div>
+                  ) : teacherStudentPosts.length === 0 ? (
+                    <div className="text-center py-16">
+                      <Icon icon="solar:chat-round-dots-linear" className="text-4xl text-muted-foreground/40 mx-auto mb-3" />
+                      <p className="text-muted-foreground text-sm">No posts yet</p>
+                      <p className="text-muted-foreground/60 text-xs mt-1">This student has not posted to the community.</p>
+                    </div>
+                  ) : (
+                    teacherStudentPosts.map(post => (
+                      <div
+                        key={post.id}
+                        className="bg-card border border-border/50 rounded-2xl p-5 active:scale-[0.99] transition-all cursor-pointer"
+                        onClick={() => { triggerHaptic(); openTeacherStudentPost(post); }}
+                      >
+                        <div className="flex items-center justify-between mb-2 gap-3">
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                            post.activity_type === 'read_aloud' ? 'bg-chart-4/15 text-chart-4' :
+                            post.activity_type === 'translate' ? 'bg-primary/15 text-primary' :
+                            'bg-secondary/15 text-secondary'
+                          }`}>
+                            {post.activity_type === 'read_aloud' ? 'Read Aloud' : post.activity_type === 'translate' ? 'Translate' : 'Daily Question'}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">{getTimeAgo(post.created_at)}</span>
+                        </div>
+                        <p className="text-xs text-muted-foreground mb-1 line-clamp-2">{post.prompt_text}</p>
+                        {post.answer_text && (
+                          <p className="text-sm font-medium mb-2 line-clamp-3" dir="rtl" lang="ar" style={{ fontFamily: 'var(--font-arabic)' }}>
+                            {post.answer_text}
+                          </p>
+                        )}
+                        {post.audio_url && (
+                          <div className="flex items-center gap-1.5 mb-2">
+                            <Icon icon="solar:microphone-bold" className="text-xs text-primary/60" />
+                            <span className="text-[10px] text-primary/60">Audio attached</span>
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between mt-3 pt-3 border-t border-border/30">
+                          <div className="flex flex-wrap gap-3 text-[10px] text-muted-foreground">
+                            <span>{post.perfect_count || 0} perfect</span>
+                            <span>{post.corrections_count || 0} corrections</span>
+                          </div>
+                          <span className="text-xs font-bold text-primary">Open</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+            </div>
+        )}
+
+        {showMyPosts && (
+            <div className={`fixed inset-0 z-50 bg-background flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+                <header className="px-6 pt-12 pb-4 flex items-center gap-3 sticky top-0 z-20 bg-background backdrop-blur-xl border-b border-border/30">
+                  <button className="w-10 h-10 rounded-full bg-muted/50 flex items-center justify-center active:scale-95 transition-all"
+                    onClick={() => { triggerHaptic(); setTransitionDirection("back"); setShowMyPosts(false); }}>
+                    <Icon icon="solar:alt-arrow-left-linear" className="text-lg" />
+                  </button>
+                  <h1 className="font-heading text-lg font-bold">My Community Posts</h1>
+                </header>
+                <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4 pb-20">
+                  {loadingMyPosts ? (
+                    <div className="flex justify-center py-12">
+                      <Leapfrog size="28" speed="2.5" color="var(--primary)" />
+                    </div>
+                  ) : myPosts.length === 0 ? (
+                    <div className="text-center py-16">
+                      <Icon icon="solar:chat-round-dots-linear" className="text-4xl text-muted-foreground/40 mx-auto mb-3" />
+                      <p className="text-muted-foreground text-sm">No posts yet</p>
+                      <p className="text-muted-foreground/60 text-xs mt-1">Complete community exercises to post!</p>
+                    </div>
+                  ) : (
+                    myPosts.map(post => (
+                      <div key={post.id} className="bg-card border border-border/50 rounded-2xl p-5">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                            post.activity_type === 'read_aloud' ? 'bg-chart-4/15 text-chart-4' :
+                            post.activity_type === 'translate' ? 'bg-primary/15 text-primary' :
+                            'bg-secondary/15 text-secondary'
+                          }`}>
+                            {post.activity_type === 'read_aloud' ? 'Read Aloud' : post.activity_type === 'translate' ? 'Translate' : 'Daily Question'}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">{getTimeAgo(post.created_at)}</span>
+                        </div>
+                        <p className="text-xs text-muted-foreground mb-1">{post.prompt_text}</p>
+                        {post.answer_text && (
+                          <p className="text-sm font-medium mb-2" dir="rtl" lang="ar" style={{ fontFamily: 'var(--font-arabic)' }}>
+                            {post.answer_text}
+                          </p>
+                        )}
+                        {post.audio_url && (
+                          <div className="flex items-center gap-1.5 mb-2">
+                            <Icon icon="solar:microphone-bold" className="text-xs text-primary/60" />
+                            <span className="text-[10px] text-primary/60">Audio attached</span>
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between mt-3 pt-3 border-t border-border/30">
+                          <span className="text-[10px] text-muted-foreground/60">
+                            {post.perfect_count > 0 ? `${post.perfect_count} perfect` : ''}
+                          </span>
+                          <button
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-destructive/10 text-destructive text-xs font-medium active:scale-95 transition-all disabled:opacity-50"
+                            disabled={deletingPostId === post.id}
+                            onClick={() => {
+                              triggerHaptic();
+                              showConfirm({
+                                title: 'Delete Post',
+                                message: 'Delete this post? This cannot be undone.',
+                                onConfirm: () => deleteMyPost(post.id),
+                              });
+                            }}
+                          >
+                            {deletingPostId === post.id ? (
+                              <Leapfrog size="14" speed="2.5" color="var(--destructive)" />
+                            ) : (
+                              <><Icon icon="solar:trash-bin-trash-bold" className="text-sm" />Delete</>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+            </div>
         )}
 
         {/* ========== BOTTOM TAB BAR ========== */}
-        <nav className="fixed left-6 right-6 z-50" style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.75rem)' }}>
+        <nav className={`fixed left-6 right-6 z-50 ${((communityView === 'post_detail' || communityView === 'exercise') && activeTab === 'community') || (activeTab === 'community' && activeExerciseType) || showMyPosts || showLeaderboard || showTeacherDashboard || showTeacherStudentPosts ? 'hidden' : ''}`} style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.75rem)' }}>
           <div className="bg-background/80 backdrop-blur-2xl border border-border/50 rounded-full px-6 py-4 flex items-center justify-between shadow-[0_8px_32px_rgba(0,0,0,0.4)]">
             <button
-              className={`flex flex-col items-center gap-1 w-16 ${activeTab === "home" ? "text-primary" : "text-muted-foreground"}`}
-              onClick={() => { triggerHaptic(); setActiveTab("home"); }}
+              className={`flex flex-col items-center gap-0.5 w-16 transition-all ${activeTab === "home" ? "text-primary" : "text-muted-foreground"}`}
+              onClick={() => { triggerHaptic(); switchTab("home"); }}
             >
               <Icon icon={activeTab === "home" ? "solar:home-2-bold" : "solar:home-2-linear"} className="text-2xl" />
-              <span className={`text-[10px] ${activeTab === "home" ? "font-bold" : "font-medium"}`}>Home</span>
+              {activeTab === "home" && <span className="text-[10px] font-bold">Home</span>}
             </button>
             <button
-              className={`flex flex-col items-center gap-1 w-16 ${activeTab === "courses" ? "text-primary" : "text-muted-foreground"}`}
-              onClick={() => { triggerHaptic(); setActiveTab("courses"); }}
+              className={`flex flex-col items-center gap-0.5 w-16 transition-all ${activeTab === "courses" ? "text-primary" : "text-muted-foreground"}`}
+              onClick={() => { triggerHaptic(); switchTab("courses"); }}
             >
               <Icon icon={activeTab === "courses" ? "solar:book-bookmark-bold" : "solar:book-bookmark-linear"} className="text-2xl" />
-              <span className={`text-[10px] ${activeTab === "courses" ? "font-bold" : "font-medium"}`}>Courses</span>
+              {activeTab === "courses" && <span className="text-[10px] font-bold">Courses</span>}
             </button>
             <button
-              className={`flex flex-col items-center gap-1 w-16 ${activeTab === "speaking" ? "text-chart-4" : "text-muted-foreground"}`}
-              onClick={() => { triggerHaptic(); setActiveTab("speaking"); loadSpeakingModes(); }}
+              className={`flex flex-col items-center gap-0.5 w-16 transition-all ${activeTab === "community" ? "text-primary" : "text-muted-foreground"}`}
+              onClick={() => { triggerHaptic(); switchTab("community"); if (!dailyExercises) loadDailyExercises(); loadCommunityPosts(communityFilter); loadLeaderboard(); }}
             >
-              <Icon icon={activeTab === "speaking" ? "solar:microphone-3-bold" : "solar:microphone-3-linear"} className="text-2xl" />
-              <span className={`text-[10px] ${activeTab === "speaking" ? "font-bold" : "font-medium"}`}>Speaking</span>
+              <Icon icon={activeTab === "community" ? "solar:users-group-rounded-bold" : "solar:users-group-rounded-linear"} className="text-2xl" />
+              {activeTab === "community" && <span className="text-[10px] font-bold">Community</span>}
             </button>
             <button
-              className={`flex flex-col items-center gap-1 w-16 ${activeTab === "profile" ? "text-primary" : "text-muted-foreground"}`}
-              onClick={() => { triggerHaptic(); setActiveTab("profile"); }}
+              className={`flex flex-col items-center gap-0.5 w-16 transition-all ${activeTab === "profile" ? "text-primary" : "text-muted-foreground"}`}
+              onClick={() => { triggerHaptic(); switchTab("profile"); }}
             >
               <Icon icon={activeTab === "profile" ? "solar:user-circle-bold" : "solar:user-circle-linear"} className="text-2xl" />
-              <span className={`text-[10px] ${activeTab === "profile" ? "font-bold" : "font-medium"}`}>Profile</span>
+              {activeTab === "profile" && <span className="text-[10px] font-bold">Profile</span>}
             </button>
           </div>
         </nav>
@@ -3975,6 +7159,108 @@ function App() {
                   onClick={() => { setShowSignOutConfirm(false); handleSignOut(); }}
                 >
                   Sign out
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Profile Setup Modal */}
+        {showProfileSetup && (
+          <div className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-6" onClick={() => { if (userProfile) setShowProfileSetup(false); }}>
+            <div className="bg-card rounded-3xl p-6 max-w-sm w-full border border-border shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <h3 className="font-heading text-lg font-bold mb-1">{userProfile?.avatar_url ? 'Edit Profile' : 'Set up your profile'}</h3>
+              <p className="text-sm text-muted-foreground mb-5">Choose a name and avatar for the community.</p>
+
+              <div className="flex justify-center mb-4">
+                <div className="w-20 h-20 rounded-full bg-primary/20 border-2 border-primary/40 flex items-center justify-center text-4xl">
+                  {profileSetupAvatar || '😊'}
+                </div>
+              </div>
+              <div className="grid grid-cols-8 gap-2 mb-5">
+                {AVATAR_OPTIONS.map(emoji => (
+                  <button
+                    key={emoji}
+                    className={`w-10 h-10 rounded-xl flex items-center justify-center text-lg transition-all active:scale-90 ${
+                      profileSetupAvatar === emoji ? 'bg-primary/20 border-2 border-primary' : 'bg-muted/30 border border-border/30'
+                    }`}
+                    onClick={() => { triggerHaptic(); setProfileSetupAvatar(emoji); }}
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+
+              <input
+                type="text"
+                className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/50 mb-5"
+                placeholder="Display name"
+                value={profileSetupName}
+                onChange={(e) => setProfileSetupName(e.target.value)}
+                maxLength={20}
+              />
+
+              <button
+                className="w-full bg-primary text-primary-foreground font-bold py-3.5 rounded-xl active:scale-[0.98] transition-all disabled:opacity-50"
+                disabled={!profileSetupName.trim()}
+                onClick={() => { triggerHaptic(); saveUserProfile(); }}
+              >
+                Save Profile
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Report Abuse Modal */}
+        {showReportModal && (
+          <div className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-6" onClick={() => { triggerHaptic(); setShowReportModal(false); setReportTarget(null); setReportReason(''); }}>
+            <div className="bg-card rounded-3xl p-6 max-w-sm w-full border border-border shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <h3 className="font-heading text-lg font-bold mb-1">Report Content</h3>
+              <p className="text-sm text-muted-foreground mb-4">Tell us why this content is inappropriate.</p>
+              <textarea
+                className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/50 resize-none focus:outline-none focus:border-primary/50 mb-4"
+                rows={3}
+                placeholder="Describe the issue..."
+                value={reportReason}
+                onChange={(e) => setReportReason(e.target.value)}
+              />
+              <div className="flex gap-3">
+                <button
+                  className="flex-1 py-3 rounded-xl border border-border font-bold text-sm text-foreground bg-muted active:scale-[0.97] transition-all"
+                  onClick={() => { triggerHaptic(); setShowReportModal(false); setReportTarget(null); setReportReason(''); }}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="flex-1 py-3 rounded-xl font-bold text-sm text-white bg-destructive active:scale-[0.97] transition-all disabled:opacity-50"
+                  disabled={!reportReason.trim()}
+                  onClick={() => { triggerHaptic(); submitReport(); }}
+                >
+                  Report
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Custom Confirm Modal */}
+        {confirmModal && (
+          <div className="confirm-overlay" onClick={() => setConfirmModal(null)}>
+            <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
+              <div className={`confirm-icon ${confirmModal.variant === 'warning' ? 'warning' : 'danger'}`}>
+                <Icon icon={confirmModal.variant === 'warning' ? 'solar:danger-triangle-bold' : 'solar:trash-bin-trash-bold'} />
+              </div>
+              <h3 className="confirm-title">{confirmModal.title}</h3>
+              <p className="confirm-message">{confirmModal.message}</p>
+              <div className="confirm-actions">
+                <button className="confirm-btn confirm-btn-cancel" onClick={() => { triggerHaptic(); setConfirmModal(null); }}>
+                  Cancel
+                </button>
+                <button
+                  className={`confirm-btn ${confirmModal.variant === 'warning' ? 'confirm-btn-warning' : 'confirm-btn-danger'}`}
+                  onClick={() => { triggerHaptic(); confirmModal.onConfirm(); setConfirmModal(null); }}
+                >
+                  {confirmModal.confirmLabel || 'Delete'}
                 </button>
               </div>
             </div>
@@ -4030,7 +7316,7 @@ function App() {
           </div>
 
           <button className="btn-celebration" onClick={() => { triggerHaptic(); backToSpeakingLessons(); }}>
-            Continue →
+            Continue <MdArrowForwardIos style={{ display: 'inline', verticalAlign: 'middle', fontSize: '0.8em' }} />
           </button>
         </div>
       );
@@ -4332,22 +7618,24 @@ function App() {
 
   if (scenarioPhase) {
     return (
-      <ScenarioChat
-        scenarioData={scenarioData}
-        scenarioCompleted={scenarioCompleted}
-        user={user}
-        onComplete={() => {
-          setScenarioCompleted(true);
-          const today = new Date().toISOString().slice(0, 10);
-          supabase.from('user_daily_stats').update({ scenario_completed: true })
-            .eq('user_id', user.id).eq('date', today);
-          triggerHeavyHaptic();
-        }}
-        onExit={() => setScenarioPhase(false)}
-        supabase={supabase}
-        triggerHaptic={triggerHaptic}
-        triggerHeavyHaptic={triggerHeavyHaptic}
-      />
+      <div className="scenario-enter">
+        <ScenarioChat
+          scenarioData={scenarioData}
+          scenarioCompleted={scenarioCompleted}
+          user={user}
+          onComplete={() => {
+            setScenarioCompleted(true);
+            const today = new Date().toISOString().slice(0, 10);
+            supabase.from('user_daily_stats').update({ scenario_completed: true })
+              .eq('user_id', user.id).eq('date', today);
+            triggerHeavyHaptic();
+          }}
+          onExit={() => setScenarioPhase(false)}
+          supabase={supabase}
+          triggerHaptic={triggerHaptic}
+          triggerHeavyHaptic={triggerHeavyHaptic}
+        />
+      </div>
     );
   }
 
@@ -4409,7 +7697,7 @@ function App() {
           <footer className="px-6" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 2rem)' }}>
             <button
               className="btn-primary" style={{ width: "100%" }}
-              onClick={() => { triggerHaptic(); setWotdPhase("word"); }}
+              onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setWotdPhase("word"); }}
             >
               Let's Go!
             </button>
@@ -4421,12 +7709,12 @@ function App() {
     // PHASE: WORD DISPLAY
     if (wotdPhase === "word") {
       return (
-        <div className="min-h-screen bg-background text-foreground font-sans flex flex-col swipe-in">
+        <div className={`min-h-screen bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Header */}
-          <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+          <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
             <button
               className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center"
-              onClick={() => { triggerHaptic(); setWotdPhase("intro"); }}
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); setWotdPhase("intro"); }}
             >
               <MdArrowBackIosNew className="text-foreground" />
             </button>
@@ -4466,6 +7754,7 @@ function App() {
               className="btn-primary" style={{ width: "100%" }}
               onClick={() => {
                 triggerHaptic();
+                setTransitionDirection("forward");
                 if (wotdExamples.length > 0) {
                   setWotdPhase("examples");
                 } else {
@@ -4485,12 +7774,12 @@ function App() {
       const currentExample = wotdExamples[wotdExampleIndex];
 
       return (
-        <div className="min-h-screen bg-background text-foreground font-sans flex flex-col">
+        <div className={`min-h-screen bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Header */}
-          <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+          <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
             <button
               className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center"
-              onClick={() => { triggerHaptic(); setWotdPhase("word"); }}
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); setWotdPhase("word"); }}
             >
               <MdArrowBackIosNew className="text-foreground" />
             </button>
@@ -4548,6 +7837,7 @@ function App() {
                 className="btn-primary" style={{ flex: 1 }}
                 onClick={() => {
                   triggerHaptic();
+                  setTransitionDirection("forward");
                   if (wotdExampleIndex === wotdExamples.length - 1) {
                     setWotdPhase("complete");
                   } else {
@@ -4562,7 +7852,7 @@ function App() {
                 onClick={() => { if (wotdExampleIndex < wotdExamples.length - 1) { triggerHaptic(); setWotdExampleIndex(i => i + 1); } }}
                 disabled={wotdExampleIndex === wotdExamples.length - 1}
               >
-                <span className="text-foreground">→</span>
+                <MdArrowForwardIos className="text-foreground" />
               </button>
             </div>
           </footer>
@@ -4593,40 +7883,70 @@ function App() {
       };
 
       return (
-        <div className="min-h-screen bg-background text-foreground font-sans flex flex-col items-center justify-center px-8 text-center">
-          <div className="mb-4">
-            <DotLottieReact
-              src="/animations/done.lottie"
-              loop
-              autoplay
-              style={{ width: '200px', height: '200px' }}
-            />
+        <div className={`min-h-screen bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+          {/* Decorative top gradient */}
+          <div className="relative w-full pt-16 pb-8 flex flex-col items-center">
+            <div className="absolute inset-0 bg-gradient-to-b from-primary/10 via-primary/5 to-transparent" />
+            <div className="relative z-10 flex flex-col items-center">
+              <div className="w-20 h-20 rounded-full bg-primary/15 border-2 border-primary/30 flex items-center justify-center mb-5">
+                <Icon icon="solar:star-bold" className="text-primary text-4xl" />
+              </div>
+              <h1 className="font-heading text-3xl font-bold mb-1">Well Done!</h1>
+              <p className="text-muted-foreground text-sm">Check in tomorrow for a new phrase</p>
+            </div>
           </div>
 
-          <h1 className="font-heading text-3xl font-bold mb-2">Well Done!</h1>
-          <p className="text-muted-foreground text-sm mb-8">Check in tomorrow for a new phrase</p>
+          <main className="flex-1 px-6 flex flex-col items-center justify-center">
+            {/* Word card */}
+            <div className="bg-card rounded-3xl p-8 border border-border/50 shadow-lg w-full max-w-sm mb-6 relative overflow-hidden">
+              <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-primary via-chart-3 to-secondary" />
+              <p className="text-3xl font-arabic text-center leading-relaxed mb-4" dir="rtl">{currentWotd.arabic_text}</p>
+              <div className="w-12 h-0.5 bg-border/50 mx-auto mb-4" />
+              <p className="text-lg font-medium text-center text-muted-foreground">{currentWotd.english_text}</p>
+              {currentWotd.transliteration && (
+                <p className="text-sm text-primary/60 text-center mt-2 italic">{currentWotd.transliteration}</p>
+              )}
+              <button
+                className="mt-5 mx-auto flex items-center gap-2 bg-primary/10 text-primary px-4 py-2 rounded-full text-xs font-bold border border-primary/20 active:scale-95 transition-all"
+                onClick={(e) => { e.stopPropagation(); speakAiAudio(currentWotd.arabic_text); }}
+              >
+                <Icon icon="solar:volume-loud-bold" className="text-base" />
+                Listen
+              </button>
+            </div>
 
-          <div className="bg-card rounded-3xl p-6 border border-border/50 w-full max-w-sm mb-8">
-            <p className="text-2xl font-arabic mb-2" dir="rtl">{currentWotd.arabic_text}</p>
-            <div className="w-8 h-0.5 bg-border mx-auto my-3" />
-            <p className="text-base text-muted-foreground">{currentWotd.english_text}</p>
-          </div>
+            {/* Stats row */}
+            {wotdExamples.length > 0 && (
+              <div className="flex items-center gap-6 mb-6">
+                <div className="flex flex-col items-center">
+                  <span className="text-2xl font-bold text-primary">{wotdExamples.length}</span>
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-bold">Examples</span>
+                </div>
+                <div className="w-px h-8 bg-border/50" />
+                <div className="flex flex-col items-center">
+                  <Icon icon="solar:check-circle-bold" className="text-2xl text-chart-4" />
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-bold">Complete</span>
+                </div>
+              </div>
+            )}
+          </main>
 
-          <div className="flex flex-col gap-4 w-full max-w-sm" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 1rem)' }}>
+          <footer className="px-6 space-y-3" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 1.5rem)' }}>
             <button
-              className="btn-outline w-full" style={{ padding: '1rem', height: '56px', fontSize: '1rem' }}
+              className="w-full bg-card border border-border/50 text-foreground font-bold py-4 rounded-2xl flex items-center justify-center gap-2 active:scale-[0.98] transition-all"
               onClick={handleShare}
             >
-              <Icon icon="solar:share-bold" className="text-xl" />
+              <Icon icon="solar:share-bold" className="text-lg" />
               Share
             </button>
             <button
-              className="btn-outline w-full" style={{ padding: '1rem', height: '56px', fontSize: '1rem' }}
+              className="w-full bg-primary text-primary-foreground font-bold py-4 rounded-2xl flex items-center justify-center gap-2 shadow-[0_4px_16px_rgba(224,159,62,0.3)] active:scale-[0.98] transition-all"
               onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); resetWotdFlow(); }}
             >
+              <Icon icon="solar:home-2-bold" className="text-lg" />
               Return Home
             </button>
-          </div>
+          </footer>
         </div>
       );
     }
@@ -4652,10 +7972,10 @@ function App() {
       return (
         <div className={`min-h-screen bg-background text-foreground font-sans pb-12 ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Header */}
-          <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-10 bg-background/80 backdrop-blur-xl">
+          <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
             <button
               className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center"
-              onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); setActiveTab("speaking"); resetPictureDescribeFlow(); }}
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(true); }}
             >
               <MdArrowBackIosNew className="text-foreground" />
             </button>
@@ -4698,11 +8018,11 @@ function App() {
     // PHASE: VOCAB CAROUSEL
     if (picturePhase === "vocab" && activePictureLesson) {
       return (
-        <div className="no-scroll-container swipe-in">
+        <div className={`no-scroll-container ${transitionDirection === 'back' ? 'swipe-in-left' : 'swipe-in'}`}>
           <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
             <span
               style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
-              onClick={() => { triggerHaptic(); setPicturePhase("lessons"); setActivePictureLesson(null); }}
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(); }}
             >
               <MdArrowBackIosNew />
             </span>
@@ -4780,7 +8100,7 @@ function App() {
                     disabled={pictureVocabIndex === pictureVocab.length - 1}
                     style={{ opacity: pictureVocabIndex === pictureVocab.length - 1 ? 0.3 : 1 }}
                   >
-                    →
+                    <MdArrowForwardIos />
                   </button>
                 </div>
               </footer>
@@ -4800,19 +8120,12 @@ function App() {
               className="picture-back-btn"
               onClick={() => { triggerHaptic(); setPicturePhase("vocab"); setPictureVocabIndex(0); }}
             >
-              <span style={{ fontSize: '1.1rem' }}>◀</span>
-              <span className="picture-btn-label">Back</span>
+              <MdArrowBackIosNew style={{ fontSize: '1.1rem' }} />
             </button>
             <h2 className="picture-describe-title">{activePictureLesson.title}</h2>
-            <button
-              className="picture-hint-btn"
-              onClick={() => { triggerHaptic(); setShowPictureHint(!showPictureHint); }}
-            >
-              <span className="picture-hint-emoji">💡</span>
-              <span className="picture-btn-label">Hints</span>
-            </button>
           </header>
 
+          {/* Picture */}
           {/* Picture */}
           <div className="picture-display-container">
             <img
@@ -4820,94 +8133,112 @@ function App() {
               alt={activePictureLesson.title}
               className="picture-display-image"
             />
-            {/* Circle Timer Overlay */}
+          </div>
+
+          {/* Bottom Panel */}
+          <div className="bg-card border-t border-border/50 rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.05)] flex-shrink-0 flex flex-col relative z-20 pb-safe">
+            {/* Recording indicator panel */}
             {pictureRecording && (
-              <div className="picture-timer-overlay">
-                <svg className="picture-timer-ring" viewBox="0 0 100 100">
-                  <circle className="picture-timer-bg" cx="50" cy="50" r="44" />
-                  <circle
-                    className="picture-timer-progress"
-                    cx="50" cy="50" r="44"
-                    style={{
-                      strokeDasharray: `${2 * Math.PI * 44}`,
-                      strokeDashoffset: `${2 * Math.PI * 44 * (pictureRecordingTime / PICTURE_MAX_RECORD_SECONDS)}`,
-                    }}
-                  />
-                </svg>
-                <div className="picture-timer-text">
-                  <span className="picture-timer-value">
-                    {Math.floor((PICTURE_MAX_RECORD_SECONDS - pictureRecordingTime) / 60)}:{String((PICTURE_MAX_RECORD_SECONDS - pictureRecordingTime) % 60).padStart(2, '0')}
-                  </span>
-                  <span className="picture-timer-label">remaining</span>
+              <div className="px-5 pt-4 pb-2">
+                <div className="bg-red-500/5 border border-red-500/20 rounded-2xl p-4 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                    <span className="text-xs font-bold uppercase tracking-widest text-red-400">Recording</span>
+                    <span className="ml-auto text-xs font-mono font-bold text-muted-foreground">{pictureRecordingTime}s / {PICTURE_MAX_RECORD_SECONDS}s</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground">Describe what you see in the picture</p>
+                  <div className="w-full h-1 bg-muted rounded-full overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all duration-1000 ease-linear"
+                      style={{
+                        width: `${(pictureRecordingTime / PICTURE_MAX_RECORD_SECONDS) * 100}%`,
+                        background: pictureRecordingTime >= PICTURE_MAX_RECORD_SECONDS - 4 ? '#ef4444' : pictureRecordingTime >= PICTURE_MAX_RECORD_SECONDS - 8 ? '#eab308' : '#ef4444',
+                      }}
+                    />
+                  </div>
                 </div>
               </div>
             )}
-          </div>
 
-          {/* Instruction */}
-          <p className="picture-instruction">
-            {pictureRecording ? "Keep talking... describe what you see!" : "Tap the microphone and describe the picture in Arabic"}
-          </p>
-
-          {/* Mic Button */}
-          <div className="picture-mic-container">
-            {pictureCheckingAnswer ? (
-              (() => {
-                const analysisMessages = [
-                  { icon: '🎤', text: 'Transcribing audio...' },
-                  { icon: '📝', text: 'Analysing your sentences...' },
-                  { icon: '📖', text: 'Checking grammar & structure...' },
-                  { icon: '🔍', text: 'Reviewing vocabulary usage...' },
-                  { icon: '🤖', text: 'Preparing feedback...' },
-                  { icon: '✨', text: 'Almost ready...' },
-                ];
-                const currentMsg = analysisMessages[Math.min(analysisStep, analysisMessages.length - 1)];
-                const progress = Math.min(((analysisStep + 1) / analysisMessages.length) * 100, 95);
-                const randomVocab = pictureVocab[analysisStep % pictureVocab.length];
-                return (
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem', padding: '1rem' }}>
-                    {/* Analysis message */}
-                    <div style={{
-                      background: 'var(--card)', borderRadius: '1.25rem', padding: '1.25rem', border: '1px solid var(--border)',
-                      width: '100%', maxWidth: '280px', textAlign: 'center'
-                    }}>
-                      <div style={{ fontSize: '2rem', marginBottom: '0.5rem', animation: 'pulse 1.5s ease-in-out infinite' }}>{currentMsg.icon}</div>
-                      <p style={{ color: 'var(--foreground)', fontSize: '0.9rem', fontWeight: 600, margin: '0 0 0.75rem' }}>{currentMsg.text}</p>
-                      {/* Progress bar */}
-                      <div style={{ height: '4px', borderRadius: '2px', background: 'var(--muted)', overflow: 'hidden' }}>
-                        <div style={{ height: '100%', width: `${progress}%`, background: 'var(--primary)', borderRadius: '2px', transition: 'width 1.5s ease-out' }} />
-                      </div>
-                    </div>
-                    {/* Vocab spotlight */}
-                    {randomVocab && (
+            {/* Button Row */}
+            <div className="px-6 pb-14 pt-4 bg-card">
+              {pictureCheckingAnswer ? (
+                (() => {
+                  const analysisMessages = [
+                    { icon: '🎤', text: 'Transcribing audio...' },
+                    { icon: '📝', text: 'Analysing your sentences...' },
+                    { icon: '📖', text: 'Checking grammar & structure...' },
+                    { icon: '🔍', text: 'Reviewing vocabulary usage...' },
+                    { icon: '🤖', text: 'Preparing feedback...' },
+                    { icon: '✨', text: 'Almost ready...' },
+                  ];
+                  const currentMsg = analysisMessages[Math.min(analysisStep, analysisMessages.length - 1)];
+                  const progress = Math.min(((analysisStep + 1) / analysisMessages.length) * 100, 95);
+                  const randomVocab = pictureVocab[analysisStep % pictureVocab.length];
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem' }}>
                       <div style={{
-                        background: 'var(--muted)', borderRadius: '1rem', padding: '0.85rem 1.25rem', border: '1px solid var(--border)',
-                        textAlign: 'center', animation: 'slideUp 0.4s ease-out'
+                        background: 'var(--card)', borderRadius: '1.25rem', padding: '1.25rem', border: '1px solid var(--border)',
+                        width: '100%', maxWidth: '280px', textAlign: 'center'
                       }}>
-                        <div style={{ fontSize: '0.6rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--muted-foreground)', marginBottom: '0.35rem' }}>Did you say?</div>
-                        <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.2rem', fontWeight: 600, color: 'var(--primary)' }}>{randomVocab.arabic_text || randomVocab.arabic}</div>
-                        <div style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', marginTop: '0.15rem' }}>{randomVocab.english_text || randomVocab.english}</div>
+                        <div style={{ fontSize: '2rem', marginBottom: '0.5rem', animation: 'pulse 1.5s ease-in-out infinite' }}>{currentMsg.icon}</div>
+                        <p style={{ color: 'var(--foreground)', fontSize: '0.9rem', fontWeight: 600, margin: '0 0 0.75rem' }}>{currentMsg.text}</p>
+                        <div style={{ height: '4px', borderRadius: '2px', background: 'var(--muted)', overflow: 'hidden' }}>
+                          <div style={{ height: '100%', width: `${progress}%`, background: 'var(--primary)', borderRadius: '2px', transition: 'width 1.5s ease-out' }} />
+                        </div>
                       </div>
-                    )}
-                  </div>
-                );
-              })()
-            ) : (
-              <button
-                className={`picture-mic-btn ${pictureRecording ? 'recording' : ''}`}
-                onClick={() => {
-                  triggerHaptic();
-                  if (pictureRecording) {
-                    stopPictureRecording();
-                  } else {
-                    startPictureRecording();
-                  }
-                }}
-              >
-                <span className="picture-mic-icon">{pictureRecording ? '⏹' : '🎙️'}</span>
-                <span className="picture-mic-label">{pictureRecording ? 'Stop' : 'Speak'}</span>
-              </button>
-            )}
+                      {randomVocab && (
+                        <div style={{
+                          background: 'var(--muted)', borderRadius: '1rem', padding: '0.85rem 1.25rem', border: '1px solid var(--border)',
+                          textAlign: 'center', animation: 'slideUp 0.4s ease-out'
+                        }}>
+                          <div style={{ fontSize: '0.6rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--muted-foreground)', marginBottom: '0.35rem' }}>Did you say?</div>
+                          <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.2rem', fontWeight: 600, color: 'var(--primary)' }}>{randomVocab.arabic_text || randomVocab.arabic}</div>
+                          <div style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', marginTop: '0.15rem' }}>{randomVocab.english_text || randomVocab.english}</div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()
+              ) : (
+                <div className="flex items-center justify-center gap-12">
+                  {/* Hint Button */}
+                  {!pictureRecording && (
+                    <button
+                      onClick={() => { triggerHaptic(); setShowPictureHint(!showPictureHint); }}
+                      className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-colors active:scale-95 border ${
+                        showPictureHint
+                          ? 'bg-amber-500/15 border-amber-500/30 text-amber-500'
+                          : 'bg-gradient-to-br from-amber-500/10 to-yellow-500/10 border-amber-500/20 text-amber-500'
+                      }`}
+                    >
+                      <Icon icon="solar:lightbulb-bolt-bold" className="text-2xl" />
+                    </button>
+                  )}
+
+                  {/* Mic / Stop Button */}
+                  <button
+                    onClick={() => {
+                      triggerHaptic();
+                      if (pictureRecording) {
+                        stopPictureRecording();
+                      } else {
+                        startPictureRecording();
+                      }
+                    }}
+                    className={`w-[4.5rem] h-[4.5rem] rounded-full flex items-center justify-center shadow-lg transition-all duration-200 text-white select-none ${pictureRecording
+                        ? 'bg-red-500 scale-110 shadow-[0_0_30px_rgba(239,68,68,0.4)]'
+                        : 'bg-primary active:scale-95 shadow-[0_4px_20px_rgba(224,159,62,0.3)]'
+                      }`}
+                  >
+                    <Icon
+                      icon={pictureRecording ? "solar:stop-bold" : "solar:microphone-bold"}
+                      className="text-3xl"
+                    />
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Error display */}
@@ -4940,6 +8271,63 @@ function App() {
       );
     }
 
+    // PHASE: SILENCE — no speech detected
+    if (picturePhase === "silence" && activePictureLesson) {
+      return (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', padding: '2rem', gap: '1.5rem' }}>
+          <div style={{ fontSize: '3rem' }}>🔇</div>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--foreground)', marginBottom: '0.5rem' }}>We didn't hear anything</div>
+            <div style={{ fontSize: '0.85rem', color: 'var(--muted-foreground)', lineHeight: 1.6 }}>Make sure your microphone is working and try speaking clearly in Arabic.</div>
+          </div>
+          <button
+            style={{ padding: '0.9rem 2rem', borderRadius: '1rem', border: 'none', cursor: 'pointer', background: 'var(--primary)', color: 'white', fontWeight: 700, fontSize: '0.93rem' }}
+            onClick={() => { triggerHaptic(); setPicturePhase("picture"); setPictureTranscript(""); }}
+          >
+            Try Again
+          </button>
+        </div>
+      );
+    }
+
+    // PHASE: NOT ARABIC — user spoke in wrong language
+    if (picturePhase === "not_arabic" && activePictureLesson) {
+      return (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', padding: '2rem', gap: '1.5rem' }}>
+          <div style={{ fontSize: '3rem' }}>🗣️</div>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--foreground)', marginBottom: '0.5rem' }}>Please speak in Arabic</div>
+            <div style={{ fontSize: '0.85rem', color: 'var(--muted-foreground)', lineHeight: 1.6 }}>It sounds like you were speaking in another language. Try again and describe the picture in Arabic using the vocabulary words.</div>
+          </div>
+          <button
+            style={{ padding: '0.9rem 2rem', borderRadius: '1rem', border: 'none', cursor: 'pointer', background: 'var(--primary)', color: 'white', fontWeight: 700, fontSize: '0.93rem' }}
+            onClick={() => { triggerHaptic(); setPicturePhase("picture"); setPictureTranscript(""); }}
+          >
+            Try Again
+          </button>
+        </div>
+      );
+    }
+
+    // PHASE: TOO SHORT — answer was too brief
+    if (picturePhase === "too_short" && activePictureLesson) {
+      return (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', padding: '2rem', gap: '1.5rem' }}>
+          <div style={{ fontSize: '3rem' }}>📝</div>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--foreground)', marginBottom: '0.5rem' }}>Your answer was too short</div>
+            <div style={{ fontSize: '0.85rem', color: 'var(--muted-foreground)', lineHeight: 1.6 }}>Try to describe the picture in more detail — aim for at least 3-4 sentences using the vocabulary words.</div>
+          </div>
+          <button
+            style={{ padding: '0.9rem 2rem', borderRadius: '1rem', border: 'none', cursor: 'pointer', background: 'var(--primary)', color: 'white', fontWeight: 700, fontSize: '0.93rem' }}
+            onClick={() => { triggerHaptic(); setPicturePhase("picture"); setPictureTranscript(""); }}
+          >
+            Try Again
+          </button>
+        </div>
+      );
+    }
+
     // PHASE: AI FEEDBACK WALKTHROUGH (Interactive)
     if (picturePhase === "feedback" && activePictureLesson) {
       const steps = pictureFeedbackSteps;
@@ -4956,13 +8344,11 @@ function App() {
           <header className="picture-describe-header" style={{ position: 'sticky', top: 0, zIndex: 10 }}>
             <button
               className="picture-back-btn"
-              onClick={() => { triggerHaptic(); setPracticeMode("picture-describe"); resetPictureDescribeFlow(); }}
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(); }}
             >
-              <span style={{ fontSize: '1.1rem' }}>◀</span>
-              <span className="picture-btn-label">Exit</span>
+              <MdArrowBackIosNew style={{ fontSize: '1.1rem' }} />
             </button>
             <h2 className="picture-describe-title">{activePictureLesson.title}</h2>
-            <div style={{ width: '60px' }} />
           </header>
 
           {/* Picture at top — compact */}
@@ -4974,18 +8360,17 @@ function App() {
             />
           </div>
 
-          {/* Score badge */}
-          {pictureScore != null && (
+          {/* Rating badge */}
+          {pictureScore && (
             <div style={{ display: 'flex', justifyContent: 'center', margin: '0.75rem 0' }}>
               <div style={{
-                background: pictureScore >= 7 ? 'rgba(34,197,94,0.1)' : pictureScore >= 5 ? 'rgba(234,179,8,0.1)' : 'rgba(239,68,68,0.1)',
-                border: `1px solid ${pictureScore >= 7 ? 'rgba(34,197,94,0.3)' : pictureScore >= 5 ? 'rgba(234,179,8,0.3)' : 'rgba(239,68,68,0.3)'}`,
+                background: pictureScore === 'excellent' ? 'rgba(34,197,94,0.1)' : pictureScore === 'good' ? 'rgba(59,130,246,0.1)' : 'rgba(234,179,8,0.1)',
+                border: `1px solid ${pictureScore === 'excellent' ? 'rgba(34,197,94,0.3)' : pictureScore === 'good' ? 'rgba(59,130,246,0.3)' : 'rgba(234,179,8,0.3)'}`,
                 borderRadius: '1rem', padding: '0.4rem 1.25rem', display: 'flex', alignItems: 'center', gap: '0.4rem'
               }}>
-                <span style={{ fontSize: '1.4rem', fontWeight: 800, color: pictureScore >= 7 ? '#22c55e' : pictureScore >= 5 ? '#eab308' : '#ef4444' }}>
-                  {pictureScore.toFixed(1)}
+                <span style={{ fontSize: '1.1rem', fontWeight: 800, color: pictureScore === 'excellent' ? '#22c55e' : pictureScore === 'good' ? '#3b82f6' : '#eab308', textTransform: 'capitalize' }}>
+                  {pictureScore}
                 </span>
-                <span style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', fontWeight: 600 }}>/10</span>
               </div>
             </div>
           )}
@@ -5029,7 +8414,7 @@ function App() {
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
                           <button
-                            onClick={() => { triggerHaptic(); speakArabic(step.teach.arabic); }}
+                            onClick={() => { triggerHapticOnly(); speakArabic(step.teach.arabic); }}
                             style={{ background: 'rgba(20,184,166,0.15)', border: 'none', cursor: 'pointer', fontSize: '1.1rem', width: 36, height: 36, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#14b8a6', flexShrink: 0 }}
                           >🔊</button>
                           <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.1rem', fontWeight: 600, color: '#14b8a6' }}>{step.teach.arabic}</div>
@@ -5056,7 +8441,7 @@ function App() {
                         <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#22c55e', marginBottom: '0.25rem' }}>Say this:</div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
                           <button
-                            onClick={() => { triggerHaptic(); speakArabic(step.corrected); }}
+                            onClick={() => { triggerHapticOnly(); speakArabic(step.corrected); }}
                             style={{ background: 'rgba(34,197,94,0.15)', border: 'none', cursor: 'pointer', fontSize: '1rem', width: 32, height: 32, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#22c55e', flexShrink: 0 }}
                           >🔊</button>
                           <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1rem', color: '#22c55e', fontWeight: 600 }}>{step.corrected}</div>
@@ -5096,7 +8481,7 @@ function App() {
                             style={{ padding: '0.5rem 1rem', borderRadius: '2rem', border: '1px solid var(--border)', background: 'var(--muted)', color: 'var(--muted-foreground)', fontSize: '0.8rem', cursor: 'pointer', alignSelf: 'center' }}
                             onClick={() => { triggerHaptic(); setChallengeCompleted(prev => ({ ...prev, [idx]: true })); }}
                           >
-                            Skip →
+                            Skip <MdArrowForwardIos style={{ display: 'inline', verticalAlign: 'middle', fontSize: '0.8em' }} />
                           </button>
                         </div>
                       </div>
@@ -5127,12 +8512,23 @@ function App() {
                 {step.type === 'speak_challenge' && (
                   <>
                     <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#8b5cf6', marginBottom: '0.6rem' }}>
-                      🗣️ Follow-up Challenge
+                      Follow-up Challenge
                     </div>
-                    <p style={{ fontSize: '0.9rem', color: 'var(--foreground)', marginBottom: '0.5rem', fontWeight: 500 }}>{step.prompt}</p>
-                    {step.hint && (
+                    <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.05rem', color: 'var(--foreground)', marginBottom: '0.35rem', fontWeight: 600, lineHeight: 1.8, textAlign: 'right', unicodeBidi: 'plaintext' }}>{step.prompt}</div>
+                    {step.promptTranslation && (
+                      <p style={{ fontSize: '0.83rem', color: 'var(--muted-foreground)', margin: '0 0 0.5rem 0' }}>{step.promptTranslation}</p>
+                    )}
+                    {step.starterWords?.length > 0 && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.6rem', justifyContent: 'flex-end' }}>
+                        {step.starterWords.map((word, wi) => (
+                          <span key={wi} dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", background: 'rgba(139,92,246,0.1)', color: '#8b5cf6', padding: '0.3rem 0.7rem', borderRadius: '2rem', fontSize: '0.85rem', fontWeight: 600 }}>{word}</span>
+                        ))}
+                      </div>
+                    )}
+                    {/* Legacy hint fallback */}
+                    {!step.starterWords && step.hint && (
                       <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '0.95rem', color: 'var(--muted-foreground)', marginBottom: '0.6rem', fontStyle: 'italic' }}>
-                        💡 {step.hint}
+                        {step.hint}
                       </div>
                     )}
                     {/* Mic button — show if not completed AND not currently checking */}
@@ -5164,8 +8560,15 @@ function App() {
                           >
                             {challengeRecording ? '⏹' : '🎙️'}
                           </button>
-                          {challengeRecording && (
+                          {challengeRecording ? (
                             <span style={{ fontSize: '0.75rem', color: '#8b5cf6', fontWeight: 600 }}>Up to 30s</span>
+                          ) : (
+                            <button
+                              style={{ padding: '0.5rem 1rem', borderRadius: '2rem', border: '1px solid var(--border)', background: 'var(--muted)', color: 'var(--muted-foreground)', fontSize: '0.8rem', cursor: 'pointer' }}
+                              onClick={() => { triggerHaptic(); setChallengeCompleted(prev => ({ ...prev, [idx]: true })); }}
+                            >
+                              Skip <MdArrowForwardIos style={{ display: 'inline', verticalAlign: 'middle', fontSize: '0.8em' }} />
+                            </button>
                           )}
                         </div>
                       </div>
@@ -5198,7 +8601,7 @@ function App() {
                         <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#3b82f6', marginBottom: '0.3rem' }}>Try saying:</div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                           <button
-                            onClick={() => { triggerHaptic(); speakArabic(step.example); }}
+                            onClick={() => { triggerHapticOnly(); speakArabic(step.example); }}
                             style={{ background: 'rgba(59,130,246,0.15)', border: 'none', cursor: 'pointer', fontSize: '1.1rem', width: 36, height: 36, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#3b82f6', flexShrink: 0 }}
                           >🔊</button>
                           <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.05rem', color: '#3b82f6', fontWeight: 600, lineHeight: 1.8 }}>{step.example}</div>
@@ -5209,17 +8612,34 @@ function App() {
                 )}
 
                 {/* VOCAB CHECK */}
-                {step.type === 'vocab_check' && (
-                  <>
-                    <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--muted-foreground)', marginBottom: '0.6rem' }}>
-                      📝 Vocabulary Check
-                    </div>
-                    <div style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--primary)', marginBottom: '0.4rem' }}>
-                      {step.used?.length || 0}/{pictureVocab.length} words used
-                    </div>
-                    <p style={{ fontSize: '0.83rem', color: 'var(--muted-foreground)', margin: 0 }}>{step.analysis}</p>
-                  </>
-                )}
+                {step.type === 'vocab_check' && (() => {
+                  const used = step.used?.length ?? 0;
+                  const total = pictureVocab.length || 1;
+                  const ratio = used / total;
+                  const label = ratio >= 0.75 ? 'You used most of the vocabulary' : ratio >= 0.5 ? 'You used a good amount of the vocabulary' : 'You used some of the vocabulary';
+                  const labelColor = ratio >= 0.75 ? '#22c55e' : ratio >= 0.5 ? '#3b82f6' : '#f59e0b';
+                  return (
+                    <>
+                      <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--muted-foreground)', marginBottom: '0.6rem' }}>
+                        Vocabulary Check
+                      </div>
+                      <div style={{ fontSize: '1.05rem', fontWeight: 700, color: labelColor, marginBottom: '0.4rem' }}>
+                        {label}
+                      </div>
+                      {step.used?.length > 0 && (
+                        <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '0.83rem', color: 'var(--muted-foreground)', marginBottom: '0.3rem' }}>
+                          {step.used.join('، ')}
+                        </div>
+                      )}
+                      {step.missed?.length > 0 && (
+                        <div style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', margin: 0 }}>
+                          <span style={{ fontWeight: 600 }}>Missed: </span>
+                          <span dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif" }}>{step.missed.join('، ')}</span>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             ))}
           </div>
@@ -5238,7 +8658,7 @@ function App() {
                 }}
                 onClick={() => { triggerHaptic(); setPictureFeedbackIndex(pictureFeedbackIndex + 1); }}
               >
-                Continue →
+                Continue <MdArrowForwardIos style={{ display: 'inline', verticalAlign: 'middle', fontSize: '0.8em' }} />
               </button>
             ) : (
               <>
@@ -5250,16 +8670,19 @@ function App() {
                 }}>
                   <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '2rem', fontWeight: 700, color: '#22c55e', marginBottom: '0.25rem' }}>أحسنت!</div>
                   <div style={{ fontSize: '0.85rem', color: 'var(--muted-foreground)' }}>Great job completing this lesson!</div>
-                  {pictureScore != null && (
+                  {pictureScore && (
                     <div style={{ marginTop: '0.5rem' }}>
-                      <div style={{ fontSize: '1.3rem', fontWeight: 700, color: 'var(--primary)' }}>
-                        {pictureScore}/10
+                      <div style={{
+                        fontSize: '1.3rem', fontWeight: 700,
+                        color: pictureScore === 'excellent' ? '#22c55e' : pictureScore === 'good' ? '#3b82f6' : '#f59e0b'
+                      }}>
+                        {pictureScore === 'excellent' ? 'Excellent' : pictureScore === 'good' ? 'Good' : 'Fair'}
                       </div>
-                      {pictureVocabStats && (
-                        <div style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', marginTop: '0.25rem' }}>
-                          📖 {pictureVocabStats.vocabUsed}/{pictureVocabStats.vocabTotal} vocab words used
-                        </div>
-                      )}
+                      {pictureVocabStats && (() => {
+                        const r = pictureVocabStats.vocabUsed / (pictureVocabStats.vocabTotal || 1);
+                        const vl = r >= 0.75 ? 'Used most of the vocabulary' : r >= 0.5 ? 'Used a good amount of vocabulary' : 'Used some of the vocabulary';
+                        return <div style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', marginTop: '0.25rem' }}>{vl}</div>;
+                      })()}
                     </div>
                   )}
                 </div>
@@ -5291,7 +8714,7 @@ function App() {
                       flex: 1, padding: '0.9rem', borderRadius: '1rem', background: 'var(--primary)', border: 'none',
                       color: 'white', fontWeight: 700, fontSize: '0.88rem', cursor: 'pointer'
                     }}
-                    onClick={() => { triggerHaptic(); setPracticeMode("picture-describe"); resetPictureDescribeFlow(); }}
+                    onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(true); }}
                   >
                     ✓ Done
                   </button>
@@ -5347,20 +8770,6 @@ function App() {
               </div>
             ) : (
               <div className="speaking-modes-grid">
-                {/* Describe the Picture */}
-                <button
-                  onClick={() => { triggerHaptic(); setPracticeMode("picture-describe"); loadPictureDescribeLessons(); }}
-                  className="speaking-feature-card"
-                >
-                  <div className="speaking-feature-emoji">🖼️</div>
-                  <h3 className="speaking-feature-title">Describe the Picture</h3>
-                  <p className="speaking-feature-title-ar">وصف الصورة</p>
-                  <p className="speaking-feature-desc">Look at an image and describe what you see in Arabic</p>
-                  <div className="speaking-feature-badge">
-                    <span>🎯 Vocab Matching</span>
-                  </div>
-                </button>
-
                 {/* Database-driven speaking modes */}
                 {speakingModes.map((mode) => {
                   const isSelected = selectedSpeakingMode === mode.id;
@@ -5444,6 +8853,23 @@ function App() {
     );
   }
 
+  // ---------- PRE-BOOK LESSON SCREEN ----------
+
+  if (activeLesson && activeLesson.lesson_format === 'prebook') {
+    return (
+      <PreBookLesson
+        items={prebookItems}
+        loading={loadingPrebookItems || loadingQuestions}
+        error={prebookLoadError}
+        onComplete={({ xp, maxStreak, accuracy }) => {
+          saveLessonProgress(3);
+          backToLessons();
+        }}
+        onExit={backToLessons}
+      />
+    );
+  }
+
   // ---------- QUIZ SCREEN ----------
 
   if (activeLesson && quizActive) {
@@ -5485,7 +8911,7 @@ function App() {
           </div>
 
           <button className="btn-celebration" onClick={() => { triggerHaptic(); backToLessons(); }}>
-            Continue Learning →
+            Continue Learning <MdArrowForwardIos style={{ display: 'inline', verticalAlign: 'middle', fontSize: '0.8em' }} />
           </button>
         </div>
       );
@@ -5588,9 +9014,10 @@ function App() {
 
               {/* Answer Options Grid */}
               <div className={`quiz-options-grid ${currentQuestion.options.length === 3 ? 'three-options' : ''}`}>
-                {currentQuestion.options.map((opt) => {
+                {currentQuestion.options.map((opt, optIdx) => {
                   const isSelected = selectedOptionId === opt.id;
                   const isCorrect = opt.is_correct;
+                  const optionLabel = String.fromCharCode(65 + optIdx); // A, B, C, D
 
                   let stateClass = "";
                   if (!hasAnswered) {
@@ -5607,9 +9034,10 @@ function App() {
                       onClick={() => handleOptionClick(opt)}
                       className={`quiz-option-card ${stateClass}`}
                       disabled={hasAnswered}
+                      style={{ '--i': optIdx }}
                     >
-                      <div className="quiz-option-dashed" />
                       <div className="quiz-option-inner">
+                        <span className="quiz-option-label">{optionLabel}</span>
                         <span className="quiz-option-text">{opt.text}</span>
                       </div>
                     </button>
@@ -5687,7 +9115,7 @@ function App() {
     return (
       <div className={`explorer-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
         <div className="texture-overlay" />
-        <main className="app-main" style={{ marginTop: 0, position: 'relative', zIndex: 10 }}>
+        <main className="app-main lesson-route-main" style={{ position: 'relative', zIndex: 10 }}>
           {lessonPhase === "lesson" && (
             <div className="lesson-content">
               {activeLesson.audio_url && (
@@ -5734,12 +9162,20 @@ function App() {
                 />
               )}
 
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-                {audioPlaying ? <div className="recording-dot" title="Audio playing" /> : <div />}
-                <div className="header-bubbly-title">{activeLesson.title}</div>
+              <div className="lesson-scene-header">
+                <div className="scene-ornament"><span className="scene-diamond" /></div>
+                <h1 className="scene-title">{activeLesson.title}</h1>
+                <div className="scene-ornament"><span className="scene-diamond" /></div>
+                {audioPlaying && (
+                  <div className="scene-audio-pill">
+                    <span /><span /><span />
+                  </div>
+                )}
               </div>
 
-              <p className="lesson-description">{activeLesson.description}</p>
+              {activeLesson.description && (
+                <p className="lesson-description">{activeLesson.description}</p>
+              )}
 
               {activeLesson.audio_url && (
                 (() => {
@@ -5815,12 +9251,12 @@ function App() {
 
                             {/* Render paragraph blocks */}
                             <div className="paragraph-list">
-                              {paragraphBlocks.map((b) => {
+                              {paragraphBlocks.map((b, idx) => {
                                 const isPlaying = playingParagraphId === b.id;
                                 const wasClicked = clickedParagraphs.has(b.id);
                                 const isThisBlockSlow = isPlaying && isSlowSpeed;
                                 return (
-                                  <div key={b.id} className="paragraph-block-wrap">
+                                  <div key={b.id} className="paragraph-block-wrap" style={{ '--i': idx }}>
                                     <div
                                       className={`paragraph-bubble ${isPlaying ? "paragraph-active" : ""} ${wasClicked ? "paragraph-clicked" : ""}`}
                                       onClick={() => {
@@ -5844,14 +9280,23 @@ function App() {
                                         }
                                       }}
                                     >
+                                      {/* Verse marker */}
+                                      <span className="verse-marker">{idx + 1}</span>
+
                                       {/* Audio indicator on the left */}
                                       <div className="paragraph-audio-indicator">
                                         {isPlaying ? (
-                                          <span className="audio-playing-icon">
-                                            {isThisBlockSlow ? "🐢" : "🔊"}
-                                          </span>
+                                          isThisBlockSlow ? (
+                                            <span className="audio-playing-icon" style={{ fontSize: '0.9rem' }}>🐢</span>
+                                          ) : (
+                                            <div className="sound-bars">
+                                              <span /><span /><span />
+                                            </div>
+                                          )
                                         ) : (
-                                          <span className="audio-play-icon">▶</span>
+                                          <svg className="play-icon-svg" viewBox="0 0 24 24" fill="currentColor">
+                                            <path d="M8 5v14l11-7z" />
+                                          </svg>
                                         )}
                                       </div>
                                       <div className="paragraph-content">
@@ -5872,11 +9317,7 @@ function App() {
                                         openAiSheet(b);
                                       }}
                                     >
-                                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                        <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                                        <path d="M2 17l10 5 10-5" />
-                                        <path d="M2 12l10 5 10-5" />
-                                      </svg>
+                                      <Icon icon="solar:magic-stick-3-bold" width="14" height="14" />
                                     </button>
                                   </div>
                                 );
@@ -5890,7 +9331,7 @@ function App() {
                                 onClick={() => { triggerHaptic(); setLessonPhase(grammarNotes.length > 0 ? "intro_grammar" : "intro_vocab"); }}
                                 disabled={!hasClickedLast}
                               >
-                                Proceed →
+                                Proceed <MdArrowForwardIos style={{ display: 'inline', verticalAlign: 'middle', fontSize: '0.8em' }} />
                               </button>
                             </div>
                           </div>
@@ -5908,7 +9349,7 @@ function App() {
                           ref={convoScrollRef}
                           className={`convo-area ${!dialogueFinished && audioPlaying ? "playback-mode" : showDialogueReview ? "list-mode" : "playback-mode"}`}
                         >
-                          {visibleLines.map((b) => {
+                          {visibleLines.map((b, idx) => {
                             const speaker = b.speakers;
                             const sideClass =
                               speaker?.bubble_side === "right"
@@ -5916,7 +9357,7 @@ function App() {
                                 : "bubble-left";
 
                             return (
-                              <div key={b.id} className="dialogue-block-wrap">
+                              <div key={b.id} className="dialogue-block-wrap" style={{ '--i': idx }}>
                                 <div
                                   className={`bubble-row ${sideClass}`}
                                 >
@@ -5934,9 +9375,14 @@ function App() {
                                     )}
                                   </div>
 
-                                  <div className="bubble">
-                                    <div className="bubble-text" dir="rtl">
-                                      {b.text_ar}
+                                  <div className="bubble-stack">
+                                    {speaker?.display_name_ar && (
+                                      <div className="speaker-name">{speaker.display_name_ar}</div>
+                                    )}
+                                    <div className="bubble">
+                                      <div className="bubble-text" dir="rtl">
+                                        {b.text_ar}
+                                      </div>
                                     </div>
                                   </div>
                                 </div>
@@ -5992,7 +9438,7 @@ function App() {
                         className="btn-primary"
                         onClick={() => { triggerHaptic(); setLessonPhase(grammarNotes.length > 0 ? "intro_grammar" : "intro_vocab"); }}
                       >
-                        Proceed →
+                        Proceed <MdArrowForwardIos style={{ display: 'inline', verticalAlign: 'middle', fontSize: '0.8em' }} />
                       </button>
                     );
                   }
@@ -6143,12 +9589,14 @@ function App() {
           {/* PHASE: TRANSITION TO GRAMMAR */}
           {
             lessonPhase === "intro_grammar" && (
-              <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
-                <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
-                  <img src="/images/explanation-icon.jpg" alt="Story" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              <div className="no-scroll-container transition-screen swipe-in">
+                <div className="transition-screen-media">
+                  <img src="/images/explanation-icon.jpg" alt="Story" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                 </div>
-                <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Story Explanation</h1>
-                <p className="page-subtitle">Let's have a look at the story content in more detail!</p>
+                <div className="transition-screen-copy">
+                  <h1 className="page-title" style={{ marginTop: '2.5rem', marginBottom: '0.5rem' }}>Story Explanation</h1>
+                  <p className="page-subtitle">Let's have a look at the story content in more detail!</p>
+                </div>
                 <footer className="sticky-footer">
                   <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("grammar"); }}>
                     Continue
@@ -6172,23 +9620,18 @@ function App() {
                   <h2 className="grammar-title-text" style={{ margin: 0, fontSize: '1.25rem' }}>{grammarNotes[grammarIndex].title}</h2>
                 </header>
 
-                <div key={grammarIndex} className="carousel-content-area swipe-in">
+                <div key={grammarIndex} className="carousel-content-area fade-in">
                   <div className="explanation-bubble" style={{ fontSize: '1.1rem', padding: '1.25rem', lineHeight: '1.7' }}>
                     {grammarNotes[grammarIndex].content_en}
                   </div>
 
-                  <div className="arabic-box spotlight-arabic" style={{ borderLeft: '5px solid var(--blue)', padding: '1.5rem', display: 'flex', alignItems: 'flex-start', gap: '0.75rem' }}>
-                    <span style={{ flex: 1 }}>{grammarNotes[grammarIndex].content_ar}</span>
-                    {grammarNotes[grammarIndex].content_ar && (
-                      <button className="speak-btn" onClick={(e) => { e.stopPropagation(); speakArabic(grammarNotes[grammarIndex].content_ar); }} aria-label="Listen">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 8.5v7a4.49 4.49 0 002.5-3.5zM14 3.23v2.06a6.5 6.5 0 010 13.42v2.06A8.5 8.5 0 0014 3.23z" /></svg>
-                      </button>
-                    )}
+                  <div className="arabic-box spotlight-arabic" style={{ borderLeft: '5px solid var(--blue)', padding: '1.5rem' }}>
+                    {grammarNotes[grammarIndex].content_ar}
                   </div>
                 </div>
 
                 <footer className="sticky-footer">
-                  <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+                  <div className="lesson-action-row">
                     <button
                       className="btn-nav-arrow"
                       onClick={() => { if (grammarIndex > 0) { triggerHaptic(); setGrammarIndex(i => i - 1); } }}
@@ -6200,6 +9643,14 @@ function App() {
                     <button
                       className="btn-primary"
                       style={{ flex: 1 }}
+                      onClick={(e) => { e.stopPropagation(); triggerHaptic(); speakArabic(grammarNotes[grammarIndex].content_ar); }}
+                      disabled={!grammarNotes[grammarIndex].content_ar}
+                      aria-label="Listen"
+                    >
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" style={{ display: 'block', margin: '0 auto' }}><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 8.5v7a4.49 4.49 0 002.5-3.5zM14 3.23v2.06a6.5 6.5 0 010 13.42v2.06A8.5 8.5 0 0014 3.23z" /></svg>
+                    </button>
+                    <button
+                      className="btn-nav-arrow"
                       onClick={() => {
                         triggerHaptic();
                         if (grammarIndex === grammarNotes.length - 1) {
@@ -6209,15 +9660,7 @@ function App() {
                         }
                       }}
                     >
-                      CONTINUE
-                    </button>
-                    <button
-                      className="btn-nav-arrow"
-                      onClick={() => { if (grammarIndex < grammarNotes.length - 1) { triggerHaptic(); setGrammarIndex(i => i + 1); } }}
-                      disabled={grammarIndex === grammarNotes.length - 1}
-                      style={{ opacity: grammarIndex === grammarNotes.length - 1 ? 0.3 : 1 }}
-                    >
-                      →
+                      <MdArrowForwardIos />
                     </button>
                   </div>
                 </footer>
@@ -6228,12 +9671,14 @@ function App() {
           {/* PHASE: TRANSITION TO VOCAB */}
           {
             lessonPhase === "intro_vocab" && (
-              <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
-                <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
-                  <img src="/images/vocab-book.jpg" alt="Vocabulary" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              <div className="no-scroll-container transition-screen swipe-in">
+                <div className="transition-screen-media">
+                  <img src="/images/vocab-book.jpg" alt="Vocabulary" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                 </div>
-                <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>New Words</h1>
-                <p className="page-subtitle">Let's take a look at the new words we have learnt!</p>
+                <div className="transition-screen-copy">
+                  <h1 className="page-title" style={{ marginTop: '2.5rem', marginBottom: '0.5rem' }}>New Words</h1>
+                  <p className="page-subtitle">Let's take a look at the new words we have learnt!</p>
+                </div>
                 <footer className="sticky-footer">
                   <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("vocab"); }}>
                     Continue
@@ -6272,10 +9717,7 @@ function App() {
                   (() => {
                     const item = vocabItems[vocabIndex];
                     return (
-                      <div key={vocabIndex} className="carousel-content-area swipe-in">
-                        <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>
-                          :عربي
-                        </div>
+                      <div key={vocabIndex} className="carousel-content-area fade-in">
                         <div className="vocab-card" style={{ direction: "rtl" }}>
                           <span className="explorer-card-corner top-left"></span>
                           <span className="explorer-card-corner top-right"></span>
@@ -6296,12 +9738,8 @@ function App() {
                               </span>
                             )}
                           </div>
-                          <button className="speak-btn" onClick={(e) => { e.stopPropagation(); speakArabic(item.arabic); }} aria-label="Listen" style={{ marginTop: '0.5rem' }}>
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 8.5v7a4.49 4.49 0 002.5-3.5zM14 3.23v2.06a6.5 6.5 0 010 13.42v2.06A8.5 8.5 0 0014 3.23z" /></svg>
-                          </button>
                         </div>
 
-                        <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
                         <div className="vocab-card">
                           <span className="explorer-card-corner top-left"></span>
                           <span className="explorer-card-corner top-right"></span>
@@ -6317,7 +9755,7 @@ function App() {
                 {/* Footer with left/right arrows and continue button */}
                 {vocabItems.length > 0 && (
                   <footer className="sticky-footer">
-                    <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+                    <div className="lesson-action-row">
                       <button
                         className="btn-nav-arrow"
                         onClick={() => { if (vocabIndex > 0) { triggerHaptic(); setVocabIndex(i => i - 1); } }}
@@ -6329,6 +9767,13 @@ function App() {
                       <button
                         className="btn-primary"
                         style={{ flex: 1 }}
+                        onClick={(e) => { e.stopPropagation(); triggerHaptic(); speakArabic(vocabItems[vocabIndex].arabic); }}
+                        aria-label="Listen"
+                      >
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" style={{ display: 'block', margin: '0 auto' }}><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 8.5v7a4.49 4.49 0 002.5-3.5zM14 3.23v2.06a6.5 6.5 0 010 13.42v2.06A8.5 8.5 0 0014 3.23z" /></svg>
+                      </button>
+                      <button
+                        className="btn-nav-arrow"
                         onClick={() => {
                           triggerHaptic();
                           if (vocabIndex === vocabItems.length - 1) {
@@ -6343,15 +9788,7 @@ function App() {
                           }
                         }}
                       >
-                        CONTINUE
-                      </button>
-                      <button
-                        className="btn-nav-arrow"
-                        onClick={() => { if (vocabIndex < vocabItems.length - 1) { triggerHaptic(); setVocabIndex(i => i + 1); } }}
-                        disabled={vocabIndex === vocabItems.length - 1}
-                        style={{ opacity: vocabIndex === vocabItems.length - 1 ? 0.3 : 1 }}
-                      >
-                        →
+                        <MdArrowForwardIos />
                       </button>
                     </div>
                   </footer>
@@ -6363,91 +9800,94 @@ function App() {
           {/* PHASE: SPEAKING PRACTICE */}
           {
             lessonPhase === "speaking" && (
-              <div className="speaking-practice no-scroll-container swipe-in" style={{ padding: '2rem', textAlign: 'center' }}>
-                <h2 style={{ marginBottom: '2rem' }}>Speaking Practice</h2>
+              <div className="speaking-practice no-scroll-container swipe-in">
+                <div className="speaking-practice-body">
+                  <h2 style={{ marginBottom: '1rem' }}>Speaking Practice</h2>
 
-                <p dir="rtl" style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '2rem', lineHeight: 1.8 }}>
-                  {speakingExercises[0]?.prompt_ar}
-                </p>
+                  <p dir="rtl" style={{ fontSize: '1.5rem', fontWeight: 700, lineHeight: 1.8, margin: 0 }}>
+                    {speakingExercises[0]?.prompt_ar}
+                  </p>
 
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minHeight: '140px', justifyContent: 'center' }}>
-                  {isCheckingAnswer ? (
-                    <>
-                      <div className="checking-answer-container">
-                        <div className="checking-answer-pulse"></div>
-                        <div className="checking-answer-icon">🎧</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minHeight: '140px', justifyContent: 'center', width: '100%' }}>
+                    {isCheckingAnswer ? (
+                      <>
+                        <div className="checking-answer-container">
+                          <div className="checking-answer-pulse"></div>
+                          <div className="checking-answer-icon">🎧</div>
+                        </div>
+                        <p className="checking-answer-text">
+                          Checking your answer<span className="checking-dots"></span>
+                        </p>
+                      </>
+                    ) : (
+                      <button
+                        className="btn-primary"
+                        onClick={() => { triggerHaptic(); if (isRecording) stopRecording(); else startRecording(); }}
+                        style={{ maxWidth: 320 }}
+                        disabled={isCheckingAnswer}
+                      >
+                        {isRecording ? "⏹ Stop recording" : "🎤 Start recording"}
+                      </button>
+                    )}
+                  </div>
+
+                  {speechError && (
+                    <p style={{ color: 'red', margin: 0 }}>
+                      {speechError}
+                    </p>
+                  )}
+
+                  {speechFeedback && (
+                    <div style={{
+                      width: '100%',
+                      marginTop: 4,
+                      padding: '16px 24px',
+                      borderRadius: 12,
+                      background: speechFeedback.includes('Good') ? 'rgba(34, 197, 94, 0.15)'
+                        : speechFeedback.includes('Almost') ? 'rgba(251, 191, 36, 0.15)'
+                          : 'rgba(239, 68, 68, 0.15)',
+                      border: `2px solid ${speechFeedback.includes('Good') ? '#22c55e'
+                        : speechFeedback.includes('Almost') ? '#fbbf24'
+                          : '#ef4444'
+                        }`
+                    }}>
+                      <div style={{
+                        fontSize: '1.5rem',
+                        fontWeight: 700,
+                        color: speechFeedback.includes('Good') ? '#22c55e'
+                          : speechFeedback.includes('Almost') ? '#fbbf24'
+                            : '#ef4444'
+                      }}>
+                        {speechFeedback}
                       </div>
-                      <p className="checking-answer-text">
-                        Checking your answer<span className="checking-dots"></span>
-                      </p>
-                    </>
-                  ) : (
-                    <button
-                      className="btn-primary"
-                      onClick={() => { triggerHaptic(); if (isRecording) stopRecording(); else startRecording(); }}
-                      style={{ maxWidth: 320 }}
-                      disabled={isCheckingAnswer}
-                    >
-                      {isRecording ? "⏹ Stop recording" : "🎤 Start recording"}
-                    </button>
+                      {spokenText && (
+                        <div dir="rtl" style={{
+                          marginTop: 12,
+                          fontSize: '1.1rem',
+                          color: 'var(--text-secondary)',
+                          fontStyle: 'italic'
+                        }}>
+                          You said: "{spokenText}"
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {isRecording && (
+                    <div style={{ color: 'var(--text-secondary)' }}>
+                      🔴 Recording...
+                    </div>
                   )}
                 </div>
 
-                {speechError && (
-                  <p style={{ color: 'red', marginTop: 12 }}>
-                    {speechError}
-                  </p>
-                )}
-
-                {/* Show feedback after recording */}
-                {speechFeedback && (
-                  <div style={{
-                    marginTop: 20,
-                    padding: '16px 24px',
-                    borderRadius: 12,
-                    background: speechFeedback.includes('Good') ? 'rgba(34, 197, 94, 0.15)'
-                      : speechFeedback.includes('Almost') ? 'rgba(251, 191, 36, 0.15)'
-                        : 'rgba(239, 68, 68, 0.15)',
-                    border: `2px solid ${speechFeedback.includes('Good') ? '#22c55e'
-                      : speechFeedback.includes('Almost') ? '#fbbf24'
-                        : '#ef4444'
-                      }`
-                  }}>
-                    <div style={{
-                      fontSize: '1.5rem',
-                      fontWeight: 700,
-                      color: speechFeedback.includes('Good') ? '#22c55e'
-                        : speechFeedback.includes('Almost') ? '#fbbf24'
-                          : '#ef4444'
-                    }}>
-                      {speechFeedback}
-                    </div>
-                    {spokenText && (
-                      <div dir="rtl" style={{
-                        marginTop: 12,
-                        fontSize: '1.1rem',
-                        color: 'var(--text-secondary)',
-                        fontStyle: 'italic'
-                      }}>
-                        You said: "{spokenText}"
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {isRecording && (
-                  <div style={{ marginTop: 16, color: 'var(--text-secondary)' }}>
-                    🔴 Recording...
-                  </div>
-                )}
-
-                <button
-                  className="btn-outline"
-                  style={{ marginTop: 20 }}
-                  onClick={() => { triggerHaptic(); setLessonPhase('intro_drills'); }}
-                >
-                  Continue
-                </button>
+                <footer className="sticky-footer">
+                  <button
+                    className="btn-outline"
+                    onClick={() => { triggerHaptic(); setLessonPhase('intro_drills'); }}
+                  >
+                    Continue
+                  </button>
+                </footer>
               </div>
             )
           }
@@ -6455,12 +9895,14 @@ function App() {
           {/* PHASE: TRANSITION TO DRILLS */}
           {
             lessonPhase === "intro_drills" && (
-              <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
-                <div style={{ width: '70vw', maxWidth: '280px', aspectRatio: '1', borderRadius: '24px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', marginBottom: '1.5rem' }}>
-                  <img src="/images/sentence-practice.png" alt="Sentence Practice" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              <div className="no-scroll-container transition-screen swipe-in">
+                <div className="transition-screen-media">
+                  <img src="/images/sentence-practice.png" alt="Sentence Practice" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                 </div>
-                <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>Sentence Practice</h1>
-                <p className="page-subtitle">Let's look at some ways of using these words in sentences!</p>
+                <div className="transition-screen-copy">
+                  <h1 className="page-title" style={{ marginTop: '2.5rem', marginBottom: '0.5rem' }}>Sentence Practice</h1>
+                  <p className="page-subtitle">Let's look at some ways of using these words in sentences!</p>
+                </div>
                 <footer className="sticky-footer">
                   <button className="btn-primary" onClick={() => { triggerHaptic(); setLessonPhase("explain"); }}>
                     Continue
@@ -6473,7 +9915,7 @@ function App() {
           {/* PHASE 3: USAGE DRILLS (Carousel Mode) */}
           {
             lessonPhase === "explain" && explanations.length > 0 && (
-              <div className="no-scroll-container">
+              <div className="no-scroll-container swipe-in">
                 {/* Header with back arrow and lesson title */}
                 <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
                   <span
@@ -6485,23 +9927,18 @@ function App() {
                   <div className="lesson-title-badge">{activeLesson.title}</div>
                 </header>
 
-                <div className="carousel-content-area">
-                  <div className="vocab-label" style={{ textAlign: "right", marginBottom: '0.25rem' }}>:عربي</div>
-                  <div className="arabic-box spotlight-arabic" dir="rtl" style={{ fontSize: '2rem', position: 'relative' }}>
+                <div key={explanationIndex} className="carousel-content-area fade-in">
+                  <div className="arabic-box spotlight-arabic" dir="rtl" style={{ fontSize: '2rem' }}>
                     {explanations[explanationIndex].arabic_sentence}
-                    <button className="speak-btn" onClick={(e) => { e.stopPropagation(); speakArabic(explanations[explanationIndex].arabic_sentence); }} aria-label="Listen" style={{ position: 'absolute', bottom: '0.75rem', left: '0.75rem' }}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 8.5v7a4.49 4.49 0 002.5-3.5zM14 3.23v2.06a6.5 6.5 0 010 13.42v2.06A8.5 8.5 0 0014 3.23z" /></svg>
-                    </button>
                   </div>
 
-                  <div className="vocab-label" style={{ marginBottom: '0.25rem' }}>English:</div>
                   <div className="explanation-bubble" style={{ borderLeft: '4px solid var(--chart-3)' }}>
                     {explanations[explanationIndex].english_sentence}
                   </div>
                 </div>
 
                 <footer className="sticky-footer">
-                  <div style={{ display: 'flex', gap: '0.75rem', width: '100%', alignItems: 'center' }}>
+                  <div className="lesson-action-row">
                     <button
                       className="btn-nav-arrow"
                       onClick={() => { if (explanationIndex > 0) { triggerHaptic(); setExplanationIndex(i => i - 1); } }}
@@ -6513,6 +9950,13 @@ function App() {
                     <button
                       className="btn-primary"
                       style={{ flex: 1 }}
+                      onClick={(e) => { e.stopPropagation(); triggerHaptic(); speakArabic(explanations[explanationIndex].arabic_sentence); }}
+                      aria-label="Listen"
+                    >
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" style={{ display: 'block', margin: '0 auto' }}><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 8.5v7a4.49 4.49 0 002.5-3.5zM14 3.23v2.06a6.5 6.5 0 010 13.42v2.06A8.5 8.5 0 0014 3.23z" /></svg>
+                    </button>
+                    <button
+                      className="btn-nav-arrow"
                       onClick={() => {
                         triggerHaptic();
                         if (explanationIndex === explanations.length - 1) {
@@ -6524,15 +9968,7 @@ function App() {
                         }
                       }}
                     >
-                      CONTINUE
-                    </button>
-                    <button
-                      className="btn-nav-arrow"
-                      onClick={() => { if (explanationIndex < explanations.length - 1) { triggerHaptic(); setExplanationIndex(i => i + 1); } }}
-                      disabled={explanationIndex === explanations.length - 1}
-                      style={{ opacity: explanationIndex === explanations.length - 1 ? 0.3 : 1 }}
-                    >
-                      →
+                      <MdArrowForwardIos />
                     </button>
                   </div>
                 </footer>
@@ -6544,81 +9980,105 @@ function App() {
           {
             lessonPhase === "relisten" && (
               <div className="relisten-screen swipe-in">
-                {/* Icon */}
-                <div className="relisten-icon-container">
-                  <img src="/clemency-icon.png" alt="Ihya Institute" className="relisten-icon" />
+                <div className="relisten-content">
+                  <div className="relisten-ornament">
+                    <span className="relisten-ornament-diamond" />
+                  </div>
+
+                  <div className="relisten-icon-container">
+                    <img src="/clemency-icon.png" alt="Ihya Institute" className="relisten-icon" />
+                    <div className="relisten-icon-ring" />
+                  </div>
+
+                  <h1 className="relisten-title">
+                    Let's have another listen
+                  </h1>
+                  <p className="relisten-subtitle">
+                    Listen again without the text — trust your ears!
+                  </p>
+
+                  {activeLesson.audio_url && (
+                    <>
+                      <audio
+                        ref={audioRef}
+                        src={activeLesson.audio_url}
+                        preload="auto"
+                        onError={(e) => {
+                          console.error('Relisten audio load error:', e.target.error?.message || 'unknown', 'code:', e.target.error?.code);
+                        }}
+                        onTimeUpdate={(e) => {
+                          if (activeLesson.lesson_format !== "blocks" && e.target.duration > 0) {
+                            setAudioProgress(
+                              (e.target.currentTime / e.target.duration) * 100
+                            );
+                          }
+                        }}
+                        onEnded={() => {
+                          setDialogueFinished(true);
+                          setAudioPlaying(false);
+                          setAudioCompleted(true);
+                        }}
+                        style={{ display: "none" }}
+                      />
+
+                      <div className="relisten-player">
+                        {/* Pulse rings when audio is playing */}
+                        {audioPlaying && (
+                          <>
+                            <div className="play-ring play-ring-1" />
+                            <div className="play-ring play-ring-2" />
+                            <div className="play-ring play-ring-3" />
+                          </>
+                        )}
+
+                        {/* Circular progress ring */}
+                        {!audioCompleted && (
+                          <svg className="circular-progress" viewBox="0 0 100 100">
+                            <circle className="progress-track" cx="50" cy="50" r="46" />
+                            <circle
+                              className="progress-fill"
+                              cx="50" cy="50" r="46"
+                              strokeDasharray={2 * Math.PI * 46}
+                              strokeDashoffset={(1 - audioProgress / 100) * 2 * Math.PI * 46}
+                              transform="rotate(-90 50 50)"
+                            />
+                          </svg>
+                        )}
+
+                        <button
+                          className="btn-play-large"
+                          onClick={handleStartLessonAudio}
+                          disabled={audioPlaying}
+                        >
+                          {audioPlaying ? (
+                            <div className="play-sound-bars">
+                              <span /><span /><span /><span /><span />
+                            </div>
+                          ) : (
+                            <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
+                              <path d="M8 5v14l11-7z" />
+                            </svg>
+                          )}
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
 
-                <h1 className="relisten-title">
-                  Let's have another listen
-                </h1>
-                <p className="relisten-subtitle">
-                  Listen again one more time without the text!
-                </p>
-
-                {activeLesson.audio_url && (
-                  <>
-                    <audio
-                      ref={audioRef}
-                      src={activeLesson.audio_url}
-                      preload="auto"
-                      onError={(e) => {
-                        console.error('Relisten audio load error:', e.target.error?.message || 'unknown', 'code:', e.target.error?.code);
-                      }}
-                      onTimeUpdate={(e) => {
-                        if (activeLesson.lesson_format !== "blocks" && e.target.duration > 0) {
-                          setAudioProgress(
-                            (e.target.currentTime / e.target.duration) * 100
-                          );
-                        }
-                      }}
-                      onEnded={() => {
-                        setDialogueFinished(true);
-                        setAudioPlaying(false);
-                        setAudioCompleted(true);
-                      }}
-                      style={{ display: "none" }}
-                    />
-
-                    <div className="relisten-play-container">
-                      <button
-                        className="btn-play-large"
-                        onClick={handleStartLessonAudio}
-                        disabled={audioPlaying}
-                      >
-                        {audioPlaying ? "🔊" : "▶️"}
-                      </button>
-                    </div>
-
-                    {activeLesson.audio_url && !audioCompleted && (
-                      <div className="audio-progress-fixed" style={{ marginBottom: '1rem' }}>
-                        <div
-                          className="audio-progress-fill-fixed"
-                          style={{ width: `${audioProgress}%` }}
-                        />
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {audioCompleted && (
+                <footer className="sticky-footer relisten-footer">
                   <button
-                    className="btn-primary"
-                    style={{ animation: "slideDown 0.3s ease-out", marginBottom: "1rem" }}
+                    className={`btn-primary ${audioCompleted ? '' : 'action-slot-hidden'}`}
                     onClick={() => { triggerHaptic(); setLessonPhase("pre_quiz"); }}
                   >
-                    Continue to Quiz →
+                    Continue to Quiz <MdArrowForwardIos style={{ display: 'inline', verticalAlign: 'middle', fontSize: '0.8em' }} />
                   </button>
-                )}
-
-                <div style={{ flex: 1 }} />
-
-                <button
-                  className="btn-skip-bubble"
-                  onClick={() => { triggerHaptic(); setLessonPhase("pre_quiz"); }}
-                >
-                  Skip to Quiz
-                </button>
+                  <button
+                    className={audioCompleted ? "btn-outline" : "btn-primary"}
+                    onClick={() => { triggerHaptic(); setLessonPhase("pre_quiz"); }}
+                  >
+                    Skip to Quiz
+                  </button>
+                </footer>
               </div>
             )
           }
@@ -6626,22 +10086,30 @@ function App() {
           {/* PHASE 5: PRE-QUIZ */}
           {
             lessonPhase === "pre_quiz" && (
-              <div className="no-scroll-container transition-screen swipe-in" style={{ justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
-                <div style={{ width: '70vw', maxWidth: '280px', marginBottom: '1.5rem' }}>
-                  <img src="/clemency-icon.png" alt="Ihya Institute" style={{ width: '100%', height: 'auto' }} />
+              <div className="pre-quiz-screen swipe-in">
+                <div className="quiz-frame">
+                  <div className="quiz-frame-ring" />
+                  <div className="quiz-frame-ring-inner" />
+                  <span className="quiz-frame-corner" />
+                  <span className="quiz-frame-corner" />
+                  <span className="quiz-frame-corner" />
+                  <span className="quiz-frame-corner" />
+                  <span className="quiz-ready-text" dir="rtl">مُستَعِد؟</span>
                 </div>
-                <h1 className="page-title" style={{ marginBottom: '0.5rem' }}>مُستَعِد؟</h1>
-                <p className="page-subtitle">Take the quiz to complete this lesson!</p>
-                <footer className="sticky-footer">
-                  <button
-                    className="btn-primary"
-                    style={{ fontSize: "1.2rem", padding: "1rem 2rem" }}
-                    onClick={() => { triggerHaptic(); startQuiz(); }}
-                    disabled={questions.length === 0}
-                  >
-                    {questions.length === 0 ? "No questions loaded" : "ابدأ"}
-                  </button>
-                </footer>
+
+                <div className="quiz-ornament">
+                  <span className="quiz-ornament-diamond" />
+                </div>
+
+                <p className="quiz-subtitle">Take the quiz to complete this lesson!</p>
+
+                <button
+                  className="btn-start-quiz"
+                  onClick={() => { triggerHaptic(); startQuiz(); }}
+                  disabled={questions.length === 0}
+                >
+                  {questions.length === 0 ? "No questions loaded" : "ابدأ"}
+                </button>
               </div>
             )
           }
@@ -6752,12 +10220,12 @@ function App() {
               <p>No stages found</p>
             </div>
           ) : (
-            <div className="explorer-stages">
+              <div className="explorer-stages">
               {stages.map((stage, index) => {
                 const { completed, total, percent } = getStageProgress(stage.id);
                 const isSelected = selectedStage === stage.id;
                 const isCompleted = percent === 100;
-                const isLocked = index > 0 && getStageProgress(stages[index - 1].id).percent < 50;
+                const isLocked = !isStageUnlocked(stage.id);
 
                 return (
                   <div key={stage.id} className="explorer-stage-wrap">
@@ -6810,7 +10278,7 @@ function App() {
                           <div className="explorer-lessons-list">
                             {lessons.map((lesson, lessonIndex) => {
                               const lessonCompleted = isLessonCompleted(lesson.id);
-                              const isActive = lessonIndex === 0 || isLessonCompleted(lessons[lessonIndex - 1]?.id);
+                              const isActive = isLessonUnlocked(lessons, lessonIndex, stage.id);
 
                               return (
                                 <button

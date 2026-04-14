@@ -15,10 +15,10 @@
         <item name="android:background">@null</item>
         <!-- Edge-to-Edge: Status bar matches app background -->
         <item name="android:statusBarColor">@color/appBackground</item>
-        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightStatusBar">false</item>
         <!-- Edge-to-Edge: Navigation bar matches app background -->
         <item name="android:navigationBarColor">@color/appBackground</item>
-        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
 
 

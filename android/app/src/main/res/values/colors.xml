@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="colorPrimary">#f7f2e8</color>
-    <color name="colorPrimaryDark">#f7f2e8</color>
-    <color name="colorAccent">#8b5cf6</color>
+    <color name="colorPrimary">#0D1B2A</color>
+    <color name="colorPrimaryDark">#0D1B2A</color>
+    <color name="colorAccent">#E09F3E</color>
     <!-- App background color for status bar and navigation bar -->
-    <color name="appBackground">#f7f2e8</color>
+    <color name="appBackground">#0D1B2A</color>
 </resources>

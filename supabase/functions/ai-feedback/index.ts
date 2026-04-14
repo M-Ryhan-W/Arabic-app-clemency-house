@@ -56,9 +56,9 @@ serve(async (req) => {
         // Build the prompt based on exercise type
         const prompt = buildPrompt(exerciseType, transcript, expectedText, vocabList, lessonContext);
 
-        // Call Gemini 2.0 Flash via Vertex AI
+        // Call Gemini Flash Lite via Vertex AI
         const geminiRes = await fetch(
-            `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent`,
+            `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/gemini-2.5-flash-lite:generateContent`,
             {
                 method: "POST",
                 headers: {
@@ -74,7 +74,7 @@ serve(async (req) => {
                     ],
                     generationConfig: {
                         temperature: 0.3,
-                        maxOutputTokens: 1024,
+                        maxOutputTokens: 512,
                         responseMimeType: "application/json",
                     },
                 }),

@@ -64,14 +64,13 @@ serve(async (req) => {
     const wantFeedback = !!exerciseType;
 
     const prompt = wantFeedback
-      ? buildTranscribeAndFeedbackPrompt(exerciseType, body.expectedText, body.vocabList, body.lessonContext)
+      ? buildTranscribeAndFeedbackPrompt(exerciseType, body.expectedText, body.vocabList, body.lessonContext, body)
       : "Transcribe this Arabic audio. Return ONLY a JSON object: {\"transcript\": \"<the Arabic text>\"}. Nothing else.";
 
-    // Build parts array: text + audio + optional image
-    // Gemini only accepts base MIME types (e.g. "audio/webm"), not codec params (e.g. "audio/webm;codecs=opus")
+    // Build parts array: text + audio
     const rawMime = body.mimeType || "audio/webm";
     const audioMimeType = rawMime.split(";")[0].trim();
-    
+
     const parts: any[] = [
       { text: prompt },
       {
@@ -82,35 +81,8 @@ serve(async (req) => {
       },
     ];
 
-    // If imageUrl provided, fetch and include the image
-    if (body.imageUrl && exerciseType === "picture-describe") {
-      try {
-        const imgRes = await fetch(body.imageUrl);
-        if (imgRes.ok) {
-          const imgBuf = await imgRes.arrayBuffer();
-          // Use chunked conversion to avoid stack overflow on large images
-          const imgBytes = new Uint8Array(imgBuf);
-          let imgBase64 = '';
-          const chunkSize = 8192;
-          for (let i = 0; i < imgBytes.length; i += chunkSize) {
-            imgBase64 += String.fromCharCode(...imgBytes.subarray(i, i + chunkSize));
-          }
-          imgBase64 = btoa(imgBase64);
-          const contentType = imgRes.headers.get("content-type") || "image/jpeg";
-          parts.push({
-            inlineData: {
-              mimeType: contentType,
-              data: imgBase64,
-            },
-          });
-        }
-      } catch (imgErr) {
-        console.warn("Could not fetch image for context:", imgErr);
-      }
-    }
-
     // Gemini call
-    const modelVersion = wantFeedback ? "gemini-2.5-flash" : "gemini-2.5-flash-lite";
+    const modelVersion = "gemini-2.5-flash-lite";
     console.log(`[speech-check] Using model: ${modelVersion}, exerciseType: ${exerciseType}`);
     
     const geminiRes = await fetch(
@@ -130,7 +102,7 @@ serve(async (req) => {
           ],
           generationConfig: {
             temperature: wantFeedback ? 0.3 : 0.1,
-            maxOutputTokens: 4096,
+            maxOutputTokens: 2048,
             responseMimeType: "application/json",
           },
         }),
@@ -191,7 +163,8 @@ function buildTranscribeAndFeedbackPrompt(
   exerciseType: string,
   expectedText?: string,
   vocabList?: string[],
-  lessonContext?: string
+  lessonContext?: string,
+  body?: any
 ): string {
   const baseInstruction = `You are an Arabic language tutor. Listen to this audio recording of a student speaking Arabic.
 
@@ -220,186 +193,65 @@ Keep feedback concise — 1-2 sentences max. Keep corrections to 1-2 items only.
   if (exerciseType === "picture-describe") {
     const vocabStr = vocabList?.join("، ") || "N/A";
     const vocabCount = vocabList?.length || 0;
-    return `You are an Arabic language tutor. A student looked at a picture and described it in Arabic. You can see both the picture and hear the student's audio.
+    const imageDesc = body.imageDescription || "";
+    return `STEP 1 — LANGUAGE CHECK (do this FIRST before anything else):
+Listen to the audio. What language is the speaker actually using?
+If the audio is NOT Arabic (English, silence, noise, other language), you MUST respond ONLY with:
+{"language_detected":"<language>","is_arabic":false,"transcript":"<what you actually heard, verbatim>"}
+Do NOT generate Arabic text. Do NOT evaluate. Just report what you heard and stop.
 
-Your job:
-1. Transcribe exactly what the student said in Arabic
-2. Break down their response into segments and give step-by-step feedback
-3. Score them out of 10 using the STRICT scoring formula below
-4. Create interactive challenges based on the picture and their response
+STEP 2 — Only if the speaker used Arabic, proceed with evaluation:
+${imageDesc ? `PICTURE: ${imageDesc}` : ""}
+${lessonContext ? `Lesson: ${lessonContext}` : ""}
+Target vocab (${vocabCount}): ${vocabStr}
 
-SCORING FORMULA (follow this exactly):
-The score is calculated from 3 components:
+RULES: Transcribe EXACTLY what you hear. Do NOT add words that weren't spoken.
 
-A) VOCAB COVERAGE (30% of score = max 3 points)
-   - Count how many of the ${vocabCount} target vocab words the student actually used
-   - Score = (words_used / ${vocabCount}) × 3
-   - Example: used 4 out of 11 words → (4/11) × 3 = 1.1 points
-   - BE VERY LENIENT when matching — count a word as used if:
-     * They said the word with or without ال (e.g. "مدرسة" counts for "المدرسة" and vice versa)
-     * They said the word with ANY Arabic prefix/preposition attached: ب، بال، ل، لل، ك، كال، و، ف (e.g. "بالثلج" counts for "ثلج", "للمدرسة" counts for "مدرسة", "وأطفال" counts for "أطفال")
-     * They used a plural/singular variant (e.g. "أطفال" counts for "طفل")
-     * They used the same root with ANY conjugation (e.g. "يلعب" counts for "لعب")
-     * They used a close synonym (e.g. "بيت" for "منزل", "ولد" for "صبي")
-     * Ignore harakat differences entirely
-     * If the student used a word that CONTAINS the target word as a substring, count it (e.g. "مدرستي" counts for "مدرسة", "بالثلج" counts for "ثلج")
-     * If in doubt, count it as used — ALWAYS err on the side of generosity
+RATING: Judge holistically — vocab coverage, grammar, relevance to picture, length/detail.
+- "fair" = weak attempt, few vocab words, grammar issues, very basic
+- "good" = decent attempt, some vocab used, mostly correct grammar
+- "excellent" = strong attempt, most vocab used, good grammar, detailed
+Be LENIENT with vocab matching — count with/without ال, prefixes (ب،ل،و،ف), plurals, conjugations, synonyms.
 
-B) RELEVANCE (40% of score = max 4 points)
-   - Did they actually describe what's in the picture?
-   - 4 points: Fully on-topic, described the picture accurately
-   - 3 points: Mostly on-topic with some off-topic content
-   - 2 points: Partially related to the picture
-   - 1 point: Barely related to the picture
-   - 0 points: Completely off-topic or said something unrelated to the picture
-
-C) GRAMMAR & STRUCTURE (30% of score = max 3 points)
-   - 3 points: Good sentence structure, proper Arabic grammar
-   - 2 points: Decent sentences, minor errors
-   - 1 point: Basic but understandable sentences
-   - 0 points: Single words only or very broken grammar
-
-Final score = A + B + C (round to 1 decimal place)
-
-EXAMPLES:
-- Used 4/11 vocab + completely off-topic = 1.1 + 0 + 1 = 2.1 → score: 2.1
-- Used 8/11 vocab + on-topic + good grammar = 2.2 + 4 + 3 = 9.2 → score: 9.2
-- Used 6/11 vocab + mostly on-topic + decent grammar = 1.6 + 3 + 2 = 6.6 → score: 6.6
-- Used 4/11 vocab + on-topic + decent grammar = 1.1 + 4 + 2 = 7.1 → score: 7.1
-
-CRITICAL — SILENCE DETECTION:
-- If the audio is SILENT, contains only noise, or has NO recognizable Arabic speech:
-  - transcript MUST be "" (empty string)
-  - score MUST be 0
-  - vocabUsed MUST be 0
-  - Include only 1 segment step saying "No speech was detected. Try speaking into the microphone."
-  - Do NOT invent or fabricate words the student did not say
-  - Do NOT hallucinate a transcript — if you can't clearly hear Arabic words, the transcript is empty
-
-IMPORTANT RULES:
-- Do NOT penalize for harakat (تشكيل/إعراب) differences — speech recognition cannot detect diacritics
-- Be HONEST about the score. Do NOT inflate it. If they talked about something unrelated to the picture, the relevance score MUST be 0.
-- Do NOT fabricate or guess what the student said. Only transcribe words you can clearly hear.
-- Each feedback step should be short (1-2 sentences)
-- Look at the picture to give relevant follow-up questions
-
-Target vocabulary (${vocabCount} words): ${vocabStr}
-${lessonContext ? `Lesson context: ${lessonContext}` : ""}
-
-You MUST respond with valid JSON in this exact format:
-{
-  "transcript": "<exact Arabic transcription of what was spoken>",
-  "score": <number 0-10 calculated using the formula above>,
-  "vocabUsed": <number of target vocab words they actually used>,
-  "vocabTotal": ${vocabCount},
-  "steps": [
-    {
-      "type": "segment",
-      "snippet": "<a phrase the student said, in Arabic>",
-      "analysis": "<brief DIRECT English analysis — no 'great job!' fluff. State what they said, whether it works, and what could be better>",
-      "tip": "<improvement suggestion in English, or null>",
-      "teach": null or {
-        "type": "synonym" | "phrase" | "better_way",
-        "label": "<short English label, e.g. 'Useful synonym' or 'Better phrasing' or 'Handy phrase'>",
-        "arabic": "<the Arabic word/phrase being taught>",
-        "english": "<English meaning>"
-      }
-    },
-    {
-      "type": "correction_challenge",
-      "original": "<what the student said incorrectly, in Arabic>",
-      "corrected": "<the better/correct version in Arabic>",
-      "instruction": "<English instruction, e.g. 'Now try saying it correctly:'>"
-    },
-    {
-      "type": "vocab_check",
-      "used": ["<Arabic vocab words they used correctly>"],
-      "missed": ["<Arabic vocab words they missed>"],
-      "analysis": "<brief comment on vocab coverage>"
-    },
-    {
-      "type": "speak_challenge",
-      "prompt": "<English instruction asking a THEMATIC question related to the picture's theme or story>",
-      "hint": "<optional Arabic hint or starter phrase, or null>"
-    }
-  ]
-}
-
-TONE RULES:
-- Do NOT say "Great job!", "Well done!", "Excellent!" unless the segment is genuinely perfect
-- Be DIRECT and MATTER-OF-FACT: "You said X. This is correct." or "You said X but Y would be more natural."
-- If something is wrong, say so plainly: "This doesn't match the picture" or "The grammar here is incorrect"
-- Think of yourself as a helpful but honest teacher, not a cheerleader
-
-Guidelines for steps:
-- Start with 2-3 "segment" steps breaking down what they said
-- For every ODD-numbered segment (1st, 3rd), include a "teach" object: a useful synonym, a better way to phrase something, or a handy related phrase. For EVEN segments, set teach to null.
-- After a segment that needs correction, add a "correction_challenge" asking them to repeat the better version
-- Include exactly 1 "vocab_check" step
-- Include 1 "improvement" step that provides ONE HIGHLY SPECIFIC tip based on what the student actually said. DO NOT give generic advice like "Try making longer sentences". Instead, identify a specific idea they tried to express (or a grammatical mistake they made that wasn't covered in a segment) and tell them exactly how to say it more naturally or eloquently in Arabic. Give a concrete example sentence in Arabic they could try. Format: {"type": "improvement", "suggestion": "<Specific English suggestion targeting their actual answer>", "example": "<an example Arabic sentence they could say, related to the picture>"}
-- End with exactly 1 "speak_challenge" — this should be a THEMATIC or REFLECTIVE question about the picture's subject, NOT about physical objects. Examples: for a homeless person → "How do you think we can help people in this situation?", for a family at the park → "What's your favourite thing about going to the park?", for a classroom → "What subject do you enjoy the most?". The question should invite the student to express an opinion or share a thought in Arabic.
-- Do NOT include a "summary" step
-- If the student said nothing (silent audio), score 0 and tell them to try speaking. Still include the speak_challenge so they can try.
-- Only include correction_challenge if there was actually something to correct`;
+Respond with JSON:
+{"language_detected":"arabic","is_arabic":true,"transcript":"<Arabic>","rating":"fair|good|excellent","vocabUsed":<n>,"vocabTotal":${vocabCount},"steps":[
+  2-3 {"type":"segment","snippet":"<Arabic phrase>","analysis":"<direct feedback>","tip":"<or null>","teach":null or {"type":"synonym|phrase|better_way","label":"...","arabic":"...","english":"..."}},
+  2-3 {"type":"correction_challenge","original":"<what student said>","corrected":"<better way to say it>","instruction":"<brief instruction>"} (MANDATORY — ALWAYS give at least 2),
+  {"type":"vocab_check","used":[...],"missed":[...],"analysis":"..."},
+  1-2 {"type":"improvement","suggestion":"<specific tip>","example":"<Arabic example sentence>"}
+]}
+Odd segments get teach object, even get null. correction_challenge: pick something the student said and show them a better/more natural way — they will record themselves saying the corrected version.`;
   }
 
   if (exerciseType === "challenge-check") {
-    return `You are an Arabic language tutor evaluating a student's pronunciation practice.
+    return `Arabic tutor evaluating pronunciation practice.
+Expected phrase: "${expectedText}"
 
-The student was asked to say this Arabic phrase: "${expectedText}"
+CRITICAL — SILENCE CHECK FIRST:
+If audio contains NO clear Arabic speech (silence, noise, breathing, mumbling) → transcript="", score=0, pass=false. Do NOT fabricate words.
 
-Your job:
-1. Transcribe exactly what they said
-2. Determine if what they said is CLOSE ENOUGH to the expected phrase
-3. Be HONEST — if they said something completely different or unrelated, score them 0
+If they DID speak: Transcribe exactly, compare to expected phrase. Ignore harakat.
+Scoring: 80-100=correct/close, 50-79=noticeable errors, 20-49=many errors, 0-19=unrelated.
+pass=true if score>=50.
 
-Scoring rules:
-- 80-100: They said it correctly or very close (minor differences OK, ignore harakat)
-- 50-79: They attempted it but made noticeable errors in words or structure
-- 20-49: They tried but got many words wrong or mixed up the meaning
-- 0-19: They said something completely different or unrelated to the expected phrase
-
-Do NOT be falsely encouraging. If they said garbage or something unrelated, say so honestly.
-Ignore harakat/diacritics differences — focus on root words and meaning.
-
-You MUST respond with valid JSON:
-{
-  "transcript": "<what they actually said in Arabic>",
-  "overallScore": <number 0-100>,
-  "pass": <true if score >= 50, false otherwise>,
-  "feedback": "<1 sentence honest assessment>"
-}`;
+Respond with JSON:
+{"transcript":"<Arabic or empty if silent>","overallScore":<0-100>,"pass":<bool>,"feedback":"<1 sentence honest assessment>"}`;
   }
 
   if (exerciseType === "speak-check") {
-    return `You are an Arabic language tutor. The student was asked this question: "${expectedText}"
+    return `Arabic tutor evaluating student response to: "${expectedText}"
 
-They were supposed to answer in Arabic. Listen to their audio.
+CRITICAL — SILENCE CHECK FIRST:
+If the audio contains NO clear Arabic speech (silence, noise, breathing, mumbling, or only English) → transcript MUST be "", score=0, pass=false. Do NOT fabricate or guess words. Do NOT give positive feedback for silence.
 
-Your job:
-1. Transcribe what they said
-2. Did they answer IN ARABIC and is it AT LEAST VAGUELY relevant to the question?
-3. Be LENIENT on passing — this is the end of a lesson
-4. But give MEANINGFUL feedback, not just "Good job!"
+If they DID speak Arabic:
+- Transcribe exactly what they said
+- Pass if they spoke Arabic and it's at least loosely relevant
+- Grammar mistakes are OK → still pass
+- Totally unrelated to question → fail
 
-Pass criteria (be generous):
-- They spoke Arabic (not English or silence) → likely pass
-- Their answer is at least loosely related to the topic → pass
-- They made grammar mistakes but communicated something → pass
-- They said something totally unrelated to the question → fail
-- They said nothing or only English words → fail
-- Silent audio → fail, transcript must be ""
-
-If they PASS: Give specific feedback about what they said. Mention what was good about their answer and teach them one useful related word or phrase they could use next time.
-If they FAIL: Clearly explain what was expected and give an example Arabic sentence they could say.
-
-You MUST respond with valid JSON:
-{
-  "transcript": "<what they actually said in Arabic, or empty string if silent>",
-  "overallScore": <number 0-100>,
-  "pass": <true if they made any reasonable Arabic attempt related to the topic>,
-  "feedback": "<2-3 sentences: what they said, what was good/bad, and one teaching point>"
-}`;
+Respond with JSON:
+{"transcript":"<Arabic or empty if silent>","overallScore":<0-100>,"pass":<bool>,"feedback":"<2-3 sentences: what they said, what was good/bad, one teaching point>"}`;
   }
 
   if (exerciseType === "reading") {

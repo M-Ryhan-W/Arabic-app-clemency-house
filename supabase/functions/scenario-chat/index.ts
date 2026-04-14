@@ -1,4 +1,109 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+// ---- TTS Audio Cache (server-side, persists across warm requests) ----
+const ttsCache = new Map<string, { audio: string; ts: number }>();
+const TTS_CACHE_MAX = 50; // max entries
+const TTS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
+
+function getTtsCached(text: string): string | null {
+    const entry = ttsCache.get(text);
+    if (entry && Date.now() - entry.ts < TTS_CACHE_TTL) return entry.audio;
+    if (entry) ttsCache.delete(text);
+    return null;
+}
+
+function setTtsCached(text: string, audio: string) {
+    // Evict oldest if at capacity
+    if (ttsCache.size >= TTS_CACHE_MAX) {
+        const oldest = ttsCache.keys().next().value;
+        if (oldest) ttsCache.delete(oldest);
+    }
+    ttsCache.set(text, { audio, ts: Date.now() });
+}
+
+// ---- Text Hashing (for persistent TTS cache keys) ----
+async function hashText(text: string): Promise<string> {
+    const data = new TextEncoder().encode(text);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+// ---- Rate Limiting ----
+const DAILY_SESSION_LIMIT = 3;   // Max scenario starts per user per day
+const DAILY_REQUEST_LIMIT = 100; // Max total AI requests per user per day
+
+async function verifyUserAndCheckLimits(req: Request, action: string): Promise<{ userId: string } | Response> {
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) {
+        return new Response(JSON.stringify({ error: "Missing authorization" }), {
+            status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+    }
+
+    const supabase = createClient(
+        Deno.env.get("SUPABASE_URL")!,
+        Deno.env.get("SUPABASE_ANON_KEY")!,
+        { global: { headers: { Authorization: authHeader } } }
+    );
+
+    const { data: { user }, error } = await supabase.auth.getUser();
+    if (error || !user) {
+        return new Response(JSON.stringify({ error: "Invalid session" }), {
+            status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+    }
+
+    // Check and increment usage
+    const today = new Date().toISOString().split("T")[0];
+
+    // Upsert daily usage row
+    const { data: usage, error: upsertErr } = await supabase
+        .from("daily_usage")
+        .upsert(
+            { user_id: user.id, usage_date: today, scenario_sessions: 0, total_requests: 0 },
+            { onConflict: "user_id,usage_date", ignoreDuplicates: true }
+        )
+        .select()
+        .single();
+
+    // Fetch current usage (upsert with ignoreDuplicates won't return existing row reliably)
+    const { data: currentUsage } = await supabase
+        .from("daily_usage")
+        .select("scenario_sessions, total_requests")
+        .eq("user_id", user.id)
+        .eq("usage_date", today)
+        .single();
+
+    if (currentUsage) {
+        // Check limits
+        if (action === "start" && currentUsage.scenario_sessions >= DAILY_SESSION_LIMIT) {
+            return new Response(JSON.stringify({
+                error: "daily_limit",
+                message: `You've reached your daily limit of ${DAILY_SESSION_LIMIT} scenario sessions. Come back tomorrow!`,
+            }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
+        if (currentUsage.total_requests >= DAILY_REQUEST_LIMIT) {
+            return new Response(JSON.stringify({
+                error: "daily_limit",
+                message: "You've reached your daily request limit. Come back tomorrow!",
+            }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
+
+        // Increment counters
+        const updates: any = { total_requests: currentUsage.total_requests + 1 };
+        if (action === "start") {
+            updates.scenario_sessions = currentUsage.scenario_sessions + 1;
+        }
+        await supabase
+            .from("daily_usage")
+            .update(updates)
+            .eq("user_id", user.id)
+            .eq("usage_date", today);
+    }
+
+    return { userId: user.id };
+}
 
 // ---- OAuth Token Cache ----
 let cachedToken = null;
@@ -31,23 +136,45 @@ async function getAccessToken() {
     return { token: cachedToken, projectId: cachedProjectId };
 }
 
-async function callVertexAI(projectId: string, token: string, payload: any, model: string = "gemini-2.5-flash") {
-    const geminiRes = await fetch(
-        `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/${model}:generateContent`,
-        {
-            method: "POST",
-            headers: {
-                Authorization: `Bearer ${token}`,
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify(payload),
-        }
-    );
-    const geminiData = await geminiRes.json();
-    if (geminiData.error) {
-        throw new Error(JSON.stringify(geminiData.error) || "Gemini API Error");
+// Extract response text from Gemini response, skipping thinking/reasoning parts
+function extractResponseText(geminiData: any): string | undefined {
+    const parts = geminiData?.candidates?.[0]?.content?.parts;
+    if (!parts) return undefined;
+    // Find the last non-thinking part (response comes after thinking)
+    for (let i = parts.length - 1; i >= 0; i--) {
+        if (!parts[i].thought && parts[i].text) return parts[i].text;
     }
-    return geminiData;
+    return parts[0]?.text; // fallback
+}
+
+async function callVertexAI(projectId: string, token: string, payload: any, model: string = "gemini-2.5-flash-lite", maxRetries: number = 3) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        const geminiRes = await fetch(
+            `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/${model}:generateContent`,
+            {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(payload),
+            }
+        );
+        const geminiData = await geminiRes.json();
+        if (geminiData.error) {
+            const code = geminiData.error.code;
+            // Retry on 429 (rate limit) and 503 (overloaded) with exponential backoff
+            if ((code === 429 || code === 503) && attempt < maxRetries) {
+                const delay = Math.min(1000 * Math.pow(2, attempt), 8000);
+                console.warn(`[callVertexAI] ${code} on attempt ${attempt + 1}, retrying in ${delay}ms...`);
+                await new Promise(r => setTimeout(r, delay));
+                continue;
+            }
+            throw new Error(JSON.stringify(geminiData.error) || "Gemini API Error");
+        }
+        return geminiData;
+    }
+    throw new Error("callVertexAI: max retries exceeded");
 }
 
 const corsHeaders = {
@@ -96,102 +223,34 @@ function getTodayScenario(): typeof SCENARIOS[0] {
 }
 
 function buildSystemPrompt(scenario: typeof SCENARIOS[0], difficulty: string, elapsedTimeSec: number = 0, turnCount: number = 0): string {
-    const timeInstruction = elapsedTimeSec > 240
-        ? "TIME ALERT: The conversation is nearing its 5 minute limit. You MUST start naturally wrapping up the conversation now. Guide it to a polite conclusion and set isEnding=true soon."
-        : "";
-
-    const turnGuidance = turnCount < 6
-        ? "The conversation is still early — keep it going, explore the topic, ask follow-up questions. Do NOT set isEnding=true yet."
-        : turnCount < 8
-            ? "The conversation is progressing well. You can start naturally winding down if appropriate, but don't rush."
-            : "The conversation has been going well. You may start wrapping up naturally when it feels right.";
-
-    const difficultyGuide: any = {
-        easy: `DIFFICULTY: EASY (Beginner)
-- Use only extremely basic, common Arabic words. Keep sentences very short and simple.
-- Use clear, simple Fusha (Modern Standard Arabic).
-- Be extremely patient and welcoming.
-- Always end your message with a simple yes/no or choice question to make it easy for the student to respond.`,
-        intermediate: `DIFFICULTY: MEDIUM
-- Use simple Fusha (Modern Standard Arabic). Avoid dialects.
-- Use clear, moderate length sentences.
-- Always end your message with an open-ended follow-up question related to the conversation.`,
-        advanced: `DIFFICULTY: HARD
-- Use natural Fusha (Modern Standard Arabic). DO NOT use dialects.
-- Use natural, fluid sentences with richer vocabulary.
-- Always end your message with a thought-provoking or context-rich follow-up question.`
+    const time = elapsedTimeSec > 200 ? " WRAP UP NOW — set isEnding=true." : "";
+    const turn = turnCount < 6 ? "Keep going, don't end yet." : "May wrap up naturally.";
+    const diff: any = {
+        easy: "EASY: Very basic Arabic, short sentences, end with yes/no question.",
+        intermediate: "MEDIUM: Simple Fusha, moderate sentences, end with follow-up question.",
+        advanced: "HARD: Natural Fusha, richer vocab, 2-3 sentences max, end with follow-up question."
     };
 
-    return `You are playing a CHARACTER in an Arabic conversation scenario. Stay in character throughout.
-
-SCENARIO: ${scenario.title} (${scenario.titleAr})
-YOUR ROLE: ${scenario.setting}
-
-${difficultyGuide[difficulty] || difficultyGuide.intermediate}
-
-CURRENT TURN: ${turnCount} of approximately 8-10 total.
-${turnGuidance}
-
-CONVERSATION RULES:
-1. Stay in character at ALL times — you are the character, not a tutor.
-2. Adapt to the user's flow!
-3. TASHKEEL: You MUST include full tashkeel (vowels/diacritics) on every single Arabic word in all fields.
-4. TONE: Be helpful and encouraging.
-5. FUSHA: You MUST use Modern Standard Arabic (Fusha) for all difficulty levels. No slang, no regional dialects.
-6. FOLLOW-UP QUESTIONS: You MUST end EVERY response with a follow-up question to keep the conversation going.
-7. CONVERSATION LENGTH: Do NOT set isEnding=true until at least 6 back-and-forth exchanges have happened.
-8. NATURAL FLOW: Don't just answer — react, comment, and then ask.
-${timeInstruction}
-
-RESPONSE FORMAT — you MUST respond with valid JSON:
-{
-  "message": "<your Arabic response with full tashkeel, staying in character. ONLY Arabic here. MUST end with a follow-up question.>",
-  "translation": "<English translation of your message>",
-  "hint": "<a brief 1-sentence English hint for the student, e.g. 'Tell them what size you want' or 'Ask about the price'>",
-  "isEnding": <true if this is the final message AND turnCount >= 6, false otherwise>,
-  "keyPhrase": {"arabic": "<one useful Arabic phrase with tashkeel>", "english": "<its English meaning>"} or null
-}
-
-IMPORTANT:
-- The "hint" is a very short written prompt (5-12 words max). Just enough to guide the student.
-- Set "isEnding" to true ONLY if the conversation has naturally concluded AND at least 6 turns have passed.
-- Do NOT include suggestedResponse or audioHelp — those are generated separately only if the student asks for help.`;
+    return `Character in Arabic scenario. Stay in character.
+SCENARIO: ${scenario.title} — ${scenario.setting}
+${diff[difficulty] || diff.intermediate}
+Turn ${turnCount}/~8.${turn}${time}
+RULES: Full tashkeel on ALL Arabic. Fusha only. 1-3 sentences. React then ask.
+JSON: {"message":"<Arabic with tashkeel>","isEnding":${turnCount >= 6 ? "true/false" : "false"},"keyPhrase":{"arabic":"...","english":"..."}}`;
 }
 
 function buildStreamingSystemPrompt(scenario: typeof SCENARIOS[0], difficulty: string, elapsedTimeSec: number = 0, turnCount: number = 0): string {
-    const timeInstruction = elapsedTimeSec > 240
-        ? "TIME ALERT: Wrap up naturally now."
-        : "";
-
-    const turnGuidance = turnCount < 6
-        ? "Keep the conversation going, ask follow-up questions."
-        : turnCount < 8
-            ? "You can start winding down if appropriate."
-            : "You may wrap up naturally when it feels right.";
-
-    const difficultyGuide: any = {
-        easy: "Use only basic, common Arabic words. Keep sentences very short and simple. Use clear Fusha.",
-        intermediate: "Use simple Fusha. Clear, moderate length sentences.",
-        advanced: "Use natural, fluid Fusha with richer vocabulary."
+    const time = elapsedTimeSec > 200 ? " Wrap up now." : "";
+    const diff: any = {
+        easy: "Basic Arabic, very short.",
+        intermediate: "Simple Fusha, moderate.",
+        advanced: "Natural Fusha, richer vocab, 2-3 sentences max."
     };
 
-    return `You are playing a CHARACTER in an Arabic conversation scenario. Stay in character.
-
-SCENARIO: ${scenario.title} (${scenario.titleAr})
-YOUR ROLE: ${scenario.setting}
-
-${difficultyGuide[difficulty] || difficultyGuide.intermediate}
-
-TURN: ${turnCount} of ~8-10. ${turnGuidance}
-${timeInstruction}
-
-RULES:
-1. Stay in character at ALL times.
-2. Include FULL tashkeel (diacritics) on every Arabic word.
-3. Use Modern Standard Arabic (Fusha) only. No dialects.
-4. End with a follow-up question to keep the conversation going.
-5. Respond ONLY with your Arabic message. NO English, NO translation, NO JSON, NO hints.
-6. Be concise — 1-3 sentences max. This is a real-time conversation.`;
+    return `Character in Arabic scenario. Stay in character.
+SCENARIO: ${scenario.title} — ${scenario.setting}
+${diff[difficulty] || diff.intermediate} Turn ${turnCount}/~8.${time}
+Full tashkeel. Fusha only. 1-3 sentences. End with question. ONLY Arabic, no English/JSON.`;
 }
 
 function cleanJson(text: string): string {
@@ -211,6 +270,16 @@ function cleanJson(text: string): string {
     return cleaned;
 }
 
+// Compress conversation history: summarize old turns, keep last 4 in full
+function compressHistory(history: any[]): any[] {
+    if (!history || history.length <= 4) return history || [];
+    const older = history.slice(0, -4);
+    const recent = history.slice(-4);
+    // Summarize older turns into a single compact line
+    const summary = older.map(m => `${m.role === 'ai' ? 'AI' : 'User'}: ${m.text.substring(0, 60)}`).join(' | ');
+    return [{ role: "user", text: `[Earlier conversation summary: ${summary}]` }, ...recent];
+}
+
 serve(async (req) => {
     if (req.method === "OPTIONS") {
         return new Response("ok", { headers: corsHeaders });
@@ -220,7 +289,7 @@ serve(async (req) => {
         const reqBody = await req.json();
         const { action, difficulty, conversationHistory, audioBase64 } = reqBody;
 
-        // Action: get-scenario
+        // Action: get-scenario (no auth needed — no AI call)
         if (action === "get-scenario") {
             const scenario = getTodayScenario();
             return new Response(JSON.stringify({
@@ -232,6 +301,13 @@ serve(async (req) => {
             }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
         }
 
+        // --- Auth & rate limiting for all AI actions ---
+        const aiActions = ["start", "reply", "reply-stream", "help", "generate-tts"];
+        if (aiActions.includes(action)) {
+            const authResult = await verifyUserAndCheckLimits(req, action);
+            if (authResult instanceof Response) return authResult;
+        }
+
         // Action: start
         if (action === "start") {
             const scenario = getTodayScenario();
@@ -241,10 +317,10 @@ serve(async (req) => {
             const geminiData = await callVertexAI(projectId, token, {
                 systemInstruction: { parts: [{ text: systemPrompt }] },
                 contents: [{ role: "user", parts: [{ text: "Start the conversation. Greet me in character." }] }],
-                generationConfig: { temperature: 0.8, maxOutputTokens: 800, responseMimeType: "application/json" },
-            });
+                generationConfig: { temperature: 0.8, maxOutputTokens: 600, responseMimeType: "application/json" },
+            }, "gemini-2.5-flash-lite");
 
-            const text = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
+            const text = extractResponseText(geminiData);
             if (!text) throw new Error("No response from Gemini");
 
             const parsed = JSON.parse(cleanJson(text));
@@ -260,21 +336,16 @@ serve(async (req) => {
             const { token, projectId } = await getAccessToken();
 
             const contents = [];
-            // Seed conversation with initial instruction to satisfy Vertex AI's 'first turn must be user' rule
             contents.push({ role: "user", parts: [{ text: "Start the conversation. Greet me in character." }] });
 
-            if (conversationHistory && conversationHistory.length > 0) {
-                for (const msg of conversationHistory) {
-                    const msgRole = msg.role === "ai" ? "model" : "user";
-                    const lastTurn = contents[contents.length - 1];
-                    if (lastTurn.role === msgRole) {
-                        lastTurn.parts[0].text += "\n" + msg.text;
-                    } else {
-                        contents.push({
-                            role: msgRole,
-                            parts: [{ text: msg.text }],
-                        });
-                    }
+            const compressed = compressHistory(conversationHistory);
+            for (const msg of compressed) {
+                const msgRole = msg.role === "ai" ? "model" : "user";
+                const lastTurn = contents[contents.length - 1];
+                if (lastTurn.role === msgRole) {
+                    lastTurn.parts[0].text += "\n" + msg.text;
+                } else {
+                    contents.push({ role: msgRole, parts: [{ text: msg.text }] });
                 }
             }
 
@@ -286,13 +357,13 @@ serve(async (req) => {
                         role: "user",
                         parts: [
                             { inlineData: { mimeType: audioMime, data: audioBase64 } },
-                            { text: 'Transcribe this Arabic audio exactly. If silent or no speech, respond with just: {"transcript":""}. Otherwise respond with: {"transcript":"<Arabic text>"}' },
+                            { text: 'Transcribe ONLY clearly spoken Arabic words from this audio. Rules: 1) If the audio is silent, has only noise, breathing, or mumbling with no clear words, return {"transcript":""}. 2) Do NOT guess or invent words. Do NOT hallucinate sentences. If you are not confident about what was said, return {"transcript":""}. 3) Only transcribe words you can clearly hear. Return: {"transcript":"<Arabic text>"} or {"transcript":""}' },
                         ],
                     }],
                     generationConfig: { temperature: 0.1, maxOutputTokens: 400, responseMimeType: "application/json" },
                 }, "gemini-2.5-flash-lite");
 
-                const transcribeText = transcribeData?.candidates?.[0]?.content?.parts?.[0]?.text;
+                const transcribeText = extractResponseText(transcribeData);
                 console.log("Transcription raw:", transcribeText);
                 let transcript = "";
                 try {
@@ -301,6 +372,11 @@ serve(async (req) => {
                 } catch {
                     transcript = transcribeText || "";
                 }
+
+                // Strip diacritics for length check
+                const stripped = transcript.replace(/[\u064B-\u065F\u0670]/g, "").trim();
+                // Allow single-word answers (e.g. نعم, لا, شكراً) — only reject truly empty/noise
+                if (stripped.length < 1) transcript = "";
 
                 if (!transcript || transcript.trim() === "") {
                     return new Response(JSON.stringify({
@@ -326,10 +402,10 @@ serve(async (req) => {
                 const replyData = await callVertexAI(projectId, token, {
                     systemInstruction: { parts: [{ text: systemPrompt }] },
                     contents,
-                    generationConfig: { temperature: 0.8, maxOutputTokens: 800, responseMimeType: "application/json" },
-                });
+                    generationConfig: { temperature: 0.8, maxOutputTokens: 1000, responseMimeType: "application/json" },
+                }, "gemini-2.5-flash-lite");
 
-                const replyText = replyData?.candidates?.[0]?.content?.parts?.[0]?.text;
+                const replyText = extractResponseText(replyData);
                 console.log("Reply raw:", replyText);
                 if (!replyText) throw new Error("No response from Gemini");
 
@@ -351,15 +427,14 @@ serve(async (req) => {
             const contents: any[] = [];
             contents.push({ role: "user", parts: [{ text: "Start the conversation. Greet me in character." }] });
 
-            if (conversationHistory && conversationHistory.length > 0) {
-                for (const msg of conversationHistory) {
-                    const msgRole = msg.role === "ai" ? "model" : "user";
-                    const lastTurn = contents[contents.length - 1];
-                    if (lastTurn.role === msgRole) {
-                        lastTurn.parts[0].text += "\n" + msg.text;
-                    } else {
-                        contents.push({ role: msgRole, parts: [{ text: msg.text }] });
-                    }
+            const compressed = compressHistory(conversationHistory);
+            for (const msg of compressed) {
+                const msgRole = msg.role === "ai" ? "model" : "user";
+                const lastTurn = contents[contents.length - 1];
+                if (lastTurn.role === msgRole) {
+                    lastTurn.parts[0].text += "\n" + msg.text;
+                } else {
+                    contents.push({ role: msgRole, parts: [{ text: msg.text }] });
                 }
             }
 
@@ -389,19 +464,28 @@ serve(async (req) => {
                                 role: "user",
                                 parts: [
                                     { inlineData: { mimeType: audioMime, data: audioBase64 } },
-                                    { text: 'You are an expert Arabic audio transcriber. Transcribe the speech precisely. CRITICAL: If the audio is silent, has only background noise, or contains no discernible speech, you MUST return exactly: {"transcript":""}. Do not guess or hallucinate text. If there is valid speech, return: {"transcript":"<Arabic text>"}' },
+                                    { text: 'Transcribe ONLY clearly spoken Arabic words from this audio. Rules: 1) If the audio is silent, has only noise, breathing, or mumbling with no clear words, return {"transcript":""}. 2) Do NOT guess or invent words. Do NOT hallucinate sentences. If you are not confident about what was said, return {"transcript":""}. 3) Only transcribe words you can clearly hear. Return: {"transcript":"<Arabic text>"} or {"transcript":""}' },
                                 ],
                             }],
                             generationConfig: { temperature: 0.1, maxOutputTokens: 400, responseMimeType: "application/json" },
                         }, "gemini-2.5-flash-lite");
 
-                        const transcribeText = transcribeData?.candidates?.[0]?.content?.parts?.[0]?.text;
+                        const transcribeText = extractResponseText(transcribeData);
                         let transcript = "";
                         try {
                             const parsed = JSON.parse(cleanJson(transcribeText));
                             transcript = parsed.transcript || "";
                         } catch {
                             transcript = transcribeText || "";
+                        }
+
+                        // Strip diacritics for length check (tashkeel inflates char count)
+                        const stripped = transcript.replace(/[\u064B-\u065F\u0670]/g, "").trim();
+                        // Reject very short transcripts — likely hallucinated from noise
+                        // Also reject single-word transcripts (common hallucination artifacts)
+                        const wordCount = stripped.split(/\s+/).filter(w => w.length > 0).length;
+                        if (stripped.length < 5 || wordCount < 2) {
+                            transcript = "";
                         }
 
                         // Send transcript event immediately
@@ -433,25 +517,36 @@ serve(async (req) => {
                         // --- Step 2: Stream Gemini reply (plain Arabic text) ---
                         const streamSystemPrompt = buildStreamingSystemPrompt(scenario, difficulty || "intermediate", reqBody.elapsedSeconds || 0, reqBody.turnCount || 0);
 
-                        const streamRes = await fetch(
-                            `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse`,
-                            {
-                                method: "POST",
-                                headers: {
-                                    Authorization: `Bearer ${token}`,
-                                    "Content-Type": "application/json",
-                                },
-                                body: JSON.stringify({
-                                    systemInstruction: { parts: [{ text: streamSystemPrompt }] },
-                                    contents,
-                                    generationConfig: { temperature: 0.8, maxOutputTokens: 400 },
-                                }),
+                        let streamRes: Response | null = null;
+                        for (let attempt = 0; attempt < 3; attempt++) {
+                            streamRes = await fetch(
+                                `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/gemini-2.5-flash-lite:streamGenerateContent?alt=sse`,
+                                {
+                                    method: "POST",
+                                    headers: {
+                                        Authorization: `Bearer ${token}`,
+                                        "Content-Type": "application/json",
+                                    },
+                                    body: JSON.stringify({
+                                        systemInstruction: { parts: [{ text: streamSystemPrompt }] },
+                                        contents,
+                                        generationConfig: { temperature: 0.8, maxOutputTokens: 1000 },
+                                    }),
+                                }
+                            );
+                            if (streamRes.ok && streamRes.body) break;
+                            if (streamRes.status === 429 || streamRes.status === 503) {
+                                const delay = Math.min(1000 * Math.pow(2, attempt), 8000);
+                                console.warn(`[reply-stream] ${streamRes.status} on attempt ${attempt + 1}, retrying in ${delay}ms...`);
+                                await new Promise(r => setTimeout(r, delay));
+                                continue;
                             }
-                        );
+                            break; // non-retryable error
+                        }
 
-                        if (!streamRes.ok || !streamRes.body) {
-                            const errText = await streamRes.text();
-                            console.error("[reply-stream] Gemini stream error:", streamRes.status, errText);
+                        if (!streamRes || !streamRes.ok || !streamRes.body) {
+                            const errText = streamRes ? await streamRes.text() : "no response";
+                            console.error("[reply-stream] Gemini stream error:", streamRes?.status, errText);
                             throw new Error("Gemini streaming failed");
                         }
 
@@ -487,10 +582,16 @@ serve(async (req) => {
                                         if (jsonStr === "[DONE]") continue;
                                         try {
                                             const chunk = JSON.parse(jsonStr);
-                                            const text = chunk?.candidates?.[0]?.content?.parts?.[0]?.text;
-                                            if (text) {
-                                                fullArabicReply += text;
-                                                sendEvent({ type: "chunk", text });
+                                            const parts = chunk?.candidates?.[0]?.content?.parts;
+                                            if (parts) {
+                                                for (const part of parts) {
+                                                    // Skip thinking/reasoning tokens — only forward actual response text
+                                                    if (part.thought) continue;
+                                                    if (part.text) {
+                                                        fullArabicReply += part.text;
+                                                        sendEvent({ type: "chunk", text: part.text });
+                                                    }
+                                                }
                                             }
                                             // Log if Gemini stopped for any reason
                                             const finish = chunk?.candidates?.[0]?.finishReason;
@@ -514,10 +615,15 @@ serve(async (req) => {
                                             if (jsonStr === "[DONE]") continue;
                                             try {
                                                 const chunk = JSON.parse(jsonStr);
-                                                const text = chunk?.candidates?.[0]?.content?.parts?.[0]?.text;
-                                                if (text) {
-                                                    fullArabicReply += text;
-                                                    sendEvent({ type: "chunk", text });
+                                                const parts = chunk?.candidates?.[0]?.content?.parts;
+                                                if (parts) {
+                                                    for (const part of parts) {
+                                                        if (part.thought) continue;
+                                                        if (part.text) {
+                                                            fullArabicReply += part.text;
+                                                            sendEvent({ type: "chunk", text: part.text });
+                                                        }
+                                                    }
                                                 }
                                             } catch (e) {}
                                         }
@@ -537,9 +643,9 @@ serve(async (req) => {
                             callVertexAI(projectId, token, {
                                 contents: [{
                                     role: "user",
-                                    parts: [{ text: `Given this Arabic message from a conversation:\n"${fullArabicReply}"\n\nProvide:\n1. English translation\n2. A short hint (5-12 words) suggesting what the student should say next\n3. One useful key phrase from the message with its English meaning\n4. Whether this feels like a conversation ending (true/false)\n\nRespond in JSON: {"translation":"...","hint":"...","keyPhrase":{"arabic":"...","english":"..."},"isEnding":false}` }],
+                                    parts: [{ text: `Given this Arabic message from a conversation:\n"${fullArabicReply}"\n\nProvide:\n1. One useful key phrase from the message with its English meaning\n2. Whether this feels like a conversation ending (true/false)\n\nRespond in JSON: {"keyPhrase":{"arabic":"...","english":"..."},"isEnding":false}` }],
                                 }],
-                                generationConfig: { temperature: 0.1, maxOutputTokens: 400, responseMimeType: "application/json" },
+                                generationConfig: { temperature: 0.1, maxOutputTokens: 300, responseMimeType: "application/json" },
                             }, "gemini-2.5-flash-lite"),
 
                             // TTS generation (in parallel)
@@ -566,13 +672,11 @@ serve(async (req) => {
                         ]);
 
                         // Extract metadata
-                        let translation = "", hint = "", keyPhrase = null, isEnding = false;
+                        let keyPhrase = null, isEnding = false;
                         if (metaResult.status === "fulfilled") {
                             try {
-                                const metaText = metaResult.value?.candidates?.[0]?.content?.parts?.[0]?.text;
+                                const metaText = extractResponseText(metaResult.value);
                                 const meta = JSON.parse(cleanJson(metaText));
-                                translation = meta.translation || "";
-                                hint = meta.hint || "";
                                 keyPhrase = meta.keyPhrase || null;
                                 isEnding = meta.isEnding || false;
                             } catch (e) {
@@ -590,8 +694,6 @@ serve(async (req) => {
                         sendEvent({
                             type: "done",
                             message: fullArabicReply,
-                            translation,
-                            hint,
                             isEnding,
                             keyPhrase,
                             audioBase64: ttsAudio,
@@ -600,9 +702,9 @@ serve(async (req) => {
 
                     } catch (err: any) {
                         console.error("[reply-stream] Error:", err);
-                        sendEvent({ type: "error", message: err.message || "Something went wrong" });
+                        try { sendEvent({ type: "error", message: err.message || "Something went wrong" }); } catch {}
                     } finally {
-                        controller.close();
+                        try { controller.close(); } catch {}
                     }
                 },
             });
@@ -652,7 +754,7 @@ Respond ONLY with valid JSON:
                 generationConfig: { temperature: 0.5, maxOutputTokens: 400, responseMimeType: "application/json" },
             }, "gemini-2.5-flash-lite");
 
-            const helpText = helpData?.candidates?.[0]?.content?.parts?.[0]?.text;
+            const helpText = extractResponseText(helpData);
             if (!helpText) throw new Error("No help response");
 
             const parsed = JSON.parse(cleanJson(helpText));
@@ -661,11 +763,77 @@ Respond ONLY with valid JSON:
             });
         }
 
-        // Action: generate-tts
+        // Action: generate-tts (with server-side cache + persistent DB cache)
         if (action === "generate-tts") {
-            const { token } = await getAccessToken();
             const textToSpeak = reqBody.text || "مرحباً";
+            // Optional writeback: persists the generated audio directly onto a
+            // domain row (e.g. word_of_the_day) so subsequent reads of that row
+            // include the audio in the same query — no extra edge round trip.
+            // Only whitelisted tables allowed.
+            const WRITEBACK_WHITELIST = new Set([
+                "word_of_the_day",
+                "word_of_the_day_examples",
+            ]);
+            const writeback = reqBody.writeback as { table?: string; id?: string | number } | undefined;
+            const writebackValid = !!(
+                writeback &&
+                writeback.table &&
+                writeback.id != null &&
+                WRITEBACK_WHITELIST.has(writeback.table)
+            );
 
+            const adminSb = createClient(
+                Deno.env.get("SUPABASE_URL")!,
+                Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+            );
+
+            const persistWriteback = async (audioBase64: string) => {
+                if (!writebackValid) return;
+                const { error: wbErr } = await adminSb
+                    .from(writeback!.table!)
+                    .update({ audio_base64: audioBase64 })
+                    .eq("id", writeback!.id!);
+                if (wbErr) {
+                    console.error(`writeback to ${writeback!.table} failed:`, wbErr);
+                }
+            };
+
+            // L1: Check in-memory cache first (fastest, survives warm instance)
+            const memCached = getTtsCached(textToSpeak);
+            if (memCached) {
+                // Even on a memory hit, make sure writeback happens so the row
+                // gets populated for future cross-device reads.
+                await persistWriteback(memCached);
+                return new Response(JSON.stringify({ audioBase64: memCached }), {
+                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                });
+            }
+
+            // L2: Check persistent Supabase DB cache (shared across all users)
+            const textHash = await hashText(textToSpeak);
+            const { data: dbCached } = await adminSb
+                .from("tts_cache")
+                .select("audio_base64, created_at")
+                .eq("text_hash", textHash)
+                .single();
+
+            if (dbCached) {
+                const age = Date.now() - new Date(dbCached.created_at).getTime();
+                if (age < 24 * 60 * 60 * 1000) {
+                    // Still fresh — populate in-memory cache and return
+                    setTtsCached(textToSpeak, dbCached.audio_base64);
+                    await persistWriteback(dbCached.audio_base64);
+                    return new Response(JSON.stringify({ audioBase64: dbCached.audio_base64 }), {
+                        headers: { ...corsHeaders, "Content-Type": "application/json" },
+                    });
+                } else {
+                    // Expired — delete stale entry
+                    await adminSb.from("tts_cache").delete().eq("text_hash", textHash);
+                }
+            }
+
+            // Cache miss — generate from Google TTS
+            const { token } = await getAccessToken();
             const voicePool = [
                 "ar-XA-Chirp3-HD-Puck",
                 "ar-XA-Chirp3-HD-Aoede",
@@ -695,7 +863,29 @@ Respond ONLY with valid JSON:
             }
 
             const ttsData = await ttsRes.json();
-            return new Response(JSON.stringify({ audioBase64: ttsData.audioContent }), {
+            const audio = ttsData.audioContent;
+
+            if (audio) {
+                // Populate in-memory cache
+                setTtsCached(textToSpeak, audio);
+
+                // Persist to DB — MUST await, otherwise the edge worker
+                // terminates on response and cancels the pending promise.
+                const { error: upsertErr } = await adminSb.from("tts_cache").upsert({
+                    text_hash: textHash,
+                    arabic_text: textToSpeak,
+                    audio_base64: audio,
+                    created_at: new Date().toISOString(),
+                }, { onConflict: "text_hash" });
+                if (upsertErr) {
+                    console.error("tts_cache upsert failed:", upsertErr);
+                }
+
+                // Writeback onto the domain row so future readers get it inline
+                await persistWriteback(audio);
+            }
+
+            return new Response(JSON.stringify({ audioBase64: audio }), {
                 headers: { ...corsHeaders, "Content-Type": "application/json" },
             });
         }
@@ -708,6 +898,30 @@ Respond ONLY with valid JSON:
             });
             const data = await voicesRes.json();
             return new Response(JSON.stringify(data), {
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+        }
+
+        // Action: translate — on-demand translation of Arabic text
+        if (action === "translate") {
+            const { token, projectId } = await getAccessToken();
+            const textToTranslate = reqBody.text || "";
+            if (!textToTranslate.trim()) {
+                return new Response(JSON.stringify({ translation: "" }), {
+                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                });
+            }
+
+            const transData = await callVertexAI(projectId, token, {
+                contents: [{
+                    role: "user",
+                    parts: [{ text: `Translate this Arabic text to English. Return ONLY the English translation, nothing else:\n"${textToTranslate}"` }],
+                }],
+                generationConfig: { temperature: 0.1, maxOutputTokens: 300 },
+            }, "gemini-2.5-flash-lite");
+
+            const translation = extractResponseText(transData) || "";
+            return new Response(JSON.stringify({ translation: translation.replace(/^["']|["']$/g, '').trim() }), {
                 headers: { ...corsHeaders, "Content-Type": "application/json" },
             });
         }

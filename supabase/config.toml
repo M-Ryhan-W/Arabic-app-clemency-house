@@ -1,4 +1,9 @@
 
+[functions.app-metadata]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/app-metadata/index.ts"
+
 [functions.speech-check]
 enabled = true
 verify_jwt = false
