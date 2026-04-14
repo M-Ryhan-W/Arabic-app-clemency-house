@@ -530,7 +530,7 @@ export default function ScenarioChat({
       if (scenarioCountdownRef.current) clearInterval(scenarioCountdownRef.current);
       scenarioCountdownRef.current = setInterval(() => {
         setScenarioRecordingSeconds(prev => {
-          if (prev >= 19) {
+          if (prev >= 20) {
             clearInterval(scenarioCountdownRef.current);
             if (scenarioRecorderRef.current?.state === 'recording') {
               scenarioRecorderRef.current.stop();

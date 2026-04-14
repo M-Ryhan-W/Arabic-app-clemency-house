@@ -5365,7 +5365,7 @@ function App() {
                     {/* Decorative corner accent */}
                     <div className="absolute top-0 right-0 w-32 h-32 opacity-[0.07]" style={{ background: 'radial-gradient(circle at top right, #E09F3E, transparent 70%)' }} />
                     <div className="relative z-10 p-6 flex flex-col h-full min-h-[200px] items-center justify-center text-center">
-                      <h3 className="text-2xl font-heading font-bold mb-6 tracking-tight max-w-[26rem]">{nextLesson.title}</h3>
+                      <h3 className="text-2xl font-heading font-bold mb-10 tracking-tight max-w-[26rem]">{nextLesson.title}</h3>
                       <button
                         className="w-full max-w-[22rem] font-bold py-4 rounded-2xl flex items-center justify-center active:scale-[0.97] transition-all text-sm tracking-wide relative overflow-hidden"
                         style={{ background: 'linear-gradient(135deg, #E09F3E, #D4922F)', color: '#0D1B2A', boxShadow: '0 8px 32px rgba(224,159,62,0.2), inset 0 1px 0 rgba(255,255,255,0.12)' }}

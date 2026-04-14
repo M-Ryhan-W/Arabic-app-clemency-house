@@ -7215,6 +7215,16 @@ button {
   opacity: 1;
 }
 
+/* Prevent browser autofill white boxes on auth inputs */
+.auth-input-group input:-webkit-autofill,
+.auth-input-group input:-webkit-autofill:hover,
+.auth-input-group input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px transparent inset !important;
+  -webkit-text-fill-color: inherit !important;
+  background-color: transparent !important;
+  transition: background-color 5000s ease-in-out 0s;
+}
+
 /* Up Next card shimmer */
 @keyframes upnext-shimmer {
   0% { background-position: -200% 0; }
