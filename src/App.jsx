@@ -33,6 +33,34 @@ const initStatusBar = async () => {
 // Call on app start
 initStatusBar();
 
+// ===== UK TIMEZONE HELPERS =====
+// All "daily" rotations and completion checks are anchored to Europe/London midnight,
+// so BST vs GMT never causes 1 AM drift.
+const UK_TZ = 'Europe/London';
+
+function getUkDateString(date = new Date()) {
+  // Returns YYYY-MM-DD for the given instant in UK local time.
+  return new Intl.DateTimeFormat('en-CA', { timeZone: UK_TZ }).format(date);
+}
+
+function getUkDaysSince(startIso) {
+  const startStr = getUkDateString(new Date(startIso));
+  const todayStr = getUkDateString();
+  const [y1, m1, d1] = startStr.split('-').map(Number);
+  const [y2, m2, d2] = todayStr.split('-').map(Number);
+  return Math.floor((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
+}
+
+function getUkMidnightUtcIso(date = new Date()) {
+  // Returns the UTC ISO string representing UK-local midnight of the given date's UK day.
+  const [y, m, d] = getUkDateString(date).split('-').map(Number);
+  const guess = new Date(Date.UTC(y, m - 1, d, 0, 0, 0));
+  const ukHour = Number(new Intl.DateTimeFormat('en-GB', {
+    timeZone: UK_TZ, hour: '2-digit', hour12: false
+  }).format(guess));
+  return new Date(guess.getTime() - ukHour * 3600000).toISOString();
+}
+
 // ===== SOUND SYSTEM — Layered Feedback =====
 
 // Shared AudioContext — reuse to avoid Android throttling
@@ -581,7 +609,6 @@ function App() {
       try { localStorage.setItem(TTS_PERSIST_KEY, JSON.stringify({ [text]: { a: audioBase64, t: Date.now() } })); } catch {}
     }
   };
-  const aiHelperCache = useRef(new Map()); // Map<blockId, { translation?: string, vocab?: string }>
 
   // AUTH STATE
   const [user, setUser] = useState(null);
@@ -592,10 +619,14 @@ function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [authForgotMode, setAuthForgotMode] = useState(false);
   const [resetSent, setResetSent] = useState(false);
+  const [isPasswordRecovery, setIsPasswordRecovery] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
+  const [recoverySuccess, setRecoverySuccess] = useState(false);
 
   async function upsertTodayDailyStats(patch) {
     if (!user) return { error: null };
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getUkDateString();
     return supabase.from('user_daily_stats').upsert({
       user_id: user.id,
       date: today,
@@ -622,7 +653,7 @@ function App() {
     if (!user) return;
     try { localStorage.removeItem('picture_completed_date'); } catch {}
     const fetchDailyStats = async () => {
-      const today = new Date().toISOString().slice(0, 10);
+      const today = getUkDateString();
       const { data, error } = await supabase.from('user_daily_stats')
         .select('*')
         .eq('user_id', user.id)
@@ -671,7 +702,7 @@ function App() {
         // Sync to cloud every 60s
         if (updated % 60 === 0) {
           const mins = Math.floor(updated / 60);
-          const today = new Date().toISOString().slice(0, 10);
+          const today = getUkDateString();
           supabase.from('user_daily_stats').update({ total_minutes_spent: mins })
             .eq('user_id', user.id).eq('date', today)
             .then(({ error }) => { if (error) console.error('user_daily_stats sync failed:', JSON.stringify(error)); });
@@ -691,6 +722,7 @@ function App() {
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [showSignOutConfirm, setShowSignOutConfirm] = useState(false);
   const [showQuitQuizConfirm, setShowQuitQuizConfirm] = useState(false);
+  const [showQuitStoryConfirm, setShowQuitStoryConfirm] = useState(false);
 
   // EXIT BOTTOM SHEET STATE
   const [showExitSheet, setShowExitSheet] = useState(false);
@@ -871,7 +903,7 @@ function App() {
   const [pictureCheckingAnswer, setPictureCheckingAnswer] = useState(false);
   const [pictureRecordingTime, setPictureRecordingTime] = useState(0);
   const pictureTimerRef = useRef(null);
-  const PICTURE_MAX_RECORD_SECONDS = 120;
+  const PICTURE_MAX_RECORD_SECONDS = 90;
 
   // AI Feedback state
   const [aiFeedback, setAiFeedback] = useState(null);
@@ -901,27 +933,24 @@ function App() {
     const activeSet = new Set(activeDatesHistory);
     lessonProgress.forEach(lp => {
       if (lp.completed_at) {
-        activeSet.add(new Date(lp.completed_at).toISOString().split('T')[0]);
+        activeSet.add(getUkDateString(new Date(lp.completed_at)));
       }
     });
     speakingLessonProgress.forEach(sp => {
       if (sp.completed_at) {
-        activeSet.add(new Date(sp.completed_at).toISOString().split('T')[0]);
+        activeSet.add(getUkDateString(new Date(sp.completed_at)));
       }
     });
 
-    const today = new Date();
-    const todayStr = today.toISOString().split('T')[0];
-    const yesterday = new Date(today);
-    yesterday.setDate(today.getDate() - 1);
-    const yesterdayStr = yesterday.toISOString().split('T')[0];
+    const todayStr = getUkDateString();
+    const [ty, tm, td] = todayStr.split('-').map(Number);
+    const todayUtcAnchor = Date.UTC(ty, tm - 1, td);
+    const yesterdayStr = getUkDateString(new Date(todayUtcAnchor - 86400000));
 
     let current = 0;
     const startOffset = activeSet.has(todayStr) ? 0 : (activeSet.has(yesterdayStr) ? 1 : 0);
     for (let i = startOffset; i < 365; i++) {
-      const d = new Date(today);
-      d.setDate(today.getDate() - i);
-      const dateStr = d.toISOString().split('T')[0];
+      const dateStr = getUkDateString(new Date(todayUtcAnchor - i * 86400000));
       if (activeSet.has(dateStr)) {
         current++;
       } else {
@@ -957,16 +986,6 @@ function App() {
   }, [activeDatesHistory, lessonProgress, speakingLessonProgress]);
 
   
-
-  // AI HELPER STATE (FAB + slide-up sheet)
-  const [aiSheetOpen, setAiSheetOpen] = useState(false);
-  const [aiSheetBlock, setAiSheetBlock] = useState(null); // the block being explored
-  const [aiSheetView, setAiSheetView] = useState("menu"); // "menu" | "translate" | "vocab" | "loading"
-  const [aiVocabResult, setAiVocabResult] = useState("");
-  const [aiTranslationResult, setAiTranslationResult] = useState("");
-  const aiSheetRef = useRef(null);
-  const aiOverlayRef = useRef(null);
-  const aiDragRef = useRef({ startY: 0, currentY: 0, dragging: false });
 
   // ---------- TTS (Web Speech API) ----------
 
@@ -1083,114 +1102,6 @@ function App() {
 
   const speakArabic = (text) => speakWithTTS(text, 'ar-SA', 0.85);
   const speakEnglish = (text) => speakWithTTS(text, 'en-US', 0.95);
-
-  // ---------- AI HELPER (FAB + Sheet) ----------
-
-  const openAiSheet = (block) => {
-    triggerHaptic();
-    setAiSheetBlock(block);
-    setAiSheetView("menu");
-    setAiVocabResult("");
-    setAiSheetOpen(true);
-  };
-
-  const closeAiSheet = () => {
-    triggerHaptic();
-    setAiSheetOpen(false);
-    setAiSheetBlock(null);
-    setAiSheetView("menu");
-    setAiVocabResult("");
-    setAiTranslationResult("");
-  };
-
-  const showTranslation = async () => {
-    if (!aiSheetBlock) return;
-    triggerHaptic();
-
-    // Check cache first
-    const cached = aiHelperCache.current.get(aiSheetBlock.id);
-    if (cached?.translation) {
-      setAiTranslationResult(cached.translation);
-      setAiSheetView("translate");
-      return;
-    }
-
-    // If text_en exists, still cache it for consistency
-    if (aiSheetBlock.text_en) {
-      const current = aiHelperCache.current.get(aiSheetBlock.id) || {};
-      aiHelperCache.current.set(aiSheetBlock.id, { ...current, translation: aiSheetBlock.text_en });
-      setAiTranslationResult(aiSheetBlock.text_en);
-      setAiSheetView("translate");
-      return;
-    }
-
-    setAiSheetView("loading");
-    try {
-      const question = `Translate the following Arabic text to English. Give ONLY the translation, nothing else. No commentary, no greetings.\n\nArabic: ${aiSheetBlock.text_ar}`;
-      const { data } = await supabase.functions.invoke("lesson-ai-helper", {
-        body: {
-          question,
-          lessonTitle: activeLesson?.title || "",
-          lessonBlocks: [{ text_ar: aiSheetBlock.text_ar, block_type: aiSheetBlock.block_type }],
-          vocabList: [],
-          grammarNotes: []
-        }
-      });
-      const answer = data?.answer || "Translation unavailable.";
-
-      // Cache user result
-      const current = aiHelperCache.current.get(aiSheetBlock.id) || {};
-      aiHelperCache.current.set(aiSheetBlock.id, { ...current, translation: answer });
-
-      setAiTranslationResult(answer);
-      setAiSheetView("translate");
-    } catch (err) {
-      console.error("AI translate error:", err);
-      setAiTranslationResult("Something went wrong. Try again.");
-      setAiSheetView("translate");
-    }
-  };
-
-  const askAiKeyVocab = async () => {
-    if (!aiSheetBlock) return;
-    triggerHaptic();
-
-    // Check cache
-    const cached = aiHelperCache.current.get(aiSheetBlock.id);
-    if (cached?.vocab) {
-      setAiVocabResult(cached.vocab);
-      setAiSheetView("vocab");
-      return;
-    }
-
-    setAiSheetView("loading");
-    try {
-      const question = `From this Arabic text, pick only the 2-3 hardest or most useful words/phrases for a learner. For each, give:\n- The Arabic word\n- Transliteration\n- Brief English meaning (one line max)\n\nDo NOT add any encouragement, greetings, or filler. Just the words.\n\nText: ${aiSheetBlock.text_ar}`;
-
-      const { data } = await supabase.functions.invoke("lesson-ai-helper", {
-        body: {
-          question,
-          lessonTitle: activeLesson?.title || "",
-          lessonBlocks: [{ text_ar: aiSheetBlock.text_ar, text_en: aiSheetBlock.text_en || "", block_type: aiSheetBlock.block_type }],
-          vocabList: [],
-          grammarNotes: []
-        }
-      });
-
-      const answer = data?.answer || "Could not get a response.";
-
-      // Cache result
-      const current = aiHelperCache.current.get(aiSheetBlock.id) || {};
-      aiHelperCache.current.set(aiSheetBlock.id, { ...current, vocab: answer });
-
-      setAiVocabResult(answer);
-      setAiSheetView("vocab");
-    } catch (err) {
-      console.error("AI vocab error:", err);
-      setAiVocabResult("Something went wrong. Try again.");
-      setAiSheetView("vocab");
-    }
-  };
 
   // ---------- TRANSITION HELPER ----------
 
@@ -1446,7 +1357,10 @@ function App() {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        setIsPasswordRecovery(true);
+      }
       setUser(session?.user ?? null);
     });
 
@@ -1900,7 +1814,7 @@ function App() {
     triggerHaptic();
     setAuthError("");
 
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email: authEmail,
       password: authPassword,
     });
@@ -1908,9 +1822,22 @@ function App() {
     if (error) {
       console.error('signUp failed:', JSON.stringify(error));
       setAuthError(error.message);
-    } else {
-      setAuthError("Check your email to confirm your account.");
+      return;
     }
+
+    // Detect "email already registered" — when confirmations are off, Supabase returns
+    // a user with no identities instead of throwing an error.
+    if (data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+      setAuthError("An account with this email already exists. Please sign in.");
+      return;
+    }
+
+    // Fire welcome email (non-blocking — don't hold up the signup UX if it fails)
+    supabase.functions.invoke('send-email', {
+      body: { type: 'welcome', to: authEmail, data: { email: authEmail } }
+    }).then(({ error: emailErr }) => {
+      if (emailErr) console.error('Welcome email failed:', JSON.stringify(emailErr));
+    });
   }
 
   async function handleSignIn(e) {
@@ -1939,7 +1866,9 @@ function App() {
       setAuthError("Please enter your email address first.");
       return;
     }
-    const { error } = await supabase.auth.resetPasswordForEmail(authEmail);
+    const { error } = await supabase.auth.resetPasswordForEmail(authEmail, {
+      redirectTo: `${window.location.origin}/`,
+    });
     if (error) {
       console.error('resetPasswordForEmail failed:', JSON.stringify(error));
       setAuthError(error.message);
@@ -1947,6 +1876,36 @@ function App() {
       setResetSent(true);
       setAuthError("");
     }
+  }
+
+  async function handleSetNewPassword(e) {
+    if (e) e.preventDefault();
+    triggerHaptic();
+    setAuthError("");
+
+    if (!newPassword || newPassword.length < 6) {
+      setAuthError("Password must be at least 6 characters.");
+      return;
+    }
+    if (newPassword !== newPasswordConfirm) {
+      setAuthError("Passwords don't match.");
+      return;
+    }
+
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) {
+      console.error('updateUser failed:', JSON.stringify(error));
+      setAuthError(error.message);
+      return;
+    }
+
+    setRecoverySuccess(true);
+    setNewPassword("");
+    setNewPasswordConfirm("");
+    setTimeout(() => {
+      setIsPasswordRecovery(false);
+      setRecoverySuccess(false);
+    }, 1800);
   }
 
   async function handleSignOut() {
@@ -2213,7 +2172,6 @@ function App() {
     setDialogueFinished(false);
     setShowDialogueReview(false);
     blockRefs.current = {};
-    aiHelperCache.current.clear();
   }
 
   function loadLessons(stageId) {
@@ -2525,15 +2483,13 @@ function App() {
         setDailyExercises(data);
       }
 
-      // Check which exercises user already completed today
+      // Check which exercises user already completed today (UK time)
       if (user) {
-        const todayStart = new Date();
-        todayStart.setHours(0, 0, 0, 0);
         const { data: myPosts } = await supabase
           .from("community_posts")
           .select("activity_type, prompt_text")
           .eq("user_id", user.id)
-          .gte("created_at", todayStart.toISOString());
+          .gte("created_at", getUkMidnightUtcIso());
 
         if (myPosts) {
           const counts = { read_aloud: 0, translate: 0, daily_question: 0 };
@@ -3275,10 +3231,8 @@ function App() {
     setWotdExampleIndex(0);
 
     try {
-      // Calculate which word to show based on days since start date
-      const startDate = new Date('2026-02-05T00:00:00Z');
-      const today = new Date();
-      const daysDiff = Math.floor((today - startDate) / (1000 * 60 * 60 * 24));
+      // Calculate which word to show based on UK days since start date
+      const daysDiff = getUkDaysSince('2026-02-05T00:00:00Z');
       const wordOrderIndex = (daysDiff % 100) + 1; // Cycles through 1-100
 
       // Fetch today's word
@@ -3411,9 +3365,7 @@ function App() {
         .from("picture_describe_lessons")
         .select("*", { count: "exact", head: true });
       const totalLessons = count || 1;
-      const startDate = new Date('2026-02-05T00:00:00Z');
-      const today = new Date();
-      const daysDiff = Math.floor((today - startDate) / (1000 * 60 * 60 * 24));
+      const daysDiff = getUkDaysSince('2026-02-05T00:00:00Z');
       const lessonOrderIndex = (daysDiff % totalLessons) + 1;
       const { data: lesson } = await supabase
         .from("picture_describe_lessons")
@@ -3436,10 +3388,8 @@ function App() {
 
       const totalLessons = count || 1;
 
-      // Calculate which lesson to show today (same approach as WOTD)
-      const startDate = new Date('2026-02-05T00:00:00Z');
-      const today = new Date();
-      const daysDiff = Math.floor((today - startDate) / (1000 * 60 * 60 * 24));
+      // Calculate which lesson to show today (UK time)
+      const daysDiff = getUkDaysSince('2026-02-05T00:00:00Z');
       const lessonOrderIndex = (daysDiff % totalLessons) + 1;
 
       // Fetch today's lesson
@@ -4949,6 +4899,90 @@ function App() {
     );
   }
 
+  // ---------- PASSWORD RECOVERY SCREEN ----------
+
+  if (isPasswordRecovery) {
+    return (
+      <div className="h-[100dvh] bg-background text-foreground flex flex-col font-sans relative overflow-hidden">
+        <div className="noise-overlay" />
+        <div className="absolute top-[8%] right-[-15%] auth-watermark" style={{ fontSize: '12rem', fontFamily: "'Amiri', serif", color: 'rgba(224,159,62,0.05)', lineHeight: 1 }}>عربي</div>
+
+        <div className="flex-1 flex flex-col justify-center px-6 py-12 relative z-10 max-w-md mx-auto w-full">
+          <div className="text-center mb-8 auth-fade-up">
+            <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl mb-4" style={{ background: 'linear-gradient(135deg, rgba(224,159,62,0.15), rgba(224,159,62,0.05))', border: '1px solid rgba(224,159,62,0.2)' }}>
+              <Icon icon="solar:lock-password-bold" className="text-2xl" style={{ color: '#E09F3E' }} />
+            </div>
+            <h1 className="text-2xl font-bold tracking-tight" style={{ fontFamily: "var(--font-sans)" }}>Set a new password</h1>
+            <p className="text-muted-foreground/70 text-xs mt-2 tracking-wide">Choose a strong password to finish resetting</p>
+          </div>
+
+          <form onSubmit={handleSetNewPassword} className="space-y-3">
+            <div className="auth-input-group auth-fade-up auth-fade-up-delay-2">
+              <div className="relative group flex items-center rounded-2xl border border-border/20 bg-transparent focus-within:border-primary/40 transition-all duration-300">
+                <div className="pl-4 text-muted-foreground/40 group-focus-within:text-primary transition-colors duration-300 flex-shrink-0">
+                  <Icon icon="solar:lock-password-bold" className="text-[15px]" />
+                </div>
+                <input
+                  type={showPassword ? "text" : "password"}
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  required
+                  className="w-full bg-transparent py-3.5 pl-3 pr-2 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide text-white/90"
+                  placeholder="New password"
+                />
+                <button type="button" className="pr-4 pl-2 text-muted-foreground/40 active:text-primary transition-colors flex-shrink-0" onClick={() => setShowPassword(!showPassword)} tabIndex={-1}>
+                  <Icon icon={showPassword ? "solar:eye-bold" : "solar:eye-closed-bold"} className="text-[15px]" />
+                </button>
+              </div>
+            </div>
+
+            <div className="auth-input-group auth-fade-up auth-fade-up-delay-3">
+              <div className="relative group flex items-center rounded-2xl border border-border/20 bg-transparent focus-within:border-primary/40 transition-all duration-300">
+                <div className="pl-4 text-muted-foreground/40 group-focus-within:text-primary transition-colors duration-300 flex-shrink-0">
+                  <Icon icon="solar:lock-password-bold" className="text-[15px]" />
+                </div>
+                <input
+                  type={showPassword ? "text" : "password"}
+                  value={newPasswordConfirm}
+                  onChange={(e) => setNewPasswordConfirm(e.target.value)}
+                  required
+                  className="w-full bg-transparent py-3.5 pl-3 pr-4 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide text-white/90"
+                  placeholder="Confirm new password"
+                />
+              </div>
+            </div>
+
+            {authError && (
+              <div className="bg-destructive/8 border border-destructive/15 text-destructive text-xs font-semibold p-3 rounded-xl flex items-center justify-center gap-2 text-center backdrop-blur-sm">
+                <Icon icon="solar:danger-bold" className="text-base flex-shrink-0" />
+                <span>{authError}</span>
+              </div>
+            )}
+
+            {recoverySuccess && (
+              <div className="bg-green/8 border border-green/15 text-green text-xs font-semibold p-3 rounded-xl flex items-center justify-center gap-2 text-center backdrop-blur-sm">
+                <Icon icon="solar:check-circle-bold" className="text-base flex-shrink-0" />
+                <span>Password updated! Signing you in...</span>
+              </div>
+            )}
+
+            <div className="auth-fade-up auth-fade-up-delay-4">
+              <button
+                type="submit"
+                disabled={recoverySuccess}
+                className="w-full font-bold py-4 rounded-2xl flex items-center justify-center gap-2.5 active:scale-[0.97] transition-all text-sm tracking-wide relative overflow-hidden group disabled:opacity-60"
+                style={{ background: 'linear-gradient(135deg, #E09F3E, #D4922F)', color: '#0D1B2A', boxShadow: '0 8px 32px rgba(224,159,62,0.25), inset 0 1px 0 rgba(255,255,255,0.15)' }}
+              >
+                <Icon icon="solar:check-circle-bold" className="text-base relative z-10" />
+                <span className="relative z-10">Update Password</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   // ---------- LOGIN LANDING SCREEN ----------
 
   if (!user) {
@@ -5020,7 +5054,7 @@ function App() {
                   value={authEmail}
                   onChange={(e) => setAuthEmail(e.target.value)}
                   required
-                  className="w-full bg-transparent py-3.5 pl-3 pr-4 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide"
+                  className="w-full bg-transparent py-3.5 pl-3 pr-4 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide text-white/90"
                   placeholder="your@email.com"
                 />
               </div>
@@ -5040,7 +5074,7 @@ function App() {
                   value={authPassword}
                   onChange={(e) => setAuthPassword(e.target.value)}
                   required={!authForgotMode}
-                  className="w-full bg-transparent py-3.5 pl-3 pr-2 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide"
+                  className="w-full bg-transparent py-3.5 pl-3 pr-2 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide text-white/90"
                   placeholder="••••••••"
                   tabIndex={authForgotMode ? -1 : 0}
                 />
@@ -5151,14 +5185,13 @@ function App() {
 
   // ---------- STREAKS PAGE ----------
   if (showStreaksPage) {
-    // Generate last 30 days
-    const today = new Date();
-    const todayStr = today.toISOString().split('T')[0];
+    // Generate last 30 days (anchored to UK time)
+    const todayStr = getUkDateString();
+    const [ty, tm, td] = todayStr.split('-').map(Number);
+    const todayUtcAnchor = Date.UTC(ty, tm - 1, td);
     const daysInMonth = 30;
     const calendarDays = Array.from({ length: daysInMonth }, (_, i) => {
-      const d = new Date(today);
-      d.setDate(today.getDate() - (daysInMonth - 1 - i));
-      return d;
+      return new Date(todayUtcAnchor - (daysInMonth - 1 - i) * 86400000);
     });
 
     return (
@@ -5218,7 +5251,7 @@ function App() {
             <h3 className="font-heading text-lg font-bold mb-4">Last 30 Days</h3>
             <div className="grid grid-cols-7 gap-2">
               {calendarDays.map((d, i) => {
-                const dateStr = d.toISOString().split('T')[0];
+                const dateStr = getUkDateString(d);
                 const isToday = dateStr === todayStr;
                 const isActive = activeDaysSet.has(dateStr);
                 return (
@@ -5359,7 +5392,7 @@ function App() {
                           onClick={() => {
                             triggerHaptic();
                             setDailyGoalMinutes(mins);
-                            const today = new Date().toISOString().slice(0, 10);
+                            const today = getUkDateString();
                             supabase.from('user_daily_stats').update({ daily_goal_minutes: mins })
                               .eq('user_id', user.id).eq('date', today)
                               .then(({ error }) => { if (error) console.error('Error updating daily goal in DB', error) });
@@ -9149,6 +9182,15 @@ function App() {
       <div className={`explorer-shell ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
         <div className="texture-overlay" />
         <main className="app-main lesson-route-main" style={{ position: 'relative', zIndex: 10 }}>
+          {lessonPhase === "lesson" && activeLesson.lesson_format === "blocks" && (
+            <button
+              className="story-close-btn"
+              onClick={() => { triggerHaptic(); setShowQuitStoryConfirm(true); }}
+              aria-label="Close story"
+            >
+              <Icon icon="solar:close-circle-bold" className="text-2xl" />
+            </button>
+          )}
           {lessonPhase === "lesson" && (
             <div className="lesson-content">
               {activeLesson.audio_url && (
@@ -9313,9 +9355,6 @@ function App() {
                                         }
                                       }}
                                     >
-                                      {/* Verse marker */}
-                                      <span className="verse-marker">{idx + 1}</span>
-
                                       {/* Audio indicator on the left */}
                                       <div className="paragraph-audio-indicator">
                                         {isPlaying ? (
@@ -9343,15 +9382,6 @@ function App() {
                                         )}
                                       </div>
                                     </div>
-                                    <button
-                                      className="ai-block-trigger"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        openAiSheet(b);
-                                      }}
-                                    >
-                                      <Icon icon="solar:magic-stick-3-bold" width="14" height="14" />
-                                    </button>
                                   </div>
                                 );
                               })}
@@ -9494,130 +9524,6 @@ function App() {
             </div >
           )
           }
-
-          {/* AI HELPER SLIDE-UP SHEET */}
-          {aiSheetOpen && aiSheetBlock && (
-            <div className="ai-sheet-overlay" ref={aiOverlayRef} onClick={closeAiSheet}>
-              <div
-                ref={aiSheetRef}
-                className="ai-sheet"
-                onClick={(e) => e.stopPropagation()}
-                onTouchStart={(e) => {
-                  aiDragRef.current.startY = e.touches[0].clientY;
-                  aiDragRef.current.dragging = true;
-                  if (aiSheetRef.current) aiSheetRef.current.style.transition = 'none';
-                  if (aiOverlayRef.current) aiOverlayRef.current.style.transition = 'none';
-                }}
-                onTouchMove={(e) => {
-                  if (!aiDragRef.current.dragging) return;
-                  const dy = e.touches[0].clientY - aiDragRef.current.startY;
-                  if (dy < 0) return; // only allow downward drag
-                  aiDragRef.current.currentY = dy;
-
-                  if (aiSheetRef.current) aiSheetRef.current.style.transform = `translateY(${dy}px)`;
-
-                  // Fade overlay based on drag distance (max ~300px drag)
-                  if (aiOverlayRef.current) {
-                    const progress = Math.min(dy / 300, 1);
-                    const opacity = 0.55 * (1 - progress);
-                    aiOverlayRef.current.style.backgroundColor = `rgba(0, 0, 0, ${opacity})`;
-                  }
-                }}
-                onTouchEnd={() => {
-                  if (!aiDragRef.current.dragging) return;
-                  aiDragRef.current.dragging = false;
-                  const dy = aiDragRef.current.currentY;
-
-                  if (dy > 120) {
-                    // Dismiss — animate out
-                    if (aiSheetRef.current) {
-                      aiSheetRef.current.style.transition = 'transform 0.25s cubic-bezier(0.2, 0, 0, 1)';
-                      aiSheetRef.current.style.transform = 'translateY(100%)';
-                    }
-                    if (aiOverlayRef.current) {
-                      aiOverlayRef.current.style.transition = 'background-color 0.25s ease';
-                      aiOverlayRef.current.style.backgroundColor = 'rgba(0,0,0,0)';
-                    }
-                    setTimeout(() => closeAiSheet(), 250);
-                  } else {
-                    // Snap back
-                    if (aiSheetRef.current) {
-                      aiSheetRef.current.style.transition = 'transform 0.2s cubic-bezier(0.2, 0, 0, 1)';
-                      aiSheetRef.current.style.transform = 'translateY(0)';
-                    }
-                    if (aiOverlayRef.current) {
-                      aiOverlayRef.current.style.transition = 'background-color 0.2s ease';
-                      aiOverlayRef.current.style.backgroundColor = 'rgba(0,0,0,0.55)';
-                    }
-                  }
-                  aiDragRef.current.currentY = 0;
-                }}
-              >
-                {/* Close button */}
-                <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '0.75rem 1rem 0' }}>
-                  <button
-                    onClick={closeAiSheet}
-                    style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: '50%', width: '32px', height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: 'var(--foreground)' }}
-                  >
-                    ✕
-                  </button>
-                </div>
-
-                {/* Content — centered */}
-                <div className="ai-sheet-content">
-                  {/* The Arabic text */}
-                  <div className="ai-sheet-arabic-block">
-                    <p className="ai-sheet-arabic" dir="rtl">{aiSheetBlock.text_ar}</p>
-                  </div>
-
-                  {/* Menu: Translate / Key Vocab */}
-                  {aiSheetView === "menu" && (
-                    <div className="ai-sheet-actions">
-                      <button className="ai-sheet-action-btn" onClick={showTranslation}>
-                        Translate
-                      </button>
-                      <button className="ai-sheet-action-btn ai-sheet-action-vocab" onClick={askAiKeyVocab}>
-                        Key Vocab
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Translation view */}
-                  {aiSheetView === "translate" && (
-                    <div className="ai-sheet-result">
-                      <p className="ai-sheet-translation">
-                        {aiTranslationResult}
-                      </p>
-                      <button className="ai-sheet-back" onClick={() => { triggerHaptic(); setAiSheetView("menu"); }}>
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
-                        Back
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Loading */}
-                  {aiSheetView === "loading" && (
-                    <div className="ai-sheet-loading">
-                      <span className="typing-dot"></span>
-                      <span className="typing-dot"></span>
-                      <span className="typing-dot"></span>
-                    </div>
-                  )}
-
-                  {/* Key Vocab result */}
-                  {aiSheetView === "vocab" && (
-                    <div className="ai-sheet-result">
-                      <p className="ai-sheet-vocab-text">{aiVocabResult}</p>
-                      <button className="ai-sheet-back" onClick={() => { triggerHaptic(); setAiSheetView("menu"); setAiVocabResult(""); }}>
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
-                        Back
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
 
           {/* PHASE: TRANSITION TO GRAMMAR */}
           {
@@ -10185,6 +10091,32 @@ function App() {
               </div>
             )
           }
+
+          {/* Quit Story Confirmation Modal */}
+          {showQuitStoryConfirm && (
+            <div className="modal-overlay">
+              <div className="modal-content">
+                <h3 className="modal-title">Leave Story?</h3>
+                <p className="text-muted">Are you sure you want to return to home? Your progress in this story will be lost.</p>
+                <div className="modal-actions">
+                  <button className="btn-outline" style={{ flex: 1 }} onClick={() => { triggerHaptic(); setShowQuitStoryConfirm(false); }}>
+                    Stay
+                  </button>
+                  <button
+                    className="btn-primary"
+                    style={{ flex: 1, backgroundColor: "var(--red)", boxShadow: "0 4px 0 var(--red-dark)" }}
+                    onClick={() => {
+                      triggerHaptic();
+                      setShowQuitStoryConfirm(false);
+                      backToLessons();
+                    }}
+                  >
+                    Leave
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Global Transition Overlay */}
           {

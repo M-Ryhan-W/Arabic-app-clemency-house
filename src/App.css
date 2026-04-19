@@ -1144,6 +1144,26 @@ button {
   padding: 0.25rem 0 0.5rem;
 }
 
+.story-close-btn {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  left: 14px;
+  z-index: 200;
+  background: none;
+  border: none;
+  color: var(--muted-foreground);
+  padding: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, transform 0.1s;
+}
+.story-close-btn:active {
+  color: var(--foreground);
+  transform: scale(0.92);
+}
+
 .scene-ornament {
   display: flex;
   align-items: center;

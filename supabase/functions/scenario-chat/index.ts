@@ -222,23 +222,6 @@ function getTodayScenario(): typeof SCENARIOS[0] {
     return SCENARIOS[index];
 }
 
-function buildSystemPrompt(scenario: typeof SCENARIOS[0], difficulty: string, elapsedTimeSec: number = 0, turnCount: number = 0): string {
-    const time = elapsedTimeSec > 200 ? " WRAP UP NOW — set isEnding=true." : "";
-    const turn = turnCount < 6 ? "Keep going, don't end yet." : "May wrap up naturally.";
-    const diff: any = {
-        easy: "EASY: Very basic Arabic, short sentences, end with yes/no question.",
-        intermediate: "MEDIUM: Simple Fusha, moderate sentences, end with follow-up question.",
-        advanced: "HARD: Natural Fusha, richer vocab, 2-3 sentences max, end with follow-up question."
-    };
-
-    return `Character in Arabic scenario. Stay in character.
-SCENARIO: ${scenario.title} — ${scenario.setting}
-${diff[difficulty] || diff.intermediate}
-Turn ${turnCount}/~8.${turn}${time}
-RULES: Full tashkeel on ALL Arabic. Fusha only. 1-3 sentences. React then ask.
-JSON: {"message":"<Arabic with tashkeel>","isEnding":${turnCount >= 6 ? "true/false" : "false"},"keyPhrase":{"arabic":"...","english":"..."}}`;
-}
-
 function buildStreamingSystemPrompt(scenario: typeof SCENARIOS[0], difficulty: string, elapsedTimeSec: number = 0, turnCount: number = 0): string {
     const time = elapsedTimeSec > 200 ? " Wrap up now." : "";
     const diff: any = {
@@ -268,6 +251,17 @@ function cleanJson(text: string): string {
     }
 
     return cleaned;
+}
+
+// Heuristic end-of-scenario detection. Replaces the per-turn Gemini metadata
+// call with a turn-count cap plus Arabic farewell markers. Key phrases are
+// now extracted once via action=extract-phrases when the scenario ends.
+function detectScenarioEnd(reply: string, turnCount: number): boolean {
+    if (turnCount >= 7) return true;
+    if (turnCount < 4) return false;
+    const stripped = reply.replace(/[\u064B-\u065F\u0670]/g, "");
+    const farewells = ["مع السلامة", "إلى اللقاء", "وداعا", "في أمان الله", "أراك لاحقا"];
+    return farewells.some(f => stripped.includes(f));
 }
 
 // Compress conversation history: summarize old turns, keep last 4 in full
@@ -302,7 +296,7 @@ serve(async (req) => {
         }
 
         // --- Auth & rate limiting for all AI actions ---
-        const aiActions = ["start", "reply", "reply-stream", "help", "generate-tts"];
+        const aiActions = ["start", "reply-stream", "help", "generate-tts", "extract-phrases"];
         if (aiActions.includes(action)) {
             const authResult = await verifyUserAndCheckLimits(req, action);
             if (authResult instanceof Response) return authResult;
@@ -311,111 +305,24 @@ serve(async (req) => {
         // Action: start
         if (action === "start") {
             const scenario = getTodayScenario();
-            const systemPrompt = buildSystemPrompt(scenario, difficulty || "intermediate", reqBody.elapsedSeconds || 0, 0);
+            // Plain-text greeting; key phrases come from action=extract-phrases
+            // at scenario end. Dropping the JSON envelope saves schema tokens
+            // on input and scaffolding on output.
+            const systemPrompt = buildStreamingSystemPrompt(scenario, difficulty || "intermediate", reqBody.elapsedSeconds || 0, 0);
             const { token, projectId } = await getAccessToken();
 
             const geminiData = await callVertexAI(projectId, token, {
                 systemInstruction: { parts: [{ text: systemPrompt }] },
                 contents: [{ role: "user", parts: [{ text: "Start the conversation. Greet me in character." }] }],
-                generationConfig: { temperature: 0.8, maxOutputTokens: 600, responseMimeType: "application/json" },
+                generationConfig: { temperature: 0.8, maxOutputTokens: 300 },
             }, "gemini-2.5-flash-lite");
 
-            const text = extractResponseText(geminiData);
+            const text = (extractResponseText(geminiData) || "").trim();
             if (!text) throw new Error("No response from Gemini");
 
-            const parsed = JSON.parse(cleanJson(text));
-            return new Response(JSON.stringify(parsed), {
+            return new Response(JSON.stringify({ message: text }), {
                 headers: { ...corsHeaders, "Content-Type": "application/json" },
             });
-        }
-
-        // Action: reply
-        if (action === "reply") {
-            const scenario = getTodayScenario();
-            const systemPrompt = buildSystemPrompt(scenario, difficulty || "intermediate", reqBody.elapsedSeconds || 0, reqBody.turnCount || 0);
-            const { token, projectId } = await getAccessToken();
-
-            const contents = [];
-            contents.push({ role: "user", parts: [{ text: "Start the conversation. Greet me in character." }] });
-
-            const compressed = compressHistory(conversationHistory);
-            for (const msg of compressed) {
-                const msgRole = msg.role === "ai" ? "model" : "user";
-                const lastTurn = contents[contents.length - 1];
-                if (lastTurn.role === msgRole) {
-                    lastTurn.parts[0].text += "\n" + msg.text;
-                } else {
-                    contents.push({ role: msgRole, parts: [{ text: msg.text }] });
-                }
-            }
-
-            if (audioBase64) {
-                // Gemini only accepts base MIME types (e.g. "audio/webm"), not codec params
-                const audioMime = (reqBody.mimeType || "audio/webm").split(";")[0].trim();
-                const transcribeData = await callVertexAI(projectId, token, {
-                    contents: [{
-                        role: "user",
-                        parts: [
-                            { inlineData: { mimeType: audioMime, data: audioBase64 } },
-                            { text: 'Transcribe ONLY clearly spoken Arabic words from this audio. Rules: 1) If the audio is silent, has only noise, breathing, or mumbling with no clear words, return {"transcript":""}. 2) Do NOT guess or invent words. Do NOT hallucinate sentences. If you are not confident about what was said, return {"transcript":""}. 3) Only transcribe words you can clearly hear. Return: {"transcript":"<Arabic text>"} or {"transcript":""}' },
-                        ],
-                    }],
-                    generationConfig: { temperature: 0.1, maxOutputTokens: 400, responseMimeType: "application/json" },
-                }, "gemini-2.5-flash-lite");
-
-                const transcribeText = extractResponseText(transcribeData);
-                console.log("Transcription raw:", transcribeText);
-                let transcript = "";
-                try {
-                    const parsed = JSON.parse(cleanJson(transcribeText));
-                    transcript = parsed.transcript || "";
-                } catch {
-                    transcript = transcribeText || "";
-                }
-
-                // Strip diacritics for length check
-                const stripped = transcript.replace(/[\u064B-\u065F\u0670]/g, "").trim();
-                // Allow single-word answers (e.g. نعم, لا, شكراً) — only reject truly empty/noise
-                if (stripped.length < 1) transcript = "";
-
-                if (!transcript || transcript.trim() === "") {
-                    return new Response(JSON.stringify({
-                        transcript: "",
-                        message: "لَمْ أَسْمَعْ شَيْئًا. هَلْ يُمْكِنُكَ تَكْرَارُ ذَلِكَ مِنْ فَضْلِكَ؟",
-                        translation: "I didn't hear anything. Can you repeat that please?",
-                        hint: "Speak clearly into the microphone and try again.",
-                        isEnding: false,
-                        keyPhrase: null,
-                    }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-                }
-
-                const lastTurnRole = contents[contents.length - 1].role;
-                if (lastTurnRole === "user") {
-                    contents[contents.length - 1].parts[0].text += "\n" + transcript;
-                } else {
-                    contents.push({
-                        role: "user",
-                        parts: [{ text: transcript }],
-                    });
-                }
-
-                const replyData = await callVertexAI(projectId, token, {
-                    systemInstruction: { parts: [{ text: systemPrompt }] },
-                    contents,
-                    generationConfig: { temperature: 0.8, maxOutputTokens: 1000, responseMimeType: "application/json" },
-                }, "gemini-2.5-flash-lite");
-
-                const replyText = extractResponseText(replyData);
-                console.log("Reply raw:", replyText);
-                if (!replyText) throw new Error("No response from Gemini");
-
-                const parsed = JSON.parse(cleanJson(replyText));
-                return new Response(JSON.stringify({ ...parsed, transcript }), {
-                    headers: { ...corsHeaders, "Content-Type": "application/json" },
-                });
-            }
-
-            throw new Error("No audio provided");
         }
 
         // Action: reply-stream — SSE streaming version of reply
@@ -464,7 +371,7 @@ serve(async (req) => {
                                 role: "user",
                                 parts: [
                                     { inlineData: { mimeType: audioMime, data: audioBase64 } },
-                                    { text: 'Transcribe ONLY clearly spoken Arabic words from this audio. Rules: 1) If the audio is silent, has only noise, breathing, or mumbling with no clear words, return {"transcript":""}. 2) Do NOT guess or invent words. Do NOT hallucinate sentences. If you are not confident about what was said, return {"transcript":""}. 3) Only transcribe words you can clearly hear. Return: {"transcript":"<Arabic text>"} or {"transcript":""}' },
+                                    { text: 'Transcribe clearly spoken Arabic only. If silent/noisy/unclear, return {"transcript":""}. Do not guess. Return {"transcript":"<Arabic>"}.' },
                                 ],
                             }],
                             generationConfig: { temperature: 0.1, maxOutputTokens: 400, responseMimeType: "application/json" },
@@ -637,65 +544,43 @@ serve(async (req) => {
                             throw new Error("No reply text generated");
                         }
 
-                        // --- Step 3: Parallel metadata extraction + TTS ---
-                        const [metaResult, ttsResult] = await Promise.allSettled([
-                            // Metadata extraction (fast Flash-Lite call)
-                            callVertexAI(projectId, token, {
-                                contents: [{
-                                    role: "user",
-                                    parts: [{ text: `Given this Arabic message from a conversation:\n"${fullArabicReply}"\n\nProvide:\n1. One useful key phrase from the message with its English meaning\n2. Whether this feels like a conversation ending (true/false)\n\nRespond in JSON: {"keyPhrase":{"arabic":"...","english":"..."},"isEnding":false}` }],
-                                }],
-                                generationConfig: { temperature: 0.1, maxOutputTokens: 300, responseMimeType: "application/json" },
-                            }, "gemini-2.5-flash-lite"),
-
-                            // TTS generation (in parallel)
-                            (async () => {
-                                const voicePool = [
-                                    "ar-XA-Chirp3-HD-Puck", "ar-XA-Chirp3-HD-Aoede",
-                                    "ar-XA-Chirp3-HD-Charon", "ar-XA-Chirp3-HD-Kore",
-                                    "ar-XA-Chirp3-HD-Fenrir", "ar-XA-Chirp3-HD-Leda",
-                                ];
-                                const voice = reqBody.voice || voicePool[Math.floor(Math.random() * voicePool.length)];
-                                const ttsRes = await fetch("https://texttospeech.googleapis.com/v1/text:synthesize", {
-                                    method: "POST",
-                                    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-                                    body: JSON.stringify({
-                                        input: { text: fullArabicReply },
-                                        voice: { languageCode: "ar-XA", name: voice },
-                                        audioConfig: { audioEncoding: "MP3" },
-                                    }),
-                                });
-                                if (!ttsRes.ok) return null;
+                        // --- Step 3: TTS generation ---
+                        // Key phrases are now extracted once at scenario end (action=extract-phrases)
+                        // and isEnding is decided by a server-side heuristic, so we no longer make
+                        // a per-turn Gemini metadata call.
+                        const voicePool = [
+                            "ar-XA-Chirp3-HD-Puck", "ar-XA-Chirp3-HD-Aoede",
+                            "ar-XA-Chirp3-HD-Charon", "ar-XA-Chirp3-HD-Kore",
+                            "ar-XA-Chirp3-HD-Fenrir", "ar-XA-Chirp3-HD-Leda",
+                        ];
+                        const voice = reqBody.voice || voicePool[Math.floor(Math.random() * voicePool.length)];
+                        let ttsAudio: string | null = null;
+                        try {
+                            const ttsRes = await fetch("https://texttospeech.googleapis.com/v1/text:synthesize", {
+                                method: "POST",
+                                headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                    input: { text: fullArabicReply },
+                                    voice: { languageCode: "ar-XA", name: voice },
+                                    audioConfig: { audioEncoding: "MP3" },
+                                }),
+                            });
+                            if (ttsRes.ok) {
                                 const ttsData = await ttsRes.json();
-                                return ttsData.audioContent || null;
-                            })(),
-                        ]);
-
-                        // Extract metadata
-                        let keyPhrase = null, isEnding = false;
-                        if (metaResult.status === "fulfilled") {
-                            try {
-                                const metaText = extractResponseText(metaResult.value);
-                                const meta = JSON.parse(cleanJson(metaText));
-                                keyPhrase = meta.keyPhrase || null;
-                                isEnding = meta.isEnding || false;
-                            } catch (e) {
-                                console.error("[reply-stream] Metadata parse error:", e);
+                                ttsAudio = ttsData.audioContent || null;
                             }
+                        } catch (e) {
+                            console.error("[reply-stream] TTS error:", e);
                         }
 
-                        // Extract TTS audio
-                        let ttsAudio = null;
-                        if (ttsResult.status === "fulfilled" && ttsResult.value) {
-                            ttsAudio = ttsResult.value;
-                        }
+                        const isEnding = detectScenarioEnd(fullArabicReply, reqBody.turnCount || 0);
 
                         // Send final done event
                         sendEvent({
                             type: "done",
                             message: fullArabicReply,
                             isEnding,
-                            keyPhrase,
+                            keyPhrase: null,
                             audioBase64: ttsAudio,
                             emptyTranscript: false,
                         });
@@ -720,8 +605,15 @@ serve(async (req) => {
             const diff = reqBody.difficulty || "intermediate";
             const history = conversationHistory || [];
 
-            // Build a brief conversation summary for context
-            const recentTurns = history.slice(-4).map((m: any) => 
+            // Build a brief conversation summary for context.
+            // If the tail of history already equals lastAiMessage, drop it from
+            // recentTurns so we don't send the same character line twice.
+            const tail = history.slice(-4);
+            const tailTrimmed = (tail.length && tail[tail.length - 1]?.role === 'ai'
+                && (tail[tail.length - 1]?.text || '').trim() === lastAiMessage.trim())
+                ? tail.slice(0, -1)
+                : tail;
+            const recentTurns = tailTrimmed.map((m: any) =>
                 `${m.role === 'ai' ? 'Waiter/Character' : 'Student'}: ${m.text}`
             ).join("\n");
 
@@ -745,13 +637,13 @@ Respond ONLY with valid JSON:
 }`;
 
             const helpUserPrompt = recentTurns
-                ? `Here is the recent conversation:\n${recentTurns}\n\nThe character's latest message:\n"${lastAiMessage}"\n\nWhat should the student say next?`
+                ? `Earlier in the conversation:\n${recentTurns}\n\nThe character's latest message:\n"${lastAiMessage}"\n\nWhat should the student say next?`
                 : `The character just said:\n"${lastAiMessage}"\n\nWhat should the student say next?`;
 
             const helpData = await callVertexAI(projectId, token, {
                 systemInstruction: { parts: [{ text: helpSystemInstruction }] },
                 contents: [{ role: "user", parts: [{ text: helpUserPrompt }] }],
-                generationConfig: { temperature: 0.5, maxOutputTokens: 400, responseMimeType: "application/json" },
+                generationConfig: { temperature: 0.5, maxOutputTokens: 300, responseMimeType: "application/json" },
             }, "gemini-2.5-flash-lite");
 
             const helpText = extractResponseText(helpData);
@@ -759,6 +651,46 @@ Respond ONLY with valid JSON:
 
             const parsed = JSON.parse(cleanJson(helpText));
             return new Response(JSON.stringify(parsed), {
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+        }
+
+        // Action: extract-phrases — one Gemini call over the full conversation
+        // to produce the summary screen's key phrases. Replaces per-turn metadata.
+        if (action === "extract-phrases") {
+            const history = conversationHistory || [];
+            if (!history.length) {
+                return new Response(JSON.stringify({ keyPhrases: [] }), {
+                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                });
+            }
+
+            const { token, projectId } = await getAccessToken();
+            const transcript = history
+                .map((m: any) => `${m.role === "ai" ? "Character" : "Student"}: ${m.text}`)
+                .join("\n");
+
+            const prompt = `From this Arabic practice conversation, pick 3-5 of the most useful key phrases from the Character's messages that a learner would want to remember. Keep full tashkeel on the Arabic.\n\n${transcript}\n\nRespond ONLY with JSON: {"keyPhrases":[{"arabic":"<Arabic with tashkeel>","english":"<English meaning>"}]}`;
+
+            const data = await callVertexAI(projectId, token, {
+                contents: [{ role: "user", parts: [{ text: prompt }] }],
+                generationConfig: { temperature: 0.2, maxOutputTokens: 600, responseMimeType: "application/json" },
+            }, "gemini-2.5-flash-lite");
+
+            const text = extractResponseText(data);
+            let keyPhrases: any[] = [];
+            try {
+                const parsed = JSON.parse(cleanJson(text));
+                if (Array.isArray(parsed.keyPhrases)) {
+                    keyPhrases = parsed.keyPhrases
+                        .filter((p: any) => p && p.arabic && p.english)
+                        .slice(0, 5);
+                }
+            } catch (e) {
+                console.error("[extract-phrases] parse error:", e);
+            }
+
+            return new Response(JSON.stringify({ keyPhrases }), {
                 headers: { ...corsHeaders, "Content-Type": "application/json" },
             });
         }
@@ -890,18 +822,6 @@ Respond ONLY with valid JSON:
             });
         }
 
-        // Action: list-voices
-        if (action === "list-voices") {
-            const { token } = await getAccessToken();
-            const voicesRes = await fetch("https://texttospeech.googleapis.com/v1/voices?languageCode=ar", {
-                headers: { "Authorization": `Bearer ${token}` }
-            });
-            const data = await voicesRes.json();
-            return new Response(JSON.stringify(data), {
-                headers: { ...corsHeaders, "Content-Type": "application/json" },
-            });
-        }
-
         // Action: translate — on-demand translation of Arabic text
         if (action === "translate") {
             const { token, projectId } = await getAccessToken();
@@ -917,7 +837,7 @@ Respond ONLY with valid JSON:
                     role: "user",
                     parts: [{ text: `Translate this Arabic text to English. Return ONLY the English translation, nothing else:\n"${textToTranslate}"` }],
                 }],
-                generationConfig: { temperature: 0.1, maxOutputTokens: 300 },
+                generationConfig: { temperature: 0.1, maxOutputTokens: 150 },
             }, "gemini-2.5-flash-lite");
 
             const translation = extractResponseText(transData) || "";

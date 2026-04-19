@@ -355,6 +355,7 @@ export default function ScenarioChat({
     setScenarioLoading(true);
     setScenarioTurnCount(0);
     setScenarioEnded(false);
+    keyPhrasesFetchedRef.current = false;
     scenarioStartTimeRef.current = Date.now();
 
     try {
@@ -733,10 +734,6 @@ export default function ScenarioChat({
             });
             setScenarioTurnCount(prev => prev + 1);
 
-            if (event.keyPhrase) {
-              setScenarioKeyPhrases(prev => prev.length >= 5 ? prev : [...prev, event.keyPhrase]);
-            }
-
             setHelpData(null);
             if (event.audioBase64) {
               try {
@@ -965,6 +962,30 @@ export default function ScenarioChat({
     }
   }, [scenarioMessages, scenarioLoading, displayedStreamText]);
 
+  // When the scenario ends, fetch curated key phrases from the full conversation
+  // in a single call. Replaces the per-turn metadata extraction that used to run
+  // on every reply-stream turn.
+  const keyPhrasesFetchedRef = useRef(false);
+  useEffect(() => {
+    if (!scenarioEnded || keyPhrasesFetchedRef.current) return;
+    keyPhrasesFetchedRef.current = true;
+    const history = (scenarioMessagesRef.current || []).map(m => ({ role: m.role, text: m.text }));
+    if (!history.length) return;
+    (async () => {
+      try {
+        const { data, error } = await supabase.functions.invoke("scenario-chat", {
+          body: { action: "extract-phrases", conversationHistory: history },
+        });
+        if (error) { console.error("extract-phrases failed:", error); return; }
+        const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+        const phrases = Array.isArray(parsed?.keyPhrases) ? parsed.keyPhrases : [];
+        if (phrases.length) setScenarioKeyPhrases(phrases.slice(0, 5));
+      } catch (e) {
+        console.error("extract-phrases exception:", e);
+      }
+    })();
+  }, [scenarioEnded]);
+
   if (scenarioPhase) {
     // DIFFICULTY SELECTION
     if (scenarioPhase === "difficulty") {
@@ -1004,9 +1025,9 @@ export default function ScenarioChat({
             </section>
 
             {/* Difficulty cards */}
-            <section className="space-y-5">
+            <section>
               <h2 className="text-lg font-bold px-1" style={{ fontFamily: "var(--font-heading)" }}>Choose your level</h2>
-              <div className="space-y-3.5">
+              <div className="space-y-3.5 pt-8">
                 {[
                   { key: "easy", icon: "solar:leaf-bold", labelAr: "مبتدئ", label: "Starter", desc: "Simple, slow, everyday phrases", color: "#22c55e", colorRgb: "34,197,94" },
                   { key: "intermediate", icon: "solar:flame-bold", labelAr: "متوسط", label: "Progressing", desc: "More natural, slightly longer responses", color: "#f59e0b", colorRgb: "245,158,11" },
@@ -1032,9 +1053,6 @@ export default function ScenarioChat({
                             <span dir="rtl" className="text-[13px] font-semibold" style={{ fontFamily: "var(--font-arabic)", color: `rgba(${d.colorRgb},0.8)` }}>{d.labelAr}</span>
                           </div>
                           <p className="text-xs text-muted-foreground/55 leading-relaxed">{d.desc}</p>
-                        </div>
-                        <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 mt-1" style={{ background: `rgba(${d.colorRgb},0.08)` }}>
-                          <Icon icon="solar:arrow-right-bold" className="text-base" style={{ color: d.color }} />
                         </div>
                       </div>
                     </div>

@@ -83,8 +83,9 @@ serve(async (req) => {
 
     // Gemini call
     const modelVersion = "gemini-2.5-flash-lite";
-    console.log(`[speech-check] Using model: ${modelVersion}, exerciseType: ${exerciseType}`);
-    
+    const maxOutputTokens = getMaxOutputTokens(exerciseType, wantFeedback);
+    console.log(`[speech-check] Using model: ${modelVersion}, exerciseType: ${exerciseType}, maxOutputTokens: ${maxOutputTokens}`);
+
     const geminiRes = await fetch(
       `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/${modelVersion}:generateContent`,
       {
@@ -102,7 +103,7 @@ serve(async (req) => {
           ],
           generationConfig: {
             temperature: wantFeedback ? 0.3 : 0.1,
-            maxOutputTokens: 2048,
+            maxOutputTokens,
             responseMimeType: "application/json",
           },
         }),
@@ -156,6 +157,21 @@ serve(async (req) => {
     );
   }
 });
+
+// Per-exercise output caps. The old blanket 2048 was massively over-provisioned
+// for small-output exercises (transcribe-only, challenge-check, speak-check),
+// which lets truncated/runaway outputs cost more than they should.
+function getMaxOutputTokens(exerciseType: string, wantFeedback: boolean): number {
+  if (!wantFeedback) return 300; // transcribe-only: {"transcript": "..."}
+  switch (exerciseType) {
+    case "picture-describe": return 1500;
+    case "challenge-check":  return 300;
+    case "speak-check":      return 400;
+    case "reading":
+    case "translate":        return 800;
+    default:                 return 800;
+  }
+}
 
 /* ---------- Prompt Builder ---------- */
 
@@ -214,13 +230,13 @@ RATING: Judge holistically — vocab coverage, grammar, relevance to picture, le
 Be LENIENT with vocab matching — count with/without ال, prefixes (ب،ل،و،ف), plurals, conjugations, synonyms.
 
 Respond with JSON:
-{"language_detected":"arabic","is_arabic":true,"transcript":"<Arabic>","rating":"fair|good|excellent","vocabUsed":<n>,"vocabTotal":${vocabCount},"steps":[
-  2-3 {"type":"segment","snippet":"<Arabic phrase>","analysis":"<direct feedback>","tip":"<or null>","teach":null or {"type":"synonym|phrase|better_way","label":"...","arabic":"...","english":"..."}},
+{"language_detected":"arabic","is_arabic":true,"transcript":"<Arabic>","rating":"fair|good|excellent","steps":[
+  2-3 {"type":"segment","snippet":"<Arabic phrase>","analysis":"<direct feedback>","tip":"<or null>","teach":<omit unless it adds real learning value; when present: {"type":"synonym|phrase|better_way","label":"...","arabic":"...","english":"..."}>},
   2-3 {"type":"correction_challenge","original":"<what student said>","corrected":"<better way to say it>","instruction":"<brief instruction>"} (MANDATORY — ALWAYS give at least 2),
   {"type":"vocab_check","used":[...],"missed":[...],"analysis":"..."},
   1-2 {"type":"improvement","suggestion":"<specific tip>","example":"<Arabic example sentence>"}
 ]}
-Odd segments get teach object, even get null. correction_challenge: pick something the student said and show them a better/more natural way — they will record themselves saying the corrected version.`;
+correction_challenge: pick something the student said and show a better/more natural way — they'll record themselves saying the corrected version.`;
   }
 
   if (exerciseType === "challenge-check") {
@@ -290,14 +306,9 @@ Evaluate:
 Give a score based on meaning accuracy and grammar.`;
   }
 
-  // Default
-  return `${baseInstruction}
-
-EXERCISE: Speaking Practice
-${expectedText ? `Expected text: "${expectedText}"` : ""}
-${vocabList ? `Target vocabulary: ${vocabList.join("، ")}` : ""}
-
-Evaluate their Arabic and provide helpful feedback.`;
+  // All known exerciseTypes are handled above. If an unknown value slips
+  // through, fall back to the base transcribe+feedback instruction.
+  return baseInstruction;
 }
 
 /* ---------- helpers ---------- */
