@@ -5060,7 +5060,7 @@ function App() {
                   value={authEmail}
                   onChange={(e) => setAuthEmail(e.target.value)}
                   required
-                  className="w-full bg-transparent py-3.5 pl-3 pr-4 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide text-white/90"
+                  className="w-full bg-transparent py-3.5 pl-3 pr-4 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide text-white"
                   placeholder="your@email.com"
                 />
               </div>
@@ -5080,7 +5080,7 @@ function App() {
                   value={authPassword}
                   onChange={(e) => setAuthPassword(e.target.value)}
                   required={!authForgotMode}
-                  className="w-full bg-transparent py-3.5 pl-3 pr-2 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide text-white/90"
+                  className="w-full bg-transparent py-3.5 pl-3 pr-2 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide text-white"
                   placeholder="••••••••"
                   tabIndex={authForgotMode ? -1 : 0}
                 />
@@ -5447,9 +5447,10 @@ function App() {
                 {/* Word of the Day */}
                 <div
                   className="relative rounded-2xl overflow-hidden cursor-pointer active:scale-[0.98] transition-all aspect-square"
+                  style={{ background: 'linear-gradient(135deg, #7c2d12, #431407)' }}
                   onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("wotd"); loadWordOfTheDay(); }}
                 >
-                  <img src="/images/wotd.webp" alt="" loading="lazy" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
+                  <img src="/images/wotd.webp" alt="" fetchpriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
                   <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent" />
                   <div className="relative z-10 h-full flex flex-col justify-end p-4">
                     <Icon icon="solar:sun-bold" className="text-amber-400 text-2xl mb-2" />
@@ -6186,7 +6187,7 @@ function App() {
                           communityExerciseRef.current = true;
                         }}
                       >
-                        <img src="/images/daily-question.webp" alt="" loading="lazy" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
+                        <img src="/images/daily-question.webp" alt="" fetchpriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
                         <div className="absolute inset-0 bg-gradient-to-r from-background via-background/85 to-background/20" />
                         <div className="relative z-10 h-full flex flex-col justify-center p-4">
                           <h3 className="text-lg font-extrabold text-foreground tracking-wide uppercase drop-shadow-lg">Daily Question</h3>
@@ -6216,7 +6217,7 @@ function App() {
                           }}
                         >
                           <div className="relative h-[55px] overflow-hidden">
-                            <img src="/images/read-aloud.webp" alt="" loading="lazy" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
+                            <img src="/images/read-aloud.webp" alt="" fetchpriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
                             <div className="absolute inset-0 bg-gradient-to-t from-card to-transparent" />
                           </div>
                           <div className="px-3 pt-2 pb-2.5">
@@ -6243,7 +6244,7 @@ function App() {
                           }}
                         >
                           <div className="relative h-[55px] overflow-hidden">
-                            <img src="/images/translate.webp" alt="" loading="lazy" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
+                            <img src="/images/translate.webp" alt="" fetchpriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
                             <div className="absolute inset-0 bg-gradient-to-t from-card to-transparent" />
                           </div>
                           <div className="px-3 pt-2 pb-2.5">
