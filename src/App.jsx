@@ -878,10 +878,16 @@ function App() {
   const [wotdExampleIndex, setWotdExampleIndex] = useState(0);
   const [loadingWotd, setLoadingWotd] = useState(false);
 
+  const wotdCelebratedRef = useRef(false);
   useEffect(() => {
     if (wotdPhase === "complete") {
-      playCelebrationSound();
-      triggerHeavyHaptic();
+      if (!wotdCelebratedRef.current) {
+        wotdCelebratedRef.current = true;
+        playCelebrationSound();
+        triggerHeavyHaptic();
+      }
+    } else {
+      wotdCelebratedRef.current = false;
     }
   }, [wotdPhase]);
 
@@ -5443,7 +5449,7 @@ function App() {
                   className="relative rounded-2xl overflow-hidden cursor-pointer active:scale-[0.98] transition-all aspect-square"
                   onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("wotd"); loadWordOfTheDay(); }}
                 >
-                  <img src="/images/wotd.png" alt="" className="absolute inset-0 w-full h-full object-cover" />
+                  <img src="/images/wotd.webp" alt="" loading="lazy" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
                   <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent" />
                   <div className="relative z-10 h-full flex flex-col justify-end p-4">
                     <Icon icon="solar:sun-bold" className="text-amber-400 text-2xl mb-2" />
@@ -5578,9 +5584,9 @@ function App() {
                   const stageLessons = allLessons.filter(l => l.stage_id === stage.id);
 
                   // Fallback cover images for stages without a database image
-                  const stageCoverFallbacks = ['/stage-cover-1.png', '/stage-cover-2.png', '/stage-cover-3.png'];
+                  const stageCoverFallbacks = ['/stage-cover-1.webp', '/stage-cover-2.webp', '/stage-cover-3.webp'];
                   const stageCoverImage = stage.cover_image_url || stageCoverFallbacks[stageIndex] || stageCoverFallbacks[0];
-                  const prebookCoverImage = '/foundations-banner.jpg';
+                  const prebookCoverImage = '/foundations-banner.webp';
 
                   // ── PREBOOK STAGE (Essential Arabic) — distinct design ──
                   if (isPrebook) {
@@ -5598,7 +5604,7 @@ function App() {
                           onClick={() => { triggerHaptic(); setExpandedStageId(isExpanded ? null : stage.id); }}
                         >
                           <div className="h-32 w-full overflow-hidden">
-                            <img src={prebookCoverImage} alt={stageTitle} className="w-full h-full object-cover" />
+                            <img src={prebookCoverImage} alt={stageTitle} loading="lazy" decoding="async" className="w-full h-full object-cover" />
                             <div className="absolute inset-0 bg-gradient-to-t from-card via-card/40 to-transparent" />
                           </div>
                           <div className="p-6 bg-card relative">
@@ -6180,7 +6186,7 @@ function App() {
                           communityExerciseRef.current = true;
                         }}
                       >
-                        <img src="/images/daily-question.png" alt="" className="absolute inset-0 w-full h-full object-cover" />
+                        <img src="/images/daily-question.webp" alt="" loading="lazy" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
                         <div className="absolute inset-0 bg-gradient-to-r from-background via-background/85 to-background/20" />
                         <div className="relative z-10 h-full flex flex-col justify-center p-4">
                           <h3 className="text-lg font-extrabold text-foreground tracking-wide uppercase drop-shadow-lg">Daily Question</h3>
@@ -6210,7 +6216,7 @@ function App() {
                           }}
                         >
                           <div className="relative h-[55px] overflow-hidden">
-                            <img src="/images/read-aloud.png" alt="" className="absolute inset-0 w-full h-full object-cover" />
+                            <img src="/images/read-aloud.webp" alt="" loading="lazy" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
                             <div className="absolute inset-0 bg-gradient-to-t from-card to-transparent" />
                           </div>
                           <div className="px-3 pt-2 pb-2.5">
@@ -6237,7 +6243,7 @@ function App() {
                           }}
                         >
                           <div className="relative h-[55px] overflow-hidden">
-                            <img src="/images/translate.png" alt="" className="absolute inset-0 w-full h-full object-cover" />
+                            <img src="/images/translate.webp" alt="" loading="lazy" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
                             <div className="absolute inset-0 bg-gradient-to-t from-card to-transparent" />
                           </div>
                           <div className="px-3 pt-2 pb-2.5">
@@ -7885,7 +7891,7 @@ function App() {
             <div>
               <p className="text-xs text-muted-foreground font-bold uppercase tracking-wider mb-2">English:</p>
               <div className="bg-card rounded-3xl p-6 border-l-4 border-chart-3 border border-border/50">
-                <p className="text-base">{currentExample.example_english}</p>
+                <p className="text-base text-center">{currentExample.example_english}</p>
               </div>
             </div>
 
@@ -7894,7 +7900,7 @@ function App() {
               <div>
                 <p className="text-xs text-muted-foreground font-bold uppercase tracking-wider mb-2">Note:</p>
                 <div className="bg-muted/30 rounded-3xl p-6 border border-border/30">
-                  <p className="text-sm text-muted-foreground leading-relaxed">{currentExample.notes}</p>
+                  <p className="text-sm text-muted-foreground leading-relaxed text-center">{currentExample.notes}</p>
                 </div>
               </div>
             )}
@@ -7933,21 +7939,25 @@ function App() {
     if (wotdPhase === "complete") {
       const handleShare = async () => {
         triggerHaptic();
+        const shareUrl = 'https://ihyaarabicapp.com/';
+        const shareText = 'I just learnt a new Arabic word, click the link below to sign up to the new Ihya Arabic app!';
         const shareData = {
-          title: 'Word of the Day',
-          text: `Today I learned: "${currentWotd.arabic_text}" means "${currentWotd.english_text}" 🌟`,
-          url: 'https://clemencyhouse.com'
+          title: 'Ihya Arabic App',
+          text: shareText,
+          url: shareUrl,
         };
 
         try {
           if (navigator.share) {
             await navigator.share(shareData);
           } else {
-            await navigator.clipboard.writeText(shareData.text);
+            await navigator.clipboard.writeText(`${shareText} ${shareUrl}`);
             alert('Copied to clipboard!');
           }
         } catch (err) {
-          console.log('Share failed:', err);
+          if (err?.name !== 'AbortError') {
+            console.log('Share failed:', err);
+          }
         }
       };
 
@@ -7994,21 +8004,13 @@ function App() {
           </main>
 
           <footer className="px-6 space-y-3 flex-shrink-0" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 1.5rem)' }}>
-            <div className="prebook-action-row">
-              <button
-                className="prebook-audio-btn"
-                onClick={() => { triggerHaptic(); speakAiAudio(currentWotd.arabic_text); }}
-              >
-                <Icon icon="solar:volume-loud-bold" />
-              </button>
-              <button
-                className="prebook-continue-btn"
-                onClick={handleShare}
-              >
-                <Icon icon="solar:share-bold" />
-                Share
-              </button>
-            </div>
+            <button
+              className="prebook-continue-btn" style={{ width: "100%" }}
+              onClick={handleShare}
+            >
+              <Icon icon="solar:share-bold" />
+              Share
+            </button>
             <button
               className="prebook-continue-btn" style={{ width: "100%" }}
               onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPracticeMode(null); resetWotdFlow(); }}
@@ -8551,7 +8553,7 @@ function App() {
                               else { startChallengeRecording(idx); }
                             }}
                           >
-                            {challengeRecording ? '⏹' : '🎙️'}
+                            <Icon icon={challengeRecording ? "solar:stop-bold" : "solar:microphone-bold"} style={{ fontSize: '1.6rem' }} />
                           </button>
                           <button
                             style={{ padding: '0.5rem 1rem', borderRadius: '2rem', border: '1px solid var(--border)', background: 'var(--muted)', color: 'var(--muted-foreground)', fontSize: '0.8rem', cursor: 'pointer', alignSelf: 'center' }}
@@ -8634,7 +8636,7 @@ function App() {
                               else { startChallengeRecording(idx); }
                             }}
                           >
-                            {challengeRecording ? '⏹' : '🎙️'}
+                            <Icon icon={challengeRecording ? "solar:stop-bold" : "solar:microphone-bold"} style={{ fontSize: '1.6rem' }} />
                           </button>
                           {challengeRecording ? (
                             <span style={{ fontSize: '0.75rem', color: '#8b5cf6', fontWeight: 600 }}>Up to 30s</span>
@@ -9083,7 +9085,6 @@ function App() {
                 {currentQuestion.options.map((opt, optIdx) => {
                   const isSelected = selectedOptionId === opt.id;
                   const isCorrect = opt.is_correct;
-                  const optionLabel = String.fromCharCode(65 + optIdx); // A, B, C, D
 
                   let stateClass = "";
                   if (!hasAnswered) {
@@ -9103,7 +9104,6 @@ function App() {
                       style={{ '--i': optIdx }}
                     >
                       <div className="quiz-option-inner">
-                        <span className="quiz-option-label">{optionLabel}</span>
                         <span className="quiz-option-text">{opt.text}</span>
                       </div>
                     </button>
@@ -9530,7 +9530,7 @@ function App() {
             lessonPhase === "intro_grammar" && (
               <div className="no-scroll-container transition-screen swipe-in">
                 <div className="transition-screen-media">
-                  <img src="/images/explanation-icon.jpg" alt="Story" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                  <img src="/images/explanation-icon.webp" alt="Story" loading="lazy" decoding="async" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                 </div>
                 <div className="transition-screen-copy">
                   <h1 className="page-title" style={{ marginTop: '2.5rem', marginBottom: '0.5rem' }}>Story Explanation</h1>
@@ -9612,7 +9612,7 @@ function App() {
             lessonPhase === "intro_vocab" && (
               <div className="no-scroll-container transition-screen swipe-in">
                 <div className="transition-screen-media">
-                  <img src="/images/vocab-book.jpg" alt="Vocabulary" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                  <img src="/images/vocab-book.webp" alt="Vocabulary" loading="lazy" decoding="async" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                 </div>
                 <div className="transition-screen-copy">
                   <h1 className="page-title" style={{ marginTop: '2.5rem', marginBottom: '0.5rem' }}>New Words</h1>
@@ -9762,10 +9762,11 @@ function App() {
                       <button
                         className="btn-primary"
                         onClick={() => { triggerHaptic(); if (isRecording) stopRecording(); else startRecording(); }}
-                        style={{ maxWidth: 320 }}
+                        style={{ maxWidth: 320, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}
                         disabled={isCheckingAnswer}
                       >
-                        {isRecording ? "⏹ Stop recording" : "🎤 Start recording"}
+                        <Icon icon={isRecording ? "solar:stop-bold" : "solar:microphone-bold"} style={{ fontSize: '1.2em' }} />
+                        {isRecording ? "Stop recording" : "Start recording"}
                       </button>
                     )}
                   </div>
@@ -9836,7 +9837,7 @@ function App() {
             lessonPhase === "intro_drills" && (
               <div className="no-scroll-container transition-screen swipe-in">
                 <div className="transition-screen-media">
-                  <img src="/images/sentence-practice.png" alt="Sentence Practice" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                  <img src="/images/sentence-practice.webp" alt="Sentence Practice" loading="lazy" decoding="async" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                 </div>
                 <div className="transition-screen-copy">
                   <h1 className="page-title" style={{ marginTop: '2.5rem', marginBottom: '0.5rem' }}>Sentence Practice</h1>
@@ -9986,7 +9987,49 @@ function App() {
 
                         <button
                           className="btn-play-large"
-                          onClick={handleStartLessonAudio}
+                          onClick={() => {
+                            if (!activeLesson?.audio_url || !audioRef.current) return;
+                            triggerHaptic();
+                            const el = audioRef.current;
+                            try { el.pause(); } catch (_) {}
+                            setAudioProgress(0);
+                            setAudioCompleted(false);
+                            const attemptPlay = () => {
+                              try { el.currentTime = 0; } catch (_) {}
+                              el.play()
+                                .then(() => {
+                                  setAudioPlaying(true);
+                                  setAudioCompleted(false);
+                                })
+                                .catch((err) => {
+                                  console.warn("Relisten play failed, reloading:", err);
+                                  el.src = activeLesson.audio_url;
+                                  el.load();
+                                  const onReady = () => {
+                                    el.removeEventListener("canplaythrough", onReady);
+                                    try { el.currentTime = 0; } catch (_) {}
+                                    el.play()
+                                      .then(() => {
+                                        setAudioPlaying(true);
+                                        setAudioCompleted(false);
+                                      })
+                                      .catch((e2) => console.error("Relisten retry failed:", e2));
+                                  };
+                                  el.addEventListener("canplaythrough", onReady, { once: true });
+                                });
+                            };
+                            if (el.ended || el.readyState < 2) {
+                              el.src = activeLesson.audio_url;
+                              el.load();
+                              const onReady = () => {
+                                el.removeEventListener("canplaythrough", onReady);
+                                attemptPlay();
+                              };
+                              el.addEventListener("canplaythrough", onReady, { once: true });
+                            } else {
+                              attemptPlay();
+                            }
+                          }}
                           disabled={audioPlaying}
                         >
                           {audioPlaying ? (
