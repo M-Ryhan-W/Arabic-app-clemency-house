@@ -2112,7 +2112,8 @@ function App() {
       // ✅ your table is lessons
       const { data: lessonsData, error: lessonsError } = await supabase
         .from("lessons")
-        .select("*");
+        .select("*")
+        .order("order", { ascending: true });
 
       if (lessonsError) {
         console.error("Error loading all lessons:", lessonsError);
@@ -5290,11 +5291,12 @@ function App() {
     // Helper: find next incomplete lesson
     const nextLesson = (() => {
       if (!allLessons || allLessons.length === 0) return null;
-      const coreLessons = allLessons.filter((lesson) => lesson.lesson_format !== 'prebook');
+      const sortedLessons = [...allLessons].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      const coreLessons = sortedLessons.filter((lesson) => lesson.lesson_format !== 'prebook');
       for (const lesson of coreLessons) {
         if (!isLessonCompleted(lesson.id)) return lesson;
       }
-      for (const lesson of allLessons) {
+      for (const lesson of sortedLessons) {
         if (!isLessonCompleted(lesson.id)) return lesson;
       }
       return null;
@@ -5582,7 +5584,9 @@ function App() {
                   const stageTitle = stage.name || stage.title || 'Stage';
 
                   // Get lessons for this stage
-                  const stageLessons = allLessons.filter(l => l.stage_id === stage.id);
+                  const stageLessons = allLessons
+                    .filter(l => l.stage_id === stage.id)
+                    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 
                   // Fallback cover images for stages without a database image
                   const stageCoverFallbacks = ['/stage-cover-1.webp', '/stage-cover-2.webp', '/stage-cover-3.webp'];
