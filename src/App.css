@@ -7242,11 +7242,21 @@ button {
 /* Prevent browser autofill white boxes on auth inputs */
 .auth-input-group input:-webkit-autofill,
 .auth-input-group input:-webkit-autofill:hover,
-.auth-input-group input:-webkit-autofill:focus {
-  -webkit-box-shadow: 0 0 0 1000px transparent inset !important;
-  -webkit-text-fill-color: inherit !important;
-  background-color: transparent !important;
-  transition: background-color 5000s ease-in-out 0s;
+.auth-input-group input:-webkit-autofill:focus,
+.auth-input-group input:-webkit-autofill:active,
+.auth-input-group input:autofill {
+  -webkit-box-shadow: 0 0 0 1000px #0D1B2A inset !important;
+  box-shadow: 0 0 0 1000px #0D1B2A inset !important;
+  -webkit-text-fill-color: #ffffff !important;
+  caret-color: #ffffff !important;
+  background-color: #0D1B2A !important;
+  background-clip: content-box !important;
+  transition: background-color 5000s ease-in-out 0s, color 5000s ease-in-out 0s;
+}
+
+.auth-input-group input {
+  color: #ffffff !important;
+  caret-color: #ffffff;
 }
 
 /* Up Next card shimmer */

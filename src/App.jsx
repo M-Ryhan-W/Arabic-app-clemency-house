@@ -567,6 +567,8 @@ function App() {
   const audioRef = useRef(null);
   const [audioPlaying, setAudioPlaying] = useState(false);
   const [audioCompleted, setAudioCompleted] = useState(false);
+  const [dialogueAudioStarted, setDialogueAudioStarted] = useState(false);
+  const [isDialogueSlow, setIsDialogueSlow] = useState(false);
 
   // PARAGRAPH PLAYBACK STATE
   const [playingParagraphId, setPlayingParagraphId] = useState(null);
@@ -2178,6 +2180,8 @@ function App() {
     setRevealedCount(0);
     setDialogueFinished(false);
     setShowDialogueReview(false);
+    setDialogueAudioStarted(false);
+    setIsDialogueSlow(false);
     blockRefs.current = {};
   }
 
@@ -4395,6 +4399,8 @@ function App() {
     setRevealedCount(0);
     setDialogueFinished(false);
     setShowDialogueReview(false);
+    setDialogueAudioStarted(false);
+    setIsDialogueSlow(false);
     blockRefs.current = {};
     setClickedParagraphs(new Set());
     setHideInstruction(false);
@@ -4652,10 +4658,13 @@ function App() {
 
     // Instant playback - with retry on failure
     audioRef.current.currentTime = 0;
+    audioRef.current.playbackRate = 1.0;
+    setIsDialogueSlow(false);
     audioRef.current.play()
       .then(() => {
         setAudioPlaying(true);
         setAudioCompleted(false);
+        setDialogueAudioStarted(true);
       })
       .catch((err) => {
         console.warn("Audio play failed, retrying after reload:", err);
@@ -4668,12 +4677,36 @@ function App() {
             .then(() => {
               setAudioPlaying(true);
               setAudioCompleted(false);
+              setDialogueAudioStarted(true);
             })
             .catch((retryErr) => {
               console.error("Audio retry also failed:", retryErr);
             });
         };
       });
+  }
+
+  function handlePauseDialogue() {
+    if (!audioRef.current) return;
+    triggerHaptic();
+    audioRef.current.pause();
+    setAudioPlaying(false);
+  }
+
+  function handleResumeDialogue() {
+    if (!audioRef.current) return;
+    triggerHaptic();
+    audioRef.current.play()
+      .then(() => setAudioPlaying(true))
+      .catch((err) => console.error("Dialogue resume failed:", err));
+  }
+
+  function toggleDialogueSpeed() {
+    if (!audioRef.current) return;
+    triggerHaptic();
+    const newSpeed = isDialogueSlow ? 1.0 : 0.8;
+    audioRef.current.playbackRate = newSpeed;
+    setIsDialogueSlow(!isDialogueSlow);
   }
 
   // Paragraph tap-to-play handler
@@ -4684,7 +4717,7 @@ function App() {
 
     // If clicking the same block that's currently playing, toggle speed
     if (playingParagraphId === block.id && audioPlaying) {
-      const newSpeed = isSlowSpeed ? 1.0 : 0.85;
+      const newSpeed = isSlowSpeed ? 1.0 : 0.75;
       audioRef.current.playbackRate = newSpeed;
       setIsSlowSpeed(!isSlowSpeed);
       return;
@@ -9231,6 +9264,9 @@ function App() {
                     setDialogueFinished(true);
                     setAudioPlaying(false);
                     setAudioCompleted(true);
+                    setDialogueAudioStarted(false);
+                    setIsDialogueSlow(false);
+                    if (audioRef.current) audioRef.current.playbackRate = 1.0;
                     setPlayingParagraphId(null);
                     setPlayingParagraphEnd(null);
                     // Add 2-second delay before showing full dialogue for review
@@ -9269,8 +9305,28 @@ function App() {
                   // Hide audio button for legacy lessons (non-blocks format) - only show for dialogue lessons
                   if (activeLesson.lesson_format !== "blocks" || !hasDialogue) return null;
 
-                  // For dialogue lessons: only show button initially OR after showDialogueReview (after 2s delay)
-                  const showButton = !audioPlaying && (!audioCompleted || showDialogueReview);
+                  // Hide entirely during the 2s post-completion review delay
+                  const inReviewDelay = audioCompleted && !showDialogueReview;
+                  const showControls = !inReviewDelay;
+
+                  // Determine main button label/handler
+                  let mainLabel, mainHandler;
+                  if (audioCompleted && showDialogueReview) {
+                    mainLabel = "Replay audio";
+                    mainHandler = handleStartLessonAudio;
+                  } else if (audioPlaying) {
+                    mainLabel = "Pause";
+                    mainHandler = handlePauseDialogue;
+                  } else if (dialogueAudioStarted) {
+                    mainLabel = "Resume";
+                    mainHandler = handleResumeDialogue;
+                  } else {
+                    mainLabel = "Start lesson audio";
+                    mainHandler = handleStartLessonAudio;
+                  }
+
+                  // Show slow-down toggle whenever dialogue audio is in active playback (playing or paused, not completed)
+                  const showSlowToggle = dialogueAudioStarted && !audioCompleted;
 
                   return (
                     <div
@@ -9279,19 +9335,33 @@ function App() {
                         marginBottom: "1rem",
                         display: "flex",
                         justifyContent: "center",
-                        opacity: showButton ? 1 : 0,
-                        visibility: showButton ? 'visible' : 'hidden',
+                        gap: "0.5rem",
+                        flexWrap: "wrap",
+                        opacity: showControls ? 1 : 0,
+                        visibility: showControls ? 'visible' : 'hidden',
                         transition: 'opacity 0.5s ease, visibility 0.5s ease',
                       }}
                     >
-                      {showButton && (
-                        <button
-                          className="btn-primary"
-                          onClick={handleStartLessonAudio}
-                          style={{ maxWidth: "300px" }}
-                        >
-                          {audioCompleted ? "Replay audio" : "Start lesson audio"}
-                        </button>
+                      {showControls && (
+                        <>
+                          <button
+                            className="btn-primary"
+                            onClick={mainHandler}
+                            style={{ maxWidth: "300px" }}
+                          >
+                            {mainLabel}
+                          </button>
+                          {showSlowToggle && (
+                            <button
+                              className="btn-secondary"
+                              onClick={toggleDialogueSpeed}
+                              style={{ maxWidth: "150px" }}
+                              aria-pressed={isDialogueSlow}
+                            >
+                              {isDialogueSlow ? "Normal speed" : "Slow (0.8x)"}
+                            </button>
+                          )}
+                        </>
                       )}
                     </div>
                   );
