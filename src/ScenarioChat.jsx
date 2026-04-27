@@ -8,6 +8,39 @@ import 'ldrs/react/Leapfrog.css';
 import { App as CapacitorApp } from '@capacitor/app';
 
 const MAX_AUDIO_BASE64_LENGTH = 5 * 1024 * 1024;
+const SCENARIO_VOICE_POOL = [
+  "ar-XA-Chirp3-HD-Puck", "ar-XA-Chirp3-HD-Aoede",
+  "ar-XA-Chirp3-HD-Charon", "ar-XA-Chirp3-HD-Kore",
+  "ar-XA-Chirp3-HD-Fenrir", "ar-XA-Chirp3-HD-Leda",
+];
+
+const getScenarioTtsCacheKey = (text, voice) => `${voice || "default"}::${text || ""}`;
+
+const buildFallbackKeyPhrases = (messages, limit = 4) => {
+  const seen = new Set();
+  const phrases = [];
+  const aiTexts = (messages || [])
+    .filter(m => m?.role === "ai" && m?.text)
+    .map(m => String(m.text));
+
+  for (const text of aiTexts) {
+    const candidates = text
+      .split(/[.؟?!،؛\n]+/u)
+      .map(s => s.trim())
+      .filter(s => /[\u0600-\u06FF]/.test(s) && s.length >= 4);
+
+    for (const candidate of candidates) {
+      const normalized = candidate.replace(/\s+/g, " ");
+      const dedupeKey = normalized.replace(/[\u064B-\u065F\u0670]/g, "");
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      phrases.push({ arabic: normalized, english: "Phrase from your conversation" });
+      if (phrases.length >= limit) return phrases;
+    }
+  }
+
+  return phrases;
+};
 
 // ===== Scenario Sound Effects =====
 let _scenarioAudioCtx = null;
@@ -195,6 +228,7 @@ export default function ScenarioChat({
   const [scenarioFinalElapsed, setScenarioFinalElapsed] = useState(null); // Frozen time for summary
   const [streamingAiText, setStreamingAiText] = useState("");
   const [displayedStreamText, setDisplayedStreamText] = useState("");
+  const [scenarioKeyPhrasesLoading, setScenarioKeyPhrasesLoading] = useState(false);
 
   const [playingAudioUrl, setPlayingAudioUrl] = useState(null); // Track which audio is playing
   const [scenarioVoice, setScenarioVoice] = useState(null); // Track assigned TTS voice
@@ -250,6 +284,7 @@ export default function ScenarioChat({
   const scenarioStartTimeRef = useRef(null);
   const scenarioCountdownRef = useRef(null);
   const scenarioTtsCache = useRef({});
+  const scenarioVoiceRef = useRef(null);
   const scenarioHelpCache = useRef({}); // Cache help responses keyed by last AI message text
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
@@ -321,18 +356,20 @@ export default function ScenarioChat({
       };
 
       // Check cache first
-      if (scenarioTtsCache.current[text]) {
-        playAudio(scenarioTtsCache.current[text]);
+      const activeVoice = scenarioVoiceRef.current || scenarioVoice;
+      const cacheKey = getScenarioTtsCacheKey(text, activeVoice);
+      if (scenarioTtsCache.current[cacheKey]) {
+        playAudio(scenarioTtsCache.current[cacheKey]);
         return;
       }
 
       const { data, error } = await supabase.functions.invoke("scenario-chat", {
-        body: { action: "generate-tts", text, voice: scenarioVoice }
+        body: { action: "generate-tts", text, voice: activeVoice }
       });
       if (error) throw error;
       const parsed = typeof data === 'string' ? JSON.parse(data) : data;
       if (parsed.audioBase64) {
-        scenarioTtsCache.current[text] = parsed.audioBase64;
+        scenarioTtsCache.current[cacheKey] = parsed.audioBase64;
         playAudio(parsed.audioBase64);
       } else {
         throw new Error("No audio returned");
@@ -344,12 +381,8 @@ export default function ScenarioChat({
 
   async function startScenarioChat(difficulty) {
     // Generate a random voice for this session
-    const voicePool = [
-        "ar-XA-Chirp3-HD-Puck", "ar-XA-Chirp3-HD-Aoede",
-        "ar-XA-Chirp3-HD-Charon", "ar-XA-Chirp3-HD-Kore",
-        "ar-XA-Chirp3-HD-Fenrir", "ar-XA-Chirp3-HD-Leda",
-    ];
-    const newVoice = voicePool[Math.floor(Math.random() * voicePool.length)];
+    const newVoice = SCENARIO_VOICE_POOL[Math.floor(Math.random() * SCENARIO_VOICE_POOL.length)];
+    scenarioVoiceRef.current = newVoice;
     setScenarioVoice(newVoice);
 
     setScenarioDifficulty(difficulty);
@@ -359,6 +392,7 @@ export default function ScenarioChat({
     setScenarioLoading(true);
     setScenarioTurnCount(0);
     setScenarioEnded(false);
+    setScenarioKeyPhrasesLoading(false);
     keyPhrasesFetchedRef.current = false;
     scenarioStartTimeRef.current = Date.now();
 
@@ -658,7 +692,7 @@ export default function ScenarioChat({
           mimeType: mimeType,
           elapsedSeconds,
           turnCount: scenarioTurnCount,
-          voice: scenarioVoice,
+          voice: scenarioVoiceRef.current || scenarioVoice,
         }),
       });
 
@@ -741,7 +775,7 @@ export default function ScenarioChat({
             setHelpData(null);
             if (event.audioBase64) {
               try {
-                scenarioTtsCache.current[event.message] = event.audioBase64;
+                scenarioTtsCache.current[getScenarioTtsCacheKey(event.message || accumulatedText, scenarioVoiceRef.current || scenarioVoice)] = event.audioBase64;
                 if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
                 const audio = new Audio(`data:audio/mp3;base64,${event.audioBase64}`);
                 if (scenarioDifficulty === "easy") audio.playbackRate = 0.8;
@@ -979,16 +1013,31 @@ export default function ScenarioChat({
     const history = (scenarioMessagesRef.current || []).map(m => ({ role: m.role, text: m.text }));
     if (!history.length) return;
     (async () => {
+      setScenarioKeyPhrasesLoading(true);
       try {
         const { data, error } = await supabase.functions.invoke("scenario-chat", {
           body: { action: "extract-phrases", conversationHistory: history },
         });
-        if (error) { console.error("extract-phrases failed:", error); return; }
+        if (error) {
+          console.error("extract-phrases failed:", error);
+          const fallback = buildFallbackKeyPhrases(scenarioMessagesRef.current, 4);
+          if (fallback.length) setScenarioKeyPhrases(fallback);
+          return;
+        }
         const parsed = typeof data === 'string' ? JSON.parse(data) : data;
         const phrases = Array.isArray(parsed?.keyPhrases) ? parsed.keyPhrases : [];
-        if (phrases.length) setScenarioKeyPhrases(phrases.slice(0, 5));
+        if (phrases.length) {
+          setScenarioKeyPhrases(phrases.slice(0, 5));
+        } else {
+          const fallback = buildFallbackKeyPhrases(scenarioMessagesRef.current, 4);
+          if (fallback.length) setScenarioKeyPhrases(fallback);
+        }
       } catch (e) {
         console.error("extract-phrases exception:", e);
+        const fallback = buildFallbackKeyPhrases(scenarioMessagesRef.current, 4);
+        if (fallback.length) setScenarioKeyPhrases(fallback);
+      } finally {
+        setScenarioKeyPhrasesLoading(false);
       }
     })();
   }, [scenarioEnded]);
@@ -1558,7 +1607,7 @@ export default function ScenarioChat({
               </div>
             </div>
 
-            {scenarioKeyPhrases.length > 0 && (
+            {(scenarioKeyPhrasesLoading || scenarioKeyPhrases.length > 0) && (
               <section className="bg-card/40 border border-border/50 rounded-3xl p-6">
                 <div className="flex items-center gap-3 mb-5">
                   <div className="w-10 h-10 rounded-2xl bg-amber-500/10 flex items-center justify-center text-amber-500">
@@ -1566,8 +1615,14 @@ export default function ScenarioChat({
                   </div>
                   <h2 className="font-heading text-xl font-bold">Key Phrases Learned</h2>
                 </div>
-                <div className="space-y-4">
-                  {scenarioKeyPhrases.map((kp, i) => (
+                {scenarioKeyPhrasesLoading && scenarioKeyPhrases.length === 0 ? (
+                  <div className="bg-background rounded-2xl p-5 border border-border/50 flex items-center justify-center gap-3 text-muted-foreground">
+                    <Leapfrog size="20" speed="2.5" color="currentColor" />
+                    <span className="text-sm font-semibold">Finding key phrases...</span>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {scenarioKeyPhrases.map((kp, i) => (
                     <div key={i} className="bg-background rounded-2xl p-5 border border-border/50 flex items-center gap-4 shadow-sm">
                       <button
                         onClick={() => { triggerHaptic(); speakAiAudio(kp.arabic); }}
@@ -1580,8 +1635,9 @@ export default function ScenarioChat({
                         <div className="text-sm text-muted-foreground font-semibold">{kp.english}</div>
                       </div>
                     </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </section>
             )}
 

@@ -5,21 +5,34 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const ttsCache = new Map<string, { audio: string; ts: number }>();
 const TTS_CACHE_MAX = 50; // max entries
 const TTS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
+const SCENARIO_VOICE_POOL = [
+    "ar-XA-Chirp3-HD-Puck",
+    "ar-XA-Chirp3-HD-Aoede",
+    "ar-XA-Chirp3-HD-Charon",
+    "ar-XA-Chirp3-HD-Kore",
+    "ar-XA-Chirp3-HD-Fenrir",
+    "ar-XA-Chirp3-HD-Leda",
+];
+const DEFAULT_SCENARIO_VOICE = SCENARIO_VOICE_POOL[0];
 
-function getTtsCached(text: string): string | null {
-    const entry = ttsCache.get(text);
+function getTtsCacheKey(text: string, voice: string): string {
+    return `${voice || "default"}::${text || ""}`;
+}
+
+function getTtsCached(text: string, voice: string): string | null {
+    const entry = ttsCache.get(getTtsCacheKey(text, voice));
     if (entry && Date.now() - entry.ts < TTS_CACHE_TTL) return entry.audio;
-    if (entry) ttsCache.delete(text);
+    if (entry) ttsCache.delete(getTtsCacheKey(text, voice));
     return null;
 }
 
-function setTtsCached(text: string, audio: string) {
+function setTtsCached(text: string, voice: string, audio: string) {
     // Evict oldest if at capacity
     if (ttsCache.size >= TTS_CACHE_MAX) {
         const oldest = ttsCache.keys().next().value;
         if (oldest) ttsCache.delete(oldest);
     }
-    ttsCache.set(text, { audio, ts: Date.now() });
+    ttsCache.set(getTtsCacheKey(text, voice), { audio, ts: Date.now() });
 }
 
 // ---- Text Hashing (for persistent TTS cache keys) ----
@@ -284,6 +297,32 @@ function cleanJson(text: string): string {
     }
 
     return cleaned;
+}
+
+function buildFallbackKeyPhrases(history: any[], limit: number = 4): Array<{ arabic: string; english: string }> {
+    const seen = new Set<string>();
+    const phrases: Array<{ arabic: string; english: string }> = [];
+    const characterTexts = (history || [])
+        .filter((m: any) => m?.role === "ai" && m?.text)
+        .map((m: any) => String(m.text));
+
+    for (const text of characterTexts) {
+        const candidates = text
+            .split(/[.؟?!،؛\n]+/u)
+            .map(s => s.trim())
+            .filter(s => /[\u0600-\u06FF]/.test(s) && s.length >= 4);
+
+        for (const candidate of candidates) {
+            const normalized = candidate.replace(/\s+/g, " ");
+            const dedupeKey = normalized.replace(/[\u064B-\u065F\u0670]/g, "");
+            if (seen.has(dedupeKey)) continue;
+            seen.add(dedupeKey);
+            phrases.push({ arabic: normalized, english: "Phrase from your conversation" });
+            if (phrases.length >= limit) return phrases;
+        }
+    }
+
+    return phrases;
 }
 
 // Heuristic end-of-scenario detection. Replaces the per-turn Gemini metadata
@@ -588,12 +627,7 @@ serve(async (req) => {
                         // Key phrases are now extracted once at scenario end (action=extract-phrases)
                         // and isEnding is decided by a server-side heuristic, so we no longer make
                         // a per-turn Gemini metadata call.
-                        const voicePool = [
-                            "ar-XA-Chirp3-HD-Puck", "ar-XA-Chirp3-HD-Aoede",
-                            "ar-XA-Chirp3-HD-Charon", "ar-XA-Chirp3-HD-Kore",
-                            "ar-XA-Chirp3-HD-Fenrir", "ar-XA-Chirp3-HD-Leda",
-                        ];
-                        const voice = reqBody.voice || voicePool[Math.floor(Math.random() * voicePool.length)];
+                        const voice = reqBody.voice || DEFAULT_SCENARIO_VOICE;
                         let ttsAudio: string | null = null;
                         try {
                             const ttsRes = await fetch("https://texttospeech.googleapis.com/v1/text:synthesize", {
@@ -762,6 +796,11 @@ Respond ONLY with valid JSON in this exact shape (no markdown, no commentary):
                 if (retry.length > keyPhrases.length) keyPhrases = retry;
             }
 
+            if (keyPhrases.length < minRequired) {
+                const fallback = buildFallbackKeyPhrases(history, 4);
+                if (fallback.length > keyPhrases.length) keyPhrases = fallback;
+            }
+
             return new Response(JSON.stringify({ keyPhrases }), {
                 headers: { ...corsHeaders, "Content-Type": "application/json" },
             });
@@ -770,6 +809,7 @@ Respond ONLY with valid JSON in this exact shape (no markdown, no commentary):
         // Action: generate-tts (with server-side cache + persistent DB cache)
         if (action === "generate-tts") {
             const textToSpeak = reqBody.text || "مرحباً";
+            const voice = reqBody.voice || DEFAULT_SCENARIO_VOICE;
             // Optional writeback: persists the generated audio directly onto a
             // domain row (e.g. word_of_the_day) so subsequent reads of that row
             // include the audio in the same query — no extra edge round trip.
@@ -803,7 +843,7 @@ Respond ONLY with valid JSON in this exact shape (no markdown, no commentary):
             };
 
             // L1: Check in-memory cache first (fastest, survives warm instance)
-            const memCached = getTtsCached(textToSpeak);
+            const memCached = getTtsCached(textToSpeak, voice);
             if (memCached) {
                 // Even on a memory hit, make sure writeback happens so the row
                 // gets populated for future cross-device reads.
@@ -814,7 +854,7 @@ Respond ONLY with valid JSON in this exact shape (no markdown, no commentary):
             }
 
             // L2: Check persistent Supabase DB cache (shared across all users)
-            const textHash = await hashText(textToSpeak);
+            const textHash = await hashText(getTtsCacheKey(textToSpeak, voice));
             const { data: dbCached } = await adminSb
                 .from("tts_cache")
                 .select("audio_base64, created_at")
@@ -825,7 +865,7 @@ Respond ONLY with valid JSON in this exact shape (no markdown, no commentary):
                 const age = Date.now() - new Date(dbCached.created_at).getTime();
                 if (age < 24 * 60 * 60 * 1000) {
                     // Still fresh — populate in-memory cache and return
-                    setTtsCached(textToSpeak, dbCached.audio_base64);
+                    setTtsCached(textToSpeak, voice, dbCached.audio_base64);
                     await persistWriteback(dbCached.audio_base64);
                     return new Response(JSON.stringify({ audioBase64: dbCached.audio_base64 }), {
                         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -838,16 +878,6 @@ Respond ONLY with valid JSON in this exact shape (no markdown, no commentary):
 
             // Cache miss — generate from Google TTS
             const { token } = await getAccessToken();
-            const voicePool = [
-                "ar-XA-Chirp3-HD-Puck",
-                "ar-XA-Chirp3-HD-Aoede",
-                "ar-XA-Chirp3-HD-Charon",
-                "ar-XA-Chirp3-HD-Kore",
-                "ar-XA-Chirp3-HD-Fenrir",
-                "ar-XA-Chirp3-HD-Leda",
-            ];
-            const voice = reqBody.voice || voicePool[Math.floor(Math.random() * voicePool.length)];
-
             const ttsRes = await fetch("https://texttospeech.googleapis.com/v1/text:synthesize", {
                 method: "POST",
                 headers: {
@@ -871,7 +901,7 @@ Respond ONLY with valid JSON in this exact shape (no markdown, no commentary):
 
             if (audio) {
                 // Populate in-memory cache
-                setTtsCached(textToSpeak, audio);
+                setTtsCached(textToSpeak, voice, audio);
 
                 // Persist to DB — MUST await, otherwise the edge worker
                 // terminates on response and cancels the pending promise.
