@@ -225,15 +225,15 @@ function getTodayScenario(): typeof SCENARIOS[0] {
 function buildStreamingSystemPrompt(scenario: typeof SCENARIOS[0], difficulty: string, elapsedTimeSec: number = 0, turnCount: number = 0): string {
     const time = elapsedTimeSec > 200 ? " Wrap up now." : "";
     const diff: any = {
-        easy: "Basic Arabic, very short.",
-        intermediate: "Simple Fusha, moderate.",
-        advanced: "Natural Fusha, richer vocab, 2-3 sentences max."
+        easy: "ONE tiny sentence, 3-6 words. Most basic vocab only.",
+        intermediate: "ONE short sentence, 6-10 words. Simple Fusha.",
+        advanced: "1-2 sentences, max 10 words each. Natural Fusha."
     };
 
     return `Character in Arabic scenario. Stay in character.
 SCENARIO: ${scenario.title} — ${scenario.setting}
 ${diff[difficulty] || diff.intermediate} Turn ${turnCount}/~8.${time}
-Full tashkeel. Fusha only. 1-3 sentences. End with question. ONLY Arabic, no English/JSON.`;
+Full tashkeel. Fusha only. End with question. ONLY Arabic, no English/JSON.`;
 }
 
 function cleanJson(text: string): string {
@@ -634,7 +634,7 @@ Your job:
 2. Tell the student what they should say next — give them a SPECIFIC Arabic phrase or sentence they can use, with FULL tashkeel (diacritics)
 3. Provide the English translation of that phrase
 
-${diff === 'easy' ? 'Keep the suggested phrase VERY simple — 2-5 words max. Use basic vocabulary only.' : diff === 'advanced' ? 'The suggested phrase should be a natural, full Arabic sentence.' : 'Keep the suggested phrase moderate — a short, natural sentence of 4-8 words.'}
+${diff === 'easy' ? 'Suggested phrase: 2-4 words, basic vocab only.' : diff === 'advanced' ? 'Suggested phrase: natural sentence, 5-9 words.' : 'Suggested phrase: simple sentence, 4-7 words.'}
 
 Respond ONLY with valid JSON:
 {
@@ -677,36 +677,56 @@ Respond ONLY with valid JSON:
                 .map((m: any) => `${m.role === "ai" ? "Character" : "Student"}: ${m.text}`)
                 .join("\n");
 
-            const prompt = `From this Arabic practice conversation, extract the MOST useful key phrases from the Character's messages that a learner would want to remember.
+            const buildExtractPrompt = (minRequired: number) => `You will be given an Arabic practice conversation. Your task is to extract useful key phrases from the Character's messages so the learner can review them.
 
-REQUIREMENTS:
-- You MUST return between 3 and 5 phrases. Never fewer than 3 unless the conversation is genuinely too short to support that.
-- Pick phrases of varying length and topic — greetings, questions, useful expressions, vocabulary in context.
-- Keep full tashkeel (harakat) on the Arabic.
-- English should be a clean natural translation, not literal.
+HARD REQUIREMENTS (these are non-negotiable):
+1. Return EXACTLY 4 phrases unless the Character has fewer than ${minRequired} distinct sentences in total — in which case return as many as you can up to a max of 5.
+2. NEVER return fewer than ${minRequired} phrases when the conversation has at least ${minRequired} Character turns.
+3. Each phrase MUST come from something the Character actually said.
+4. Pick a variety: greetings/openers, questions the Character asked, useful expressions, and vocabulary in context. Do not duplicate.
+5. Keep full tashkeel (harakat) on the Arabic. English must read naturally, not literally.
 
-CONVERSATION:
+EXAMPLE OUTPUT (for illustration only — do not copy these phrases):
+{"keyPhrases":[
+  {"arabic":"مَرْحَبًا بِكَ فِي الْمَقْهَى","english":"Welcome to the café"},
+  {"arabic":"مَاذَا تُحِبُّ أَنْ تَطْلُبَ؟","english":"What would you like to order?"},
+  {"arabic":"عِنْدَنَا قَهْوَةٌ طَازِجَةٌ","english":"We have fresh coffee"},
+  {"arabic":"شُكْرًا، أَتَمَنَّى لَكَ يَوْمًا سَعِيدًا","english":"Thank you, have a nice day"}
+]}
+
+CONVERSATION TO ANALYSE:
 ${transcript}
 
-Respond ONLY with valid JSON in this exact shape:
-{"keyPhrases":[{"arabic":"<Arabic with tashkeel>","english":"<English meaning>"}, ...]}`;
+Respond ONLY with valid JSON in this exact shape (no markdown, no commentary):
+{"keyPhrases":[{"arabic":"...","english":"..."}, ...]}`;
 
-            const data = await callVertexAI(projectId, token, {
-                contents: [{ role: "user", parts: [{ text: prompt }] }],
-                generationConfig: { temperature: 0.3, maxOutputTokens: 900, responseMimeType: "application/json" },
-            }, "gemini-2.5-flash");
-
-            const text = extractResponseText(data);
-            let keyPhrases: any[] = [];
-            try {
-                const parsed = JSON.parse(cleanJson(text));
-                if (Array.isArray(parsed.keyPhrases)) {
-                    keyPhrases = parsed.keyPhrases
-                        .filter((p: any) => p && p.arabic && p.english)
-                        .slice(0, 5);
+            const runExtract = async (minRequired: number) => {
+                const data = await callVertexAI(projectId, token, {
+                    contents: [{ role: "user", parts: [{ text: buildExtractPrompt(minRequired) }] }],
+                    generationConfig: { temperature: 0.4, maxOutputTokens: 900, responseMimeType: "application/json" },
+                }, "gemini-2.5-flash-lite");
+                const text = extractResponseText(data);
+                try {
+                    const parsed = JSON.parse(cleanJson(text));
+                    if (Array.isArray(parsed.keyPhrases)) {
+                        return parsed.keyPhrases.filter((p: any) => p && p.arabic && p.english).slice(0, 5);
+                    }
+                } catch (e) {
+                    console.error("[extract-phrases] parse error:", e);
                 }
-            } catch (e) {
-                console.error("[extract-phrases] parse error:", e);
+                return [];
+            };
+
+            // Count distinct Character turns to decide a sensible minimum.
+            const characterTurns = (history as any[]).filter(m => m?.role === "ai").length;
+            const minRequired = Math.min(3, Math.max(1, characterTurns));
+
+            let keyPhrases: any[] = await runExtract(minRequired);
+            // If we got fewer than expected, retry once with a stricter prompt.
+            if (keyPhrases.length < minRequired && characterTurns >= minRequired) {
+                console.warn(`[extract-phrases] only got ${keyPhrases.length}, retrying...`);
+                const retry = await runExtract(minRequired);
+                if (retry.length > keyPhrases.length) keyPhrases = retry;
             }
 
             return new Response(JSON.stringify({ keyPhrases }), {

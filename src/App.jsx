@@ -163,6 +163,7 @@ const playRewardSound = () => {
 
 const MAX_AUDIO_BASE64_LENGTH = 5 * 1024 * 1024; // ~3.75MB raw audio, reasonable max for speech
 const COMMUNITY_RETENTION_DAYS = 7;
+const COMMUNITY_PAGE_SIZE = 15;
 
 // ===== HAPTIC + SOUND HELPERS =====
 
@@ -789,6 +790,8 @@ function App() {
   const [activeExerciseIndex, setActiveExerciseIndex] = useState(null);
   const [communityPosts, setCommunityPosts] = useState([]);
   const [loadingCommunityPosts, setLoadingCommunityPosts] = useState(false);
+  const [loadingMoreCommunityPosts, setLoadingMoreCommunityPosts] = useState(false);
+  const [communityHasMore, setCommunityHasMore] = useState(false);
   const [selectedPost, setSelectedPost] = useState(null);
   const [postCorrections, setPostCorrections] = useState([]);
   const [loadingCorrections, setLoadingCorrections] = useState(false);
@@ -2519,8 +2522,9 @@ function App() {
     setLoadingExercises(false);
   }
 
-  async function loadCommunityPosts(filter = 'all') {
-    setLoadingCommunityPosts(true);
+  async function loadCommunityPosts(filter = 'all', { append = false, offset = 0 } = {}) {
+    if (append) setLoadingMoreCommunityPosts(true);
+    else setLoadingCommunityPosts(true);
     try {
       const cutoff = new Date(Date.now() - COMMUNITY_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
       let query = supabase
@@ -2528,7 +2532,7 @@ function App() {
         .select("*")
         .gte("created_at", cutoff)
         .order("created_at", { ascending: false })
-        .limit(50);
+        .range(offset, offset + COMMUNITY_PAGE_SIZE - 1);
 
       if (filter !== 'all') {
         query = query.eq("activity_type", filter);
@@ -2561,7 +2565,17 @@ function App() {
             p.has_ai_feedback = aiSet.has(p.id);
           });
         }
-        setCommunityPosts(posts);
+        if (append) {
+          setCommunityPosts(prev => {
+            const existing = new Set(prev.map(p => p.id));
+            const merged = [...prev];
+            posts.forEach(p => { if (!existing.has(p.id)) merged.push(p); });
+            return merged;
+          });
+        } else {
+          setCommunityPosts(posts);
+        }
+        setCommunityHasMore(posts.length === COMMUNITY_PAGE_SIZE);
       }
 
       // Load user's reactions
@@ -2584,6 +2598,12 @@ function App() {
       console.error("loadCommunityPosts error:", err);
     }
     setLoadingCommunityPosts(false);
+    setLoadingMoreCommunityPosts(false);
+  }
+
+  async function loadMoreCommunityPosts() {
+    if (loadingMoreCommunityPosts || !communityHasMore) return;
+    await loadCommunityPosts(communityFilter, { append: true, offset: communityPosts.length });
   }
 
   async function submitCommunityPost(answerText, audioBase64 = null) {
@@ -2627,6 +2647,13 @@ function App() {
       } else {
         // Update completion count
         setUserCompletions(prev => ({ ...prev, [activeExerciseType]: (prev[activeExerciseType] || 0) + 1 }));
+        if (promptText) {
+          setCompletedPrompts(prev => {
+            const next = new Set(prev);
+            next.add(promptText);
+            return next;
+          });
+        }
 
         // Always go back to feed after posting
         cleanupPreviewAudio();
@@ -6671,6 +6698,17 @@ function App() {
                             </div>
                           </div>
                         ))}
+                        {communityHasMore && (
+                          <button
+                            className="w-full py-3 rounded-2xl bg-card border border-border/50 text-sm font-bold text-primary active:scale-[0.98] transition-all disabled:opacity-60 flex items-center justify-center gap-2"
+                            disabled={loadingMoreCommunityPosts}
+                            onClick={() => { triggerHaptic(); loadMoreCommunityPosts(); }}
+                          >
+                            {loadingMoreCommunityPosts
+                              ? <Leapfrog size="16" speed="2.5" color="var(--primary)" />
+                              : 'Load more'}
+                          </button>
+                        )}
                       </div>
                     )}
                   </section>
