@@ -295,15 +295,19 @@ export default function ScenarioChat({
       const playAudio = (audioBase64) => {
         if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
         const audio = new Audio(`data:audio/mp3;base64,${audioBase64}`);
+        // Slow the AI's voice for lower difficulties so learners can follow.
+        if (scenarioDifficulty === "easy") audio.playbackRate = 0.8;
+        else if (scenarioDifficulty === "intermediate") audio.playbackRate = 0.85;
+        else audio.playbackRate = 1.0;
         scenarioAudioRef.current = audio;
         setPlayingAudioUrl(text);
-        
+
         audio.onended = () => {
           setPlayingAudioUrl(null);
           if (onComplete) onComplete();
         };
         audio.onpause = () => {
-            // Only clear if it was paused intentionally, not ended 
+            // Only clear if it was paused intentionally, not ended
             // (onended fires separately)
             if (scenarioAudioRef.current === audio && audio.currentTime !== audio.duration) {
                 setPlayingAudioUrl(null);
@@ -740,6 +744,9 @@ export default function ScenarioChat({
                 scenarioTtsCache.current[event.message] = event.audioBase64;
                 if (scenarioAudioRef.current) scenarioAudioRef.current.pause();
                 const audio = new Audio(`data:audio/mp3;base64,${event.audioBase64}`);
+                if (scenarioDifficulty === "easy") audio.playbackRate = 0.8;
+                else if (scenarioDifficulty === "intermediate") audio.playbackRate = 0.85;
+                else audio.playbackRate = 1.0;
                 scenarioAudioRef.current = audio;
                 audio.play().catch(e => console.error("Audio play failed:", e));
               } catch (e) {

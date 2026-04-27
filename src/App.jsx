@@ -4717,7 +4717,7 @@ function App() {
 
     // If clicking the same block that's currently playing, toggle speed
     if (playingParagraphId === block.id && audioPlaying) {
-      const newSpeed = isSlowSpeed ? 1.0 : 0.75;
+      const newSpeed = isSlowSpeed ? 1.0 : 0.78;
       audioRef.current.playbackRate = newSpeed;
       setIsSlowSpeed(!isSlowSpeed);
       return;

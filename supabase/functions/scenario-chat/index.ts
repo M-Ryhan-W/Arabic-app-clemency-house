@@ -365,25 +365,32 @@ serve(async (req) => {
 
                     try {
                         // --- Step 1: Transcribe audio ---
+                        // Plain-text output (no JSON mode) to minimise decode latency.
+                        // Lower maxOutputTokens since transcripts are short.
                         const audioMime = (reqBody.mimeType || "audio/webm").split(";")[0].trim();
                         const transcribeData = await callVertexAI(projectId, token, {
                             contents: [{
                                 role: "user",
                                 parts: [
                                     { inlineData: { mimeType: audioMime, data: audioBase64 } },
-                                    { text: 'Transcribe clearly spoken Arabic only. If silent/noisy/unclear, return {"transcript":""}. Do not guess. Return {"transcript":"<Arabic>"}.' },
+                                    { text: 'Transcribe clearly spoken Arabic. Output only the Arabic text, nothing else. If silent/noisy/unclear, output an empty response. Do not guess.' },
                                 ],
                             }],
-                            generationConfig: { temperature: 0.1, maxOutputTokens: 400, responseMimeType: "application/json" },
+                            generationConfig: { temperature: 0.1, maxOutputTokens: 200 },
                         }, "gemini-2.5-flash-lite");
 
                         const transcribeText = extractResponseText(transcribeData);
-                        let transcript = "";
-                        try {
-                            const parsed = JSON.parse(cleanJson(transcribeText));
-                            transcript = parsed.transcript || "";
-                        } catch {
-                            transcript = transcribeText || "";
+                        let transcript = (transcribeText || "")
+                            .replace(/^```(?:json|text)?/i, "")
+                            .replace(/```$/i, "")
+                            .replace(/^["']|["']$/g, "")
+                            .trim();
+                        // Defensive: if model still wrapped output in JSON, strip it.
+                        if (transcript.startsWith("{")) {
+                            try {
+                                const parsed = JSON.parse(cleanJson(transcript));
+                                transcript = parsed.transcript || "";
+                            } catch { /* keep as-is */ }
                         }
 
                         // Strip diacritics for length check (tashkeel inflates char count)
@@ -670,12 +677,24 @@ Respond ONLY with valid JSON:
                 .map((m: any) => `${m.role === "ai" ? "Character" : "Student"}: ${m.text}`)
                 .join("\n");
 
-            const prompt = `From this Arabic practice conversation, pick 3-5 of the most useful key phrases from the Character's messages that a learner would want to remember. Keep full tashkeel on the Arabic.\n\n${transcript}\n\nRespond ONLY with JSON: {"keyPhrases":[{"arabic":"<Arabic with tashkeel>","english":"<English meaning>"}]}`;
+            const prompt = `From this Arabic practice conversation, extract the MOST useful key phrases from the Character's messages that a learner would want to remember.
+
+REQUIREMENTS:
+- You MUST return between 3 and 5 phrases. Never fewer than 3 unless the conversation is genuinely too short to support that.
+- Pick phrases of varying length and topic — greetings, questions, useful expressions, vocabulary in context.
+- Keep full tashkeel (harakat) on the Arabic.
+- English should be a clean natural translation, not literal.
+
+CONVERSATION:
+${transcript}
+
+Respond ONLY with valid JSON in this exact shape:
+{"keyPhrases":[{"arabic":"<Arabic with tashkeel>","english":"<English meaning>"}, ...]}`;
 
             const data = await callVertexAI(projectId, token, {
                 contents: [{ role: "user", parts: [{ text: prompt }] }],
-                generationConfig: { temperature: 0.2, maxOutputTokens: 600, responseMimeType: "application/json" },
-            }, "gemini-2.5-flash-lite");
+                generationConfig: { temperature: 0.3, maxOutputTokens: 900, responseMimeType: "application/json" },
+            }, "gemini-2.5-flash");
 
             const text = extractResponseText(data);
             let keyPhrases: any[] = [];
