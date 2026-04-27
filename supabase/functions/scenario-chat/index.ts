@@ -222,18 +222,51 @@ function getTodayScenario(): typeof SCENARIOS[0] {
     return SCENARIOS[index];
 }
 
-function buildStreamingSystemPrompt(scenario: typeof SCENARIOS[0], difficulty: string, elapsedTimeSec: number = 0, turnCount: number = 0): string {
-    const time = elapsedTimeSec > 200 ? " Wrap up now." : "";
-    const diff: any = {
-        easy: "ONE tiny sentence, 3-6 words. Most basic vocab only.",
-        intermediate: "ONE short sentence, 6-10 words. Simple Fusha.",
-        advanced: "1-2 sentences, max 10 words each. Natural Fusha."
-    };
+const DIFFICULTY_SPECS: Record<string, string> = {
+    easy: "LEVEL EASY/A1: only very common daily words (hello, name, yes/no, want, have, here, this, numbers, food, drink, price, please, thanks). No rare/literary words. Present tense. ONE short statement + ONE simple yes/no or one-slot question.",
+    intermediate: "LEVEL INTERMEDIATE/A2-B1: common everyday Fusha only, no rare/formal/literary vocab. Simple grammar. 1-2 short sentences. ONE practical question (need, choice, place, time, quantity, preference).",
+    advanced: "LEVEL ADVANCED: natural clear Fusha, still concise. No monologues. Max 2 short sentences. ONE relevant follow-up question. Vocab can be richer but stays conversational, not literary.",
+};
 
-    return `Character in Arabic scenario. Stay in character.
-SCENARIO: ${scenario.title} — ${scenario.setting}
-${diff[difficulty] || diff.intermediate} Turn ${turnCount}/~8.${time}
-Full tashkeel. Fusha only. End with question. ONLY Arabic, no English/JSON.`;
+const DIFFICULTY_EXAMPLES: Record<string, string> = {
+    easy: 'EXAMPLE STYLE:\nStudent: أُرِيدُ قَهْوَةً.\nYou: نَعَمْ. قَهْوَةٌ صَغِيرَةٌ أَمْ كَبِيرَةٌ؟',
+    intermediate: 'EXAMPLE STYLE:\nStudent: أُرِيدُ قَهْوَةً.\nYou: حَسَنًا. هَلْ تُرِيدُهَا سَاخِنَةً أَمْ بَارِدَةً؟',
+    advanced: 'EXAMPLE STYLE:\nStudent: أُرِيدُ قَهْوَةً.\nYou: أَهْلًا وَسَهْلًا. هَلْ تُفَضِّلُ قَهْوَةً عَرَبِيَّةً أَمْ عَادِيَّةً؟',
+};
+
+const EASY_LEXICON_HINT = "Easy vocab examples: مَرْحَبًا، أَهْلًا، نَعَمْ، لَا، مِنْ فَضْلِكَ، شُكْرًا، مَا، مَنْ، أَيْنَ، كَمْ، اِسْم، أُرِيدُ، عِنْدِي، هَذَا، هُنَا، مَاء، قَهْوَة، شَاي، خُبْز، سِعْر.";
+
+function getDifficultySpec(difficulty: string): string {
+    return DIFFICULTY_SPECS[difficulty] || DIFFICULTY_SPECS.intermediate;
+}
+
+function getDifficultyExample(difficulty: string): string {
+    return DIFFICULTY_EXAMPLES[difficulty] || DIFFICULTY_EXAMPLES.intermediate;
+}
+
+function getGenerationParams(difficulty: string): { temperature: number; maxOutputTokens: number } {
+    if (difficulty === "easy") return { temperature: 0.25, maxOutputTokens: 90 };
+    if (difficulty === "advanced") return { temperature: 0.55, maxOutputTokens: 120 };
+    return { temperature: 0.4, maxOutputTokens: 100 };
+}
+
+function buildStreamingSystemPrompt(scenario: typeof SCENARIOS[0], difficulty: string, elapsedTimeSec: number = 0, turnCount: number = 0): string {
+    const wrap = elapsedTimeSec > 200 ? "Start closing the conversation." : "";
+    const keepGoing = turnCount < 6 ? "Do not end yet." : "You may end naturally soon.";
+    const lexicon = difficulty === "easy" ? EASY_LEXICON_HINT : "";
+
+    return [
+        "You are a character in an Arabic role-play scenario.",
+        `SCENARIO: ${scenario.title} — ${scenario.setting}`,
+        getDifficultySpec(difficulty),
+        lexicon,
+        "Stay in character. Full tashkeel. Fusha only.",
+        "Be conversational, not explanatory. React to the student's last message.",
+        "No lists. No more than ONE question. Keep your turn brief.",
+        `Turn ${turnCount}/~8. ${keepGoing} ${wrap}`.trim(),
+        getDifficultyExample(difficulty),
+        "ONLY Arabic. No English. No JSON.",
+    ].filter(Boolean).join("\n");
 }
 
 function cleanJson(text: string): string {
@@ -264,14 +297,12 @@ function detectScenarioEnd(reply: string, turnCount: number): boolean {
     return farewells.some(f => stripped.includes(f));
 }
 
-// Compress conversation history: summarize old turns, keep last 4 in full
+// Keep only the last 4 turns. The earlier English summary was a style
+// contaminant — it pulled flash-lite away from the difficulty band into
+// explanatory mode. Scenarios are narrow; recent turns are enough.
 function compressHistory(history: any[]): any[] {
-    if (!history || history.length <= 4) return history || [];
-    const older = history.slice(0, -4);
-    const recent = history.slice(-4);
-    // Summarize older turns into a single compact line
-    const summary = older.map(m => `${m.role === 'ai' ? 'AI' : 'User'}: ${m.text.substring(0, 60)}`).join(' | ');
-    return [{ role: "user", text: `[Earlier conversation summary: ${summary}]` }, ...recent];
+    if (!history) return [];
+    return history.slice(-4);
 }
 
 serve(async (req) => {
@@ -308,13 +339,14 @@ serve(async (req) => {
             // Plain-text greeting; key phrases come from action=extract-phrases
             // at scenario end. Dropping the JSON envelope saves schema tokens
             // on input and scaffolding on output.
-            const systemPrompt = buildStreamingSystemPrompt(scenario, difficulty || "intermediate", reqBody.elapsedSeconds || 0, 0);
+            const diffKey = difficulty || "intermediate";
+            const systemPrompt = buildStreamingSystemPrompt(scenario, diffKey, reqBody.elapsedSeconds || 0, 0);
             const { token, projectId } = await getAccessToken();
 
             const geminiData = await callVertexAI(projectId, token, {
                 systemInstruction: { parts: [{ text: systemPrompt }] },
                 contents: [{ role: "user", parts: [{ text: "Start the conversation. Greet me in character." }] }],
-                generationConfig: { temperature: 0.8, maxOutputTokens: 300 },
+                generationConfig: getGenerationParams(diffKey),
             }, "gemini-2.5-flash-lite");
 
             const text = (extractResponseText(geminiData) || "").trim();
@@ -429,7 +461,8 @@ serve(async (req) => {
                         }
 
                         // --- Step 2: Stream Gemini reply (plain Arabic text) ---
-                        const streamSystemPrompt = buildStreamingSystemPrompt(scenario, difficulty || "intermediate", reqBody.elapsedSeconds || 0, reqBody.turnCount || 0);
+                        const diffKey = difficulty || "intermediate";
+                        const streamSystemPrompt = buildStreamingSystemPrompt(scenario, diffKey, reqBody.elapsedSeconds || 0, reqBody.turnCount || 0);
 
                         let streamRes: Response | null = null;
                         for (let attempt = 0; attempt < 3; attempt++) {
@@ -444,7 +477,7 @@ serve(async (req) => {
                                     body: JSON.stringify({
                                         systemInstruction: { parts: [{ text: streamSystemPrompt }] },
                                         contents,
-                                        generationConfig: { temperature: 0.8, maxOutputTokens: 1000 },
+                                        generationConfig: getGenerationParams(diffKey),
                                     }),
                                 }
                             );
@@ -634,7 +667,7 @@ Your job:
 2. Tell the student what they should say next — give them a SPECIFIC Arabic phrase or sentence they can use, with FULL tashkeel (diacritics)
 3. Provide the English translation of that phrase
 
-${diff === 'easy' ? 'Suggested phrase: 2-4 words, basic vocab only.' : diff === 'advanced' ? 'Suggested phrase: natural sentence, 5-9 words.' : 'Suggested phrase: simple sentence, 4-7 words.'}
+${diff === 'easy' ? 'Suggested phrase: very short, only basic beginner vocab (hello, want, please, thanks, etc).' : diff === 'advanced' ? 'Suggested phrase: short natural sentence.' : 'Suggested phrase: short, simple, common vocab only.'}
 
 Respond ONLY with valid JSON:
 {
