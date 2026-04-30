@@ -570,6 +570,7 @@ function App() {
   const [audioCompleted, setAudioCompleted] = useState(false);
   const [dialogueAudioStarted, setDialogueAudioStarted] = useState(false);
   const [isDialogueSlow, setIsDialogueSlow] = useState(false);
+  const [showDialogueTranslations, setShowDialogueTranslations] = useState(false);
 
   // PARAGRAPH PLAYBACK STATE
   const [playingParagraphId, setPlayingParagraphId] = useState(null);
@@ -2185,6 +2186,7 @@ function App() {
     setShowDialogueReview(false);
     setDialogueAudioStarted(false);
     setIsDialogueSlow(false);
+    setShowDialogueTranslations(false);
     blockRefs.current = {};
   }
 
@@ -5504,48 +5506,6 @@ function App() {
                 </section>
               )}
 
-              {/* Word of the Day & Picture of the Day — side by side */}
-              <section className="grid grid-cols-2 gap-3">
-                {/* Word of the Day */}
-                <div
-                  className="relative rounded-2xl overflow-hidden cursor-pointer active:scale-[0.98] transition-all aspect-square"
-                  style={{ background: 'linear-gradient(135deg, #7c2d12, #431407)' }}
-                  onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("wotd"); loadWordOfTheDay(); }}
-                >
-                  <img src="/images/wotd.webp" alt="" fetchpriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent" />
-                  <div className="relative z-10 h-full flex flex-col justify-end p-4">
-                    <Icon icon="solar:sun-bold" className="text-amber-400 text-2xl mb-2" />
-                    <h3 className="text-sm font-extrabold text-white uppercase tracking-wide leading-tight">Word of the Day</h3>
-                    <p className="text-xs text-white/60 mt-1 font-arabic" dir="rtl">كلمة اليوم</p>
-                  </div>
-                </div>
-
-                {/* Picture of the Day */}
-                <div
-                  className={`relative rounded-2xl overflow-hidden cursor-pointer active:scale-[0.98] transition-all aspect-square ${pictureCompleted ? 'opacity-50 grayscale' : ''}`}
-                  onClick={() => {
-                    triggerHaptic();
-                    if (pictureCompleted) { showInfoToast('Already completed today', 'solar:check-circle-bold'); return; }
-                    setTransitionDirection("forward");
-                    setPracticeMode("picture-describe");
-                    loadPictureOfTheDay();
-                  }}
-                >
-                  {picturePreviewUrl ? (
-                    <img src={picturePreviewUrl} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ filter: 'blur(12px) brightness(0.4)', transform: 'scale(1.15)' }} />
-                  ) : (
-                    <div className="absolute inset-0 bg-gradient-to-br from-amber-900/60 to-red-900/60" />
-                  )}
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent" />
-                  <div className="relative z-10 h-full flex flex-col justify-end p-4">
-                    <Icon icon="solar:gallery-bold" className="text-amber-400 text-2xl mb-2" />
-                    <h3 className="text-sm font-extrabold text-white uppercase tracking-wide leading-tight">Pic of the Day</h3>
-                    <p className="text-xs text-white/60 mt-1">Describe what you see</p>
-                  </div>
-                </div>
-              </section>
-
               {/* Daily Scenario */}
               {scenarioData && (
                 <section>
@@ -5594,6 +5554,48 @@ function App() {
                   </div>
                 </section>
               )}
+
+              {/* Word of the Day & Picture of the Day — side by side */}
+              <section className="grid grid-cols-2 gap-3">
+                {/* Word of the Day */}
+                <div
+                  className="relative rounded-2xl overflow-hidden cursor-pointer active:scale-[0.98] transition-all aspect-square"
+                  style={{ background: 'linear-gradient(135deg, #7c2d12, #431407)' }}
+                  onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("wotd"); loadWordOfTheDay(); }}
+                >
+                  <img src="/images/wotd.webp" alt="" fetchpriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent" />
+                  <div className="relative z-10 h-full flex flex-col justify-end p-4">
+                    <Icon icon="solar:sun-bold" className="text-amber-400 text-2xl mb-2" />
+                    <h3 className="text-sm font-extrabold text-white uppercase tracking-wide leading-tight">Word of the Day</h3>
+                    <p className="text-xs text-white/60 mt-1 font-arabic" dir="rtl">كلمة اليوم</p>
+                  </div>
+                </div>
+
+                {/* Picture of the Day */}
+                <div
+                  className={`relative rounded-2xl overflow-hidden cursor-pointer active:scale-[0.98] transition-all aspect-square ${pictureCompleted ? 'opacity-50 grayscale' : ''}`}
+                  onClick={() => {
+                    triggerHaptic();
+                    if (pictureCompleted) { showInfoToast('Already completed today', 'solar:check-circle-bold'); return; }
+                    setTransitionDirection("forward");
+                    setPracticeMode("picture-describe");
+                    loadPictureOfTheDay();
+                  }}
+                >
+                  {picturePreviewUrl ? (
+                    <img src={picturePreviewUrl} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ filter: 'blur(12px) brightness(0.4)', transform: 'scale(1.15)' }} />
+                  ) : (
+                    <div className="absolute inset-0 bg-gradient-to-br from-amber-900/60 to-red-900/60" />
+                  )}
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent" />
+                  <div className="relative z-10 h-full flex flex-col justify-end p-4">
+                    <Icon icon="solar:gallery-bold" className="text-amber-400 text-2xl mb-2" />
+                    <h3 className="text-sm font-extrabold text-white uppercase tracking-wide leading-tight">Pic of the Day</h3>
+                    <p className="text-xs text-white/60 mt-1">Describe what you see</p>
+                  </div>
+                </div>
+              </section>
 
             </main>
           </div>
@@ -9366,39 +9368,45 @@ function App() {
                   // Show slow-down toggle whenever dialogue audio is in active playback (playing or paused, not completed)
                   const showSlowToggle = dialogueAudioStarted && !audioCompleted;
 
+                  // Pick an icon for the primary action
+                  let mainIcon;
+                  if (audioCompleted && showDialogueReview) mainIcon = "solar:restart-bold";
+                  else if (audioPlaying) mainIcon = "solar:pause-bold";
+                  else mainIcon = "solar:play-bold";
+
                   return (
                     <div
-                      className={`dialogue-controls-wrap ${showDialogueReview ? 'fade-in' : ''}`}
-                      style={{
-                        marginBottom: "1rem",
-                        display: "flex",
-                        justifyContent: "center",
-                        gap: "0.5rem",
-                        flexWrap: "wrap",
-                        opacity: showControls ? 1 : 0,
-                        visibility: showControls ? 'visible' : 'hidden',
-                        transition: 'opacity 0.5s ease, visibility 0.5s ease',
-                      }}
+                      className={`dialogue-controls-wrap ${showDialogueReview ? 'fade-in' : ''} ${showControls ? '' : 'is-hidden'}`}
                     >
                       {showControls && (
                         <>
                           <button
-                            className="btn-primary"
+                            className="dlg-btn dlg-btn--primary"
                             onClick={mainHandler}
-                            style={{ maxWidth: "300px" }}
                           >
-                            {mainLabel}
+                            <Icon icon={mainIcon} className="dlg-btn-icon" />
+                            <span>{mainLabel}</span>
                           </button>
                           {showSlowToggle && (
                             <button
-                              className="btn-secondary"
+                              className={`dlg-btn dlg-btn--toggle ${isDialogueSlow ? 'is-active' : ''}`}
                               onClick={toggleDialogueSpeed}
-                              style={{ maxWidth: "150px" }}
                               aria-pressed={isDialogueSlow}
+                              aria-label={isDialogueSlow ? "Set to normal speed" : "Set to slow speed (0.8×)"}
                             >
-                              {isDialogueSlow ? "Normal speed" : "Slow (0.8x)"}
+                              <span className="dlg-btn-dot" />
+                              <span>Slow 0.8×</span>
                             </button>
                           )}
+                          <button
+                            className={`dlg-btn dlg-btn--toggle ${showDialogueTranslations ? 'is-active' : ''}`}
+                            onClick={() => { triggerHaptic(); setShowDialogueTranslations(v => !v); }}
+                            aria-pressed={showDialogueTranslations}
+                            aria-label={showDialogueTranslations ? "Hide translation" : "Show translation"}
+                          >
+                            <span className="dlg-btn-dot" />
+                            <span>Translation</span>
+                          </button>
                         </>
                       )}
                     </div>
@@ -9559,6 +9567,11 @@ function App() {
                                       <div className="bubble-text" dir="rtl">
                                         {b.text_ar}
                                       </div>
+                                      {showDialogueTranslations && b.text_en && (
+                                        <div className="bubble-translation">
+                                          {b.text_en}
+                                        </div>
+                                      )}
                                     </div>
                                   </div>
                                 </div>

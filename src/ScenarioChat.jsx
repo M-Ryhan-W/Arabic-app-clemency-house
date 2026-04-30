@@ -1244,7 +1244,6 @@ export default function ScenarioChat({
             <div className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-6" onClick={() => setShowExitConfirm(false)}>
               <div className="bg-card rounded-3xl p-6 max-w-sm w-full border border-border shadow-2xl" onClick={(e) => e.stopPropagation()}>
                 <h3 className="font-heading text-lg font-bold mb-2">Leave conversation?</h3>
-                <p className="text-sm text-muted-foreground mb-1">Your progress in this scenario won't be saved.</p>
                 <p className="text-xs text-destructive/80 font-medium mb-5">You won't be able to redo this scenario again today.</p>
                 <div className="flex gap-3">
                   <button
@@ -1463,22 +1462,12 @@ export default function ScenarioChat({
                   className="overflow-hidden"
                 >
                   <div className="px-5 pt-4 pb-2">
-                    <div className="bg-red-500/5 border border-red-500/20 rounded-2xl p-4 space-y-3">
+                    <div className="bg-red-500/5 border border-red-500/20 rounded-2xl p-4 space-y-2">
                       <div className="flex items-center gap-2">
                         <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
                         <span className="text-xs font-bold uppercase tracking-widest text-red-400">Recording</span>
-                        <span className="ml-auto text-xs font-mono font-bold text-muted-foreground">{scenarioRecordingSeconds}s / 20s</span>
                       </div>
-                      <p className="text-sm text-muted-foreground">Speak as clearly as possible</p>
-                      <div className="w-full h-1 bg-muted rounded-full overflow-hidden">
-                        <div
-                          className="h-full rounded-full transition-all duration-1000 ease-linear"
-                          style={{
-                            width: `${(scenarioRecordingSeconds / 20) * 100}%`,
-                            background: scenarioRecordingSeconds >= 16 ? '#ef4444' : scenarioRecordingSeconds >= 12 ? '#eab308' : '#ef4444',
-                          }}
-                        />
-                      </div>
+                      <p className="text-sm text-muted-foreground">Tap stop when you're done.</p>
                     </div>
                   </div>
                 </motion.div>
