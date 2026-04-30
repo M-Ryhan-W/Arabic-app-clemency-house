@@ -578,6 +578,7 @@ function App() {
   const [clickedParagraphs, setClickedParagraphs] = useState(new Set());
   const [hideInstruction, setHideInstruction] = useState(false);
   const [isSlowSpeed, setIsSlowSpeed] = useState(false);
+  const [showParagraphTranslations, setShowParagraphTranslations] = useState(false);
   const scenarioTtsCache = useRef({});
   // Persistent TTS cache (localStorage, LRU ~40 entries).
   // Survives app restarts so previously-played audio plays instantly
@@ -9437,6 +9438,18 @@ function App() {
 
                         return (
                           <div className="paragraph-reader">
+                            <div className="dialogue-controls-wrap">
+                              <button
+                                className={`dlg-btn dlg-btn--toggle ${showParagraphTranslations ? 'is-active' : ''}`}
+                                onClick={() => { triggerHaptic(); setShowParagraphTranslations(v => !v); }}
+                                aria-pressed={showParagraphTranslations}
+                                aria-label={showParagraphTranslations ? "Hide translation" : "Show translation"}
+                              >
+                                <span className="dlg-btn-dot" />
+                                <span>Translation</span>
+                              </button>
+                            </div>
+
                             {/* Instruction Box - fades after first click */}
                             {!hideInstruction && (
                               <div className="instruction-box">
@@ -9496,7 +9509,7 @@ function App() {
                                         <div className="paragraph-text" dir="rtl">
                                           {b.text_ar}
                                         </div>
-                                        {b.text_en && (
+                                        {showParagraphTranslations && b.text_en && (
                                           <div className="paragraph-translation">
                                             {b.text_en}
                                           </div>
