@@ -209,15 +209,15 @@ function buildCommunityPrompt(post: any, hasAudio: boolean): string {
   // English feedback for an English speaker learning Arabic.
   // Ignore harakat. Reply ONLY as JSON: {"correction":"..."} max 2 sentences.
   const studentLabel = hasAudio
-    ? "Student answered by voice (audio attached). Transcribe mentally, then evaluate."
-    : `Student: "${post.answer_text || "(none)"}"`;
+    ? "The user answered by voice (audio attached). Transcribe mentally, then evaluate."
+    : `User's answer: "${post.answer_text || "(none)"}"`;
   const taskMap: Record<string, string> = {
-    read_aloud: `Task: student is reading the following Arabic text aloud.\nText: "${post.prompt_text}"\n${studentLabel}\nOnly flag ACTUAL mispronunciations or missed/added words you can hear. If the student read it correctly (ignoring harakat), praise them in one short sentence and DO NOT repeat the text back. Never "correct" a reading that matches the text.`,
-    translate: `Task: student is translating the following English sentence into Arabic. Their answer should be in Arabic.\nEnglish: "${post.prompt_text}"\n${studentLabel}\nCheck accuracy and grammar of their Arabic. If you suggest a better phrasing, it MUST be written in Arabic script (not English). Quote the suggested Arabic inside the correction. Never suggest an English "better phrasing".`,
-    daily_question: `Task: student is answering the following question in Arabic. Their answer should be in Arabic.\nQuestion: "${post.prompt_text}"\n${studentLabel}\nCheck grammar and vocab. Any suggested improved answer MUST be written in Arabic script, not English.`,
+    read_aloud: `Task: the user is reading the following Arabic text aloud.\nText: "${post.prompt_text}"\n${studentLabel}\nOnly flag ACTUAL mispronunciations or missed/added words you can hear. If the user read it correctly (ignoring harakat), praise them in one short sentence and DO NOT repeat the text back. Never "correct" a reading that matches the text.`,
+    translate: `Task: the user is translating the following English sentence into Arabic. Their answer should be in Arabic.\nEnglish: "${post.prompt_text}"\n${studentLabel}\nCheck accuracy and grammar of the user's Arabic. If you suggest a better phrasing, it MUST be written in Arabic script (not English). Quote the suggested Arabic inside the correction. Never suggest an English "better phrasing".`,
+    daily_question: `Task: the user is answering the following question in Arabic. Their answer should be in Arabic.\nQuestion: "${post.prompt_text}"\n${studentLabel}\nCheck grammar and vocab. Any suggested improved answer MUST be written in Arabic script, not English.`,
   };
   const task = taskMap[post.activity_type] || taskMap.daily_question;
-  return `You are an Arabic tutor for English speakers. Reply in English (max 2 sentences), but any Arabic corrections/suggestions MUST be in Arabic script. Ignore harakat (diacritics) when judging correctness. Do not fabricate errors — only correct real mistakes. JSON only: {"correction":"..."}\n${task}`;
+  return `You are an Arabic tutor for English speakers. Speak DIRECTLY TO THE USER in 2nd person — use "you" and "your", never "the student", "they", "their", or "the user". Write the correction as if speaking face-to-face (e.g., "You said X — try Y instead", "Your grammar is solid", "Nice job — your pronunciation was clear"). Reply in English (max 2 sentences), but any Arabic corrections/suggestions MUST be in Arabic script. Ignore harakat (diacritics) when judging correctness. Do not fabricate errors — only correct real mistakes. JSON only: {"correction":"..."}\n${task}`;
 }
 
 /* ---------- Auth Helpers ---------- */

@@ -6031,6 +6031,11 @@ button {
   }
 }
 
+@keyframes challengeRingProgress {
+  from { stroke-dashoffset: 238.76; }
+  to   { stroke-dashoffset: 0; }
+}
+
 .picture-hint-panel-shell {
   padding: 0 1.25rem;
   padding-top: 0.25rem;

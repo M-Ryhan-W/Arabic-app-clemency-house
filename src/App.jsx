@@ -905,7 +905,7 @@ function App() {
   const [pictureVocab, setPictureVocab] = useState([]);
   const [pictureVocabIndex, setPictureVocabIndex] = useState(0);
   const [picturePhase, setPicturePhase] = useState("lessons");
-  // Phases: "lessons" | "vocab" | "picture" | "recording" | "success" | "retry" | "solution"
+  // Phases: "lessons" | "intro" | "vocab" | "picture" | "recording" | "feedback" | "completed" | "silence" | "not_arabic" | "too_short"
   const [pictureTranscript, setPictureTranscript] = useState("");
   const [pictureMatchPercent, setPictureMatchPercent] = useState(0);
   const [pictureMatchedWords, setPictureMatchedWords] = useState([]);
@@ -3272,52 +3272,45 @@ function App() {
     setWotdExampleIndex(0);
 
     try {
-      // Calculate which word to show based on UK days since start date
+      // Cycle through whatever rows exist in word_of_the_day, ordered by order_index.
+      // Anchored to UK midnight on 2026-02-05 so BST/GMT can't shift the rotation.
       const daysDiff = getUkDaysSince('2026-02-05T00:00:00Z');
-      const wordOrderIndex = (daysDiff % 100) + 1; // Cycles through 1-100
 
-      // Fetch today's word
+      const { count: wordCount, error: countError } = await supabase
+        .from("word_of_the_day")
+        .select("id", { count: "exact", head: true });
+
+      if (countError || !wordCount || wordCount < 1) {
+        console.error("Error counting words of the day:", countError);
+        return;
+      }
+
+      const rowOffset = ((daysDiff % wordCount) + wordCount) % wordCount;
+
       const { data: wordData, error: wordError } = await supabase
         .from("word_of_the_day")
         .select("*")
-        .eq("order_index", wordOrderIndex)
+        .order("order_index", { ascending: true })
+        .range(rowOffset, rowOffset)
         .single();
 
-      if (wordError) {
+      if (wordError || !wordData) {
         console.error("Error loading word of the day:", wordError);
-        // Fallback to first word if not found
-        const { data: fallbackData } = await supabase
-          .from("word_of_the_day")
-          .select("*")
-          .order("order_index", { ascending: true })
-          .limit(1)
-          .single();
-
-        if (fallbackData) {
-          setCurrentWotd(fallbackData);
-          // Fetch examples for fallback word
-          const { data: examplesData } = await supabase
-            .from("word_of_the_day_examples")
-            .select("*")
-            .eq("word_id", fallbackData.id)
-            .order("order_index", { ascending: true });
-          setWotdExamples(examplesData || []);
-        }
-      } else {
-        setCurrentWotd(wordData);
-        // Fetch examples for this word
-        const { data: examplesData } = await supabase
-          .from("word_of_the_day_examples")
-          .select("*")
-          .eq("word_id", wordData.id)
-          .order("order_index", { ascending: true });
-        setWotdExamples(examplesData || []);
-        // Prime TTS caches from any audio stored on the rows.
-        // This is the cross-device fast path — first student of the day
-        // populates these columns via writeback; everyone after gets the
-        // audio inline with the word query, zero extra network.
-        primeWotdAudio(wordData, examplesData || []);
+        return;
       }
+
+      setCurrentWotd(wordData);
+      const { data: examplesData } = await supabase
+        .from("word_of_the_day_examples")
+        .select("*")
+        .eq("word_id", wordData.id)
+        .order("order_index", { ascending: true });
+      setWotdExamples(examplesData || []);
+      // Prime TTS caches from any audio stored on the rows.
+      // This is the cross-device fast path — first student of the day
+      // populates these columns via writeback; everyone after gets the
+      // audio inline with the word query, zero extra network.
+      primeWotdAudio(wordData, examplesData || []);
     } catch (err) {
       console.error("Error in loadWordOfTheDay:", err);
     }
@@ -3461,7 +3454,7 @@ function App() {
 
   async function openPictureDescribeLesson(lesson) {
     setActivePictureLesson(lesson);
-    setPicturePhase("vocab");
+    setPicturePhase("intro");
     setPictureVocabIndex(0);
     setPictureTranscript("");
     setPictureMatchPercent(0);
@@ -3989,9 +3982,9 @@ function App() {
       recorder.start();
       setChallengeRecording(true);
 
-      // Auto-stop: 20s for speak_challenge, 10s for correction
+      // Auto-stop: 60s for speak_challenge follow-up, 10s for correction
       const step = pictureFeedbackSteps[stepIdx];
-      const timeout = step?.type === 'speak_challenge' ? 30000 : 10000;
+      const timeout = step?.type === 'speak_challenge' ? 60000 : 10000;
       setTimeout(() => {
         if (challengeRecorderRef.current?.state === 'recording') {
           stopChallengeRecording(stepIdx);
@@ -8166,6 +8159,54 @@ function App() {
       );
     }
 
+    // PHASE: INTRO
+    if (picturePhase === "intro" && activePictureLesson) {
+      return (
+        <div className="picture-describe-screen">
+          <header className="picture-describe-header">
+            <button
+              className="picture-back-btn"
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(true); }}
+            >
+              <MdArrowBackIosNew style={{ fontSize: '1.1rem' }} />
+            </button>
+            <h2 className="picture-describe-title">{activePictureLesson.title}</h2>
+            <div style={{ width: '2.5rem' }} />
+          </header>
+
+          <div style={{ flex: 1, padding: '1rem', display: 'flex', flexDirection: 'column', gap: '1rem', overflowY: 'auto' }}>
+            <img
+              src={activePictureLesson.image_url}
+              alt={activePictureLesson.title}
+              style={{ width: '100%', borderRadius: '1rem', border: '1px solid var(--border)', objectFit: 'cover', boxShadow: '0 10px 40px rgba(0,0,0,0.15)' }}
+            />
+
+            <div style={{ background: 'var(--card)', borderRadius: '1.25rem', padding: '1.25rem', border: '1px solid var(--border)' }}>
+              <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#f59e0b', marginBottom: '0.5rem' }}>
+                Today's Picture
+              </div>
+              <p style={{ fontSize: '0.95rem', lineHeight: 1.6, color: 'var(--foreground)', margin: 0 }}>
+                This is today's picture. Try to describe it in as much detail as possible — include every detail you can see. First, let's go through the vocabulary you'll need.
+              </p>
+            </div>
+          </div>
+
+          <div style={{ padding: '1rem 1.25rem calc(env(safe-area-inset-bottom, 20px) + 1.25rem)' }}>
+            <button
+              style={{
+                width: '100%', padding: '0.95rem', borderRadius: '1rem', border: 'none', cursor: 'pointer',
+                background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+                color: 'white', fontWeight: 700, fontSize: '0.95rem'
+              }}
+              onClick={() => { triggerHaptic(); setPicturePhase("vocab"); }}
+            >
+              Continue to Vocabulary <MdArrowForwardIos style={{ display: 'inline', verticalAlign: 'middle', fontSize: '0.8em' }} />
+            </button>
+          </div>
+        </div>
+      );
+    }
+
     // PHASE: VOCAB CAROUSEL
     if (picturePhase === "vocab" && activePictureLesson) {
       return (
@@ -8173,7 +8214,7 @@ function App() {
           <header className="fixed-header" style={{ justifyContent: 'space-between', paddingTop: '0.5rem' }}>
             <span
               style={{ fontSize: '1.5rem', cursor: 'pointer', padding: '0.5rem' }}
-              onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(); }}
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); setPicturePhase("intro"); }}
             >
               <MdArrowBackIosNew />
             </span>
@@ -8311,7 +8352,7 @@ function App() {
               </div>
             )}
 
-            {showPictureHint && !pictureCheckingAnswer && !pictureRecording && (
+            {showPictureHint && !pictureCheckingAnswer && (
               <div className="picture-hint-panel-shell">
                 <div className="picture-hint-panel">
                   <div className="picture-hint-panel-header">
@@ -8379,8 +8420,8 @@ function App() {
                 })()
               ) : (
                 <div className="flex items-center justify-center gap-12">
-                  {/* Hint Button */}
-                  {!pictureRecording && pictureVocab.length > 0 && (
+                  {/* Hint Button — accessible even while recording */}
+                  {pictureVocab.length > 0 && (
                     <button
                       onClick={() => { triggerHaptic(); setShowPictureHint(!showPictureHint); }}
                       className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-colors active:scale-95 border ${
@@ -8701,25 +8742,48 @@ function App() {
                           </div>
                         )}
                         <div style={{ display: 'flex', justifyContent: 'center', gap: '0.75rem', alignItems: 'center' }}>
-                          <button
-                            style={{
-                              width: 56, height: 56, borderRadius: '50%', border: 'none', cursor: 'pointer',
-                              background: challengeRecording ? '#ef4444' : '#8b5cf6', color: 'white',
-                              fontSize: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                              animation: challengeRecording ? 'micPulse 1.5s ease-in-out infinite' : 'none',
-                              boxShadow: '0 4px 15px rgba(0,0,0,0.2)'
-                            }}
-                            onClick={() => {
-                              triggerHaptic();
-                              if (challengeRecording) { stopChallengeRecording(idx); }
-                              else { startChallengeRecording(idx); }
-                            }}
-                          >
-                            <Icon icon={challengeRecording ? "solar:stop-bold" : "solar:microphone-bold"} style={{ fontSize: '1.6rem' }} />
-                          </button>
-                          {challengeRecording ? (
-                            <span style={{ fontSize: '0.75rem', color: '#8b5cf6', fontWeight: 600 }}>Up to 30s</span>
-                          ) : (
+                          <div style={{ position: 'relative', width: 84, height: 84, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            {challengeRecording && (
+                              <svg
+                                width="84"
+                                height="84"
+                                viewBox="0 0 84 84"
+                                aria-hidden="true"
+                                style={{ position: 'absolute', inset: 0, transform: 'rotate(-90deg)', pointerEvents: 'none' }}
+                              >
+                                <circle cx="42" cy="42" r="38" fill="none" stroke="rgba(139,92,246,0.16)" strokeWidth="4" />
+                                <circle
+                                  cx="42"
+                                  cy="42"
+                                  r="38"
+                                  fill="none"
+                                  stroke="#8b5cf6"
+                                  strokeWidth="4"
+                                  strokeLinecap="round"
+                                  strokeDasharray="238.76"
+                                  strokeDashoffset="238.76"
+                                  style={{ animation: 'challengeRingProgress 60s linear forwards' }}
+                                />
+                              </svg>
+                            )}
+                            <button
+                              style={{
+                                width: 56, height: 56, borderRadius: '50%', border: 'none', cursor: 'pointer',
+                                background: challengeRecording ? '#ef4444' : '#8b5cf6', color: 'white',
+                                fontSize: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                animation: challengeRecording ? 'micPulse 1.5s ease-in-out infinite' : 'none',
+                                boxShadow: '0 4px 15px rgba(0,0,0,0.2)'
+                              }}
+                              onClick={() => {
+                                triggerHaptic();
+                                if (challengeRecording) { stopChallengeRecording(idx); }
+                                else { startChallengeRecording(idx); }
+                              }}
+                            >
+                              <Icon icon={challengeRecording ? "solar:stop-bold" : "solar:microphone-bold"} style={{ fontSize: '1.6rem' }} />
+                            </button>
+                          </div>
+                          {!challengeRecording && (
                             <button
                               style={{ padding: '0.5rem 1rem', borderRadius: '2rem', border: '1px solid var(--border)', background: 'var(--muted)', color: 'var(--muted-foreground)', fontSize: '0.8rem', cursor: 'pointer' }}
                               onClick={() => { triggerHaptic(); setChallengeCompleted(prev => ({ ...prev, [idx]: true })); }}
@@ -8862,12 +8926,55 @@ function App() {
                     width: '100%', padding: '0.9rem', borderRadius: '1rem', background: 'var(--primary)', border: 'none',
                     color: 'white', fontWeight: 700, fontSize: '0.88rem', cursor: 'pointer'
                   }}
-                  onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(true); }}
+                  onClick={() => { triggerHaptic(); setPicturePhase("completed"); }}
                 >
                   ✓ Done
                 </button>
               </>
             )}
+          </div>
+        </div>
+      );
+    }
+
+    // PHASE: COMPLETED
+    if (picturePhase === "completed" && activePictureLesson) {
+      return (
+        <div className="picture-describe-screen">
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem 1.5rem', textAlign: 'center', gap: '1.25rem' }}>
+            <div style={{ fontSize: '4rem', lineHeight: 1 }}>🎉</div>
+            <div>
+              <h1 style={{
+                fontSize: '1.9rem', fontWeight: 800, margin: '0 0 0.4rem',
+                background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+                WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text'
+              }}>
+                Congratulations!
+              </h1>
+              <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.5rem', fontWeight: 700, color: '#22c55e' }}>
+                أحسنت!
+              </div>
+            </div>
+            <img
+              src={activePictureLesson.image_url}
+              alt={activePictureLesson.title}
+              style={{ width: '60%', maxWidth: '240px', borderRadius: '1rem', border: '1px solid var(--border)', objectFit: 'cover', boxShadow: '0 10px 30px rgba(0,0,0,0.15)' }}
+            />
+            <p style={{ fontSize: '1rem', color: 'var(--foreground)', lineHeight: 1.6, margin: 0, maxWidth: '320px' }}>
+              You've completed today's picture description. Be sure to check back tomorrow for a new picture!
+            </p>
+          </div>
+          <div style={{ padding: '1rem 1.25rem calc(env(safe-area-inset-bottom, 20px) + 1.25rem)' }}>
+            <button
+              style={{
+                width: '100%', padding: '0.95rem', borderRadius: '1rem', border: 'none', cursor: 'pointer',
+                background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+                color: 'white', fontWeight: 700, fontSize: '0.95rem'
+              }}
+              onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(true); }}
+            >
+              Home
+            </button>
           </div>
         </div>
       );
@@ -9323,11 +9430,6 @@ function App() {
                 <div className="scene-ornament"><span className="scene-diamond" /></div>
                 <h1 className="scene-title">{activeLesson.title}</h1>
                 <div className="scene-ornament"><span className="scene-diamond" /></div>
-                {audioPlaying && (
-                  <div className="scene-audio-pill">
-                    <span /><span /><span />
-                  </div>
-                )}
               </div>
 
               {activeLesson.description && (
