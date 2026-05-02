@@ -838,6 +838,8 @@ function App() {
   const [teacherStudentPosts, setTeacherStudentPosts] = useState([]);
   const [loadingTeacherStudentPosts, setLoadingTeacherStudentPosts] = useState(false);
   const [teacherStudentPostsError, setTeacherStudentPostsError] = useState('');
+  const [expandedStudentId, setExpandedStudentId] = useState(null);
+  const [teacherStudentsVisible, setTeacherStudentsVisible] = useState(50);
   const [moderatingTargetKey, setModeratingTargetKey] = useState(null);
   const [recordingCountdown, setRecordingCountdown] = useState(null);
   const recordingTimerRef = useRef(null);
@@ -2420,6 +2422,8 @@ function App() {
     if (!user) return;
     setLoadingTeacherDashboard(true);
     setTeacherDashboardError('');
+    setExpandedStudentId(null);
+    setTeacherStudentsVisible(50);
 
     try {
       const { data, error } = await supabase.functions.invoke("teacher-dashboard", {
@@ -7006,7 +7010,9 @@ function App() {
                         <div className="flex items-center justify-between mb-3">
                           <h2 className="font-heading text-sm font-bold text-muted-foreground uppercase tracking-wider">Students</h2>
                           <span className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                            {teacherDashboardData?.generated_at ? `Updated ${getTimeAgo(teacherDashboardData.generated_at)}` : ''}
+                            {teacherDashboardData?.students?.length
+                              ? `${Math.min(teacherStudentsVisible, teacherDashboardData.students.length)} of ${teacherDashboardData.students.length}`
+                              : (teacherDashboardData?.generated_at ? `Updated ${getTimeAgo(teacherDashboardData.generated_at)}` : '')}
                           </span>
                         </div>
 
@@ -7016,95 +7022,132 @@ function App() {
                             <p className="text-sm text-muted-foreground">No students to show yet.</p>
                           </div>
                         ) : (
-                          <div className="space-y-4">
-                            {teacherDashboardData.students.map((student) => (
-                              <div key={student.user_id} className="bg-card border border-border/50 rounded-[1.75rem] p-5">
-                                <div className="flex items-start gap-3">
-                                  <div className="w-12 h-12 rounded-full bg-primary/15 border border-primary/30 flex items-center justify-center text-xl flex-shrink-0">
-                                    {student.avatar_url || '😊'}
-                                  </div>
-                                  <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                      <h3 className="text-base font-bold text-foreground">{student.display_name || 'Learner'}</h3>
+                          <>
+                            <div className="bg-card border border-border/50 rounded-2xl overflow-hidden divide-y divide-border/40">
+                              {teacherDashboardData.students.slice(0, teacherStudentsVisible).map((student) => {
+                                const isExpanded = expandedStudentId === student.user_id;
+                                return (
+                                  <div key={student.user_id}>
+                                    <button
+                                      type="button"
+                                      className="w-full flex items-center gap-3 px-4 py-3 text-left active:bg-muted/40 transition-colors"
+                                      onClick={() => {
+                                        triggerHaptic();
+                                        setExpandedStudentId(isExpanded ? null : student.user_id);
+                                      }}
+                                    >
+                                      <div className="w-9 h-9 rounded-full bg-primary/15 border border-primary/30 flex items-center justify-center text-base flex-shrink-0">
+                                        {student.avatar_url || '😊'}
+                                      </div>
+                                      <div className="flex-1 min-w-0">
+                                        <p className="text-sm font-bold text-foreground truncate">{student.display_name || 'Learner'}</p>
+                                      </div>
                                       {student.stats?.was_active_today && (
-                                        <span className="px-2 py-0.5 rounded-full bg-green-500/15 text-green-500 text-[9px] font-bold uppercase tracking-wider">Active today</span>
+                                        <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" aria-label="Active today" />
                                       )}
-                                    </div>
-                                    {student.email && <p className="text-xs text-muted-foreground mt-1 break-all">{student.email}</p>}
-                                    <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 text-[11px] text-muted-foreground">
-                                      <span>Last active {student.last_active_at ? getTimeAgo(student.last_active_at) : 'never'}</span>
-                                      <span>Joined {formatDashboardDate(student.joined_at)}</span>
-                                    </div>
-                                  </div>
-                                </div>
+                                      <Icon
+                                        icon="solar:alt-arrow-down-linear"
+                                        className={`text-base text-muted-foreground transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                                      />
+                                    </button>
 
-                                <div className="grid grid-cols-2 gap-3 mt-4">
-                                  <div className="rounded-2xl bg-muted/30 border border-border/30 p-3">
-                                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Time</p>
-                                    <p className="text-sm font-bold text-foreground">{formatMinutesSpent(student.stats?.minutes_today ?? 0)} today</p>
-                                    <p className="text-xs text-muted-foreground mt-1">{formatMinutesSpent(student.stats?.minutes_last_7_days ?? 0)} in 7 days</p>
-                                  </div>
-                                  <div className="rounded-2xl bg-muted/30 border border-border/30 p-3">
-                                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Streak</p>
-                                    <p className="text-sm font-bold text-foreground">{student.stats?.current_streak ?? 0} day streak</p>
-                                    <p className="text-xs text-muted-foreground mt-1">{student.stats?.active_days_last_30 ?? 0} active days in 30</p>
-                                  </div>
-                                  <div className="rounded-2xl bg-muted/30 border border-border/30 p-3">
-                                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Book Lessons</p>
-                                    <p className="text-sm font-bold text-foreground">
-                                      {student.stats?.book_lessons_completed ?? 0}/{teacherDashboardData?.overview?.total_book_lessons ?? 0}
-                                    </p>
-                                    <p className="text-xs text-muted-foreground mt-1">{student.stats?.book_progress_percent ?? 0}% complete</p>
-                                  </div>
-                                  <div className="rounded-2xl bg-muted/30 border border-border/30 p-3">
-                                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Active Posts</p>
-                                    <p className="text-sm font-bold text-foreground">
-                                      {student.stats?.posts_last_7_days ?? 0} this week
-                                    </p>
-                                    <p className="text-xs text-muted-foreground mt-1">{student.stats?.total_posts ?? 0} total posts</p>
-                                  </div>
-                                  <div className="rounded-2xl bg-muted/30 border border-border/30 p-3">
-                                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Daily Scenario</p>
-                                    <p className={`text-sm font-bold ${student.stats?.scenario_completed_today ? 'text-green-500' : 'text-foreground'}`}>
-                                      {student.stats?.scenario_completed_today ? 'Completed' : 'Not completed'}
-                                    </p>
-                                    <p className="text-xs text-muted-foreground mt-1">Today</p>
-                                  </div>
-                                  <div className="rounded-2xl bg-muted/30 border border-border/30 p-3">
-                                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Daily Picture</p>
-                                    <p className={`text-sm font-bold ${student.stats?.picture_completed_today ? 'text-green-500' : 'text-foreground'}`}>
-                                      {student.stats?.picture_completed_today ? 'Completed' : 'Not completed'}
-                                    </p>
-                                    <p className="text-xs text-muted-foreground mt-1">Today</p>
-                                  </div>
-                                </div>
+                                    {isExpanded && (
+                                      <div className="px-4 pb-4 pt-1 bg-muted/20">
+                                        <div className="flex items-center gap-2 flex-wrap mb-2">
+                                          {student.stats?.was_active_today && (
+                                            <span className="px-2 py-0.5 rounded-full bg-green-500/15 text-green-500 text-[9px] font-bold uppercase tracking-wider">Active today</span>
+                                          )}
+                                        </div>
+                                        {student.email && <p className="text-xs text-muted-foreground break-all">{student.email}</p>}
+                                        <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-[11px] text-muted-foreground">
+                                          <span>Last active {student.last_active_at ? getTimeAgo(student.last_active_at) : 'never'}</span>
+                                          <span>Joined {formatDashboardDate(student.joined_at)}</span>
+                                        </div>
 
-                                <div className="flex flex-wrap gap-3 mt-4 text-xs text-muted-foreground">
-                                  <span>Total time: <span className="text-foreground font-bold">{formatMinutesSpent(student.stats?.total_minutes ?? 0)}</span></span>
-                                  <span>Posts: <span className="text-foreground font-bold">{student.stats?.total_posts ?? 0}</span></span>
-                                  <span>Best streak: <span className="text-foreground font-bold">{student.stats?.longest_streak ?? 0}</span></span>
-                                </div>
+                                        <div className="grid grid-cols-2 gap-3 mt-4">
+                                          <div className="rounded-2xl bg-card border border-border/30 p-3">
+                                            <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Time</p>
+                                            <p className="text-sm font-bold text-foreground">{formatMinutesSpent(student.stats?.minutes_today ?? 0)} today</p>
+                                            <p className="text-xs text-muted-foreground mt-1">{formatMinutesSpent(student.stats?.minutes_last_7_days ?? 0)} in 7 days</p>
+                                          </div>
+                                          <div className="rounded-2xl bg-card border border-border/30 p-3">
+                                            <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Streak</p>
+                                            <p className="text-sm font-bold text-foreground">{student.stats?.current_streak ?? 0} day streak</p>
+                                            <p className="text-xs text-muted-foreground mt-1">{student.stats?.active_days_last_30 ?? 0} active days in 30</p>
+                                          </div>
+                                          <div className="rounded-2xl bg-card border border-border/30 p-3">
+                                            <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Book Lessons</p>
+                                            <p className="text-sm font-bold text-foreground">
+                                              {student.stats?.book_lessons_completed ?? 0}/{teacherDashboardData?.overview?.total_book_lessons ?? 0}
+                                            </p>
+                                            <p className="text-xs text-muted-foreground mt-1">{student.stats?.book_progress_percent ?? 0}% complete</p>
+                                          </div>
+                                          <div className="rounded-2xl bg-card border border-border/30 p-3">
+                                            <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Active Posts</p>
+                                            <p className="text-sm font-bold text-foreground">
+                                              {student.stats?.posts_last_7_days ?? 0} this week
+                                            </p>
+                                            <p className="text-xs text-muted-foreground mt-1">{student.stats?.total_posts ?? 0} total posts</p>
+                                          </div>
+                                          <div className="rounded-2xl bg-card border border-border/30 p-3">
+                                            <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Daily Scenario</p>
+                                            <p className={`text-sm font-bold ${student.stats?.scenario_completed_today ? 'text-green-500' : 'text-foreground'}`}>
+                                              {student.stats?.scenario_completed_today ? 'Completed' : 'Not completed'}
+                                            </p>
+                                            <p className="text-xs text-muted-foreground mt-1">Today</p>
+                                          </div>
+                                          <div className="rounded-2xl bg-card border border-border/30 p-3">
+                                            <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Daily Picture</p>
+                                            <p className={`text-sm font-bold ${student.stats?.picture_completed_today ? 'text-green-500' : 'text-foreground'}`}>
+                                              {student.stats?.picture_completed_today ? 'Completed' : 'Not completed'}
+                                            </p>
+                                            <p className="text-xs text-muted-foreground mt-1">Today</p>
+                                          </div>
+                                        </div>
 
-                                <div className="flex items-center justify-between gap-3 mt-4 pt-4 border-t border-border/30">
-                                  <span className="text-xs text-muted-foreground">
-                                    {student.stats?.was_active_today ? 'Active on the app today' : 'Not active today'}
-                                  </span>
-                                  <button
-                                    className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold active:scale-95 transition-all disabled:opacity-50"
-                                    disabled={!student.stats?.total_posts || (loadingTeacherStudentPosts && teacherSelectedStudent?.user_id === student.user_id)}
-                                    onClick={() => {
-                                      triggerHaptic();
-                                      loadTeacherStudentPosts(student);
-                                    }}
-                                  >
-                                    {loadingTeacherStudentPosts && teacherSelectedStudent?.user_id === student.user_id
-                                      ? 'Loading...'
-                                      : 'View Posts'}
-                                  </button>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
+                                        <div className="flex flex-wrap gap-3 mt-4 text-xs text-muted-foreground">
+                                          <span>Total time: <span className="text-foreground font-bold">{formatMinutesSpent(student.stats?.total_minutes ?? 0)}</span></span>
+                                          <span>Posts: <span className="text-foreground font-bold">{student.stats?.total_posts ?? 0}</span></span>
+                                          <span>Best streak: <span className="text-foreground font-bold">{student.stats?.longest_streak ?? 0}</span></span>
+                                        </div>
+
+                                        <div className="flex items-center justify-between gap-3 mt-4 pt-4 border-t border-border/30">
+                                          <span className="text-xs text-muted-foreground">
+                                            {student.stats?.was_active_today ? 'Active on the app today' : 'Not active today'}
+                                          </span>
+                                          <button
+                                            className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold active:scale-95 transition-all disabled:opacity-50"
+                                            disabled={!student.stats?.total_posts || (loadingTeacherStudentPosts && teacherSelectedStudent?.user_id === student.user_id)}
+                                            onClick={() => {
+                                              triggerHaptic();
+                                              loadTeacherStudentPosts(student);
+                                            }}
+                                          >
+                                            {loadingTeacherStudentPosts && teacherSelectedStudent?.user_id === student.user_id
+                                              ? 'Loading...'
+                                              : 'View Posts'}
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {teacherStudentsVisible < teacherDashboardData.students.length && (
+                              <button
+                                type="button"
+                                className="w-full mt-4 px-4 py-3 rounded-2xl bg-card border border-border/50 text-sm font-bold text-foreground active:scale-[0.99] transition-all"
+                                onClick={() => {
+                                  triggerHaptic();
+                                  setTeacherStudentsVisible((n) => n + 50);
+                                }}
+                              >
+                                Load more ({teacherDashboardData.students.length - teacherStudentsVisible} remaining)
+                              </button>
+                            )}
+                          </>
                         )}
                       </section>
                     </>
