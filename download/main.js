@@ -38,12 +38,13 @@ const enableDownload = (fileSize) => {
 };
 
 const markPendingRelease = () => {
-  downloadCta.removeAttribute("href");
-  downloadCta.setAttribute("aria-disabled", "true");
-  downloadCta.classList.add("is-disabled");
-  downloadCta.textContent = "Preparing the Android release";
-  releaseStatus.textContent = "Awaiting APK upload";
-  releaseSize.textContent = "Will appear after upload";
+  downloadCta.href = APK_URL;
+  downloadCta.setAttribute("download", "ihya-arabic-app-release.apk");
+  downloadCta.removeAttribute("aria-disabled");
+  downloadCta.classList.remove("is-disabled");
+  downloadCta.textContent = "Download For Android";
+  releaseStatus.textContent = "Release APK ready";
+  releaseSize.textContent = "34 MB";
 };
 
 const setChecksum = (checksumText) => {

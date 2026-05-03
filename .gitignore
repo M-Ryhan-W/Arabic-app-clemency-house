@@ -29,3 +29,15 @@ dist/
 build/
 .vite/
 .DS_Store
+
+# Android signing — never commit
+*.jks
+*.keystore
+android/keystore.properties
+android/app/release/
+android/app/build/
+
+# Built APK / AAB outputs
+*.apk
+*.aab
+!public/downloads/ihya-arabic-app-release.apk
