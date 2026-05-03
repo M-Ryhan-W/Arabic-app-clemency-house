@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useMemo } from "react";
 import ScenarioChat from "./ScenarioChat";
 import PreBookLesson from "./PreBookLesson";
-import { supabase } from "./supabaseClient";
+import { SUPABASE_ANON_KEY, SUPABASE_URL, supabase } from "./supabaseClient";
 import { Leapfrog } from 'ldrs/react';
 import 'ldrs/react/Leapfrog.css';
 import { App as CapacitorApp } from '@capacitor/app';
@@ -400,13 +400,12 @@ function App() {
         const info = await CapacitorApp.getInfo(); // { version: "1.0.0", build: "1", ... }
         const localVersion = info.version;
 
-        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://efpanaidmaztxszshlmp.supabase.co';
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5000);
 
-        const res = await fetch(`${supabaseUrl}/functions/v1/app-metadata`, {
+        const res = await fetch(`${SUPABASE_URL}/functions/v1/app-metadata`, {
           signal: controller.signal,
-          headers: { 'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY || '' },
+          headers: { 'apikey': SUPABASE_ANON_KEY },
         });
         clearTimeout(timeout);
 
@@ -447,9 +446,8 @@ function App() {
 
     const checkWebFreshness = async () => {
       try {
-        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://efpanaidmaztxszshlmp.supabase.co';
-        const res = await fetch(`${supabaseUrl}/functions/v1/app-metadata`, {
-          headers: { 'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY || '' },
+        const res = await fetch(`${SUPABASE_URL}/functions/v1/app-metadata`, {
+          headers: { 'apikey': SUPABASE_ANON_KEY },
         });
         if (!res.ok) return;
         const metadata = await res.json();
@@ -2891,7 +2889,7 @@ function App() {
     setAiFeedbackLoading(prev => { const s = new Set(prev); s.add(postId); return s; });
     try {
       const { data: session } = await supabase.auth.getSession();
-      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL || 'https://efpanaidmaztxszshlmp.supabase.co'}/functions/v1/community-ai-feedback`, {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/community-ai-feedback`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

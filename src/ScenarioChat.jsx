@@ -6,6 +6,7 @@ import { Leapfrog } from 'ldrs/react';
 import { DotLottieReact } from "@lottiefiles/dotlottie-react";
 import 'ldrs/react/Leapfrog.css';
 import { App as CapacitorApp } from '@capacitor/app';
+import { SUPABASE_ANON_KEY, SUPABASE_URL } from './supabaseClient';
 
 const MAX_AUDIO_BASE64_LENGTH = 5 * 1024 * 1024;
 const SCENARIO_VOICE_POOL = [
@@ -665,24 +666,21 @@ export default function ScenarioChat({
 
       const elapsedSeconds = scenarioStartTimeRef.current ? Math.floor((Date.now() - scenarioStartTimeRef.current) / 1000) : 0;
 
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
       // Get user session JWT for auth (supabase.functions.invoke does this internally)
       const { data: { session } } = await supabase.auth.getSession();
-      const accessToken = session?.access_token || supabaseAnonKey;
+      const accessToken = session?.access_token || SUPABASE_ANON_KEY;
 
       // Use raw fetch for SSE streaming (supabase.functions.invoke doesn't support streaming)
       const abortCtrl = new AbortController();
       streamTimeout = setTimeout(() => abortCtrl.abort(), 90000); // 90s timeout
 
-      const response = await fetch(`${supabaseUrl}/functions/v1/scenario-chat`, {
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/scenario-chat`, {
         method: "POST",
         signal: abortCtrl.signal,
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${accessToken}`,
-          "apikey": supabaseAnonKey,
+          "apikey": SUPABASE_ANON_KEY,
         },
         body: JSON.stringify({
           action: "reply-stream",
