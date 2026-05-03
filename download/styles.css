@@ -154,7 +154,7 @@ h2 {
 }
 
 h1 {
-  max-width: 12ch;
+  max-width: 11ch;
   font-size: clamp(3.3rem, 7vw, 5.8rem);
 }
 
@@ -249,6 +249,29 @@ h2 {
   height: 4rem;
   border-radius: 1.2rem;
   object-fit: cover;
+}
+
+.install-steps {
+  display: grid;
+  gap: 0.75rem;
+  margin-bottom: 1.4rem;
+  color: var(--text-soft);
+  line-height: 1.6;
+}
+
+.technical-details {
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+}
+
+.technical-details summary {
+  cursor: pointer;
+  color: var(--gold-soft);
+  font-weight: 800;
+}
+
+.technical-details .release-meta {
+  margin-top: 1rem;
 }
 
 .release-meta {

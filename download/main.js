@@ -6,6 +6,10 @@ const releaseStatus = document.querySelector("#releaseStatus");
 const releaseSize = document.querySelector("#releaseSize");
 const releaseChecksum = document.querySelector("#releaseChecksum");
 
+const setText = (element, text) => {
+  if (element) element.textContent = text;
+};
+
 const formatBytes = (bytes) => {
   const size = Number(bytes);
   if (!Number.isFinite(size) || size <= 0) return null;
@@ -27,13 +31,13 @@ const enableDownload = (fileSize) => {
   downloadCta.setAttribute("download", "ihya-arabic-app-release.apk");
   downloadCta.removeAttribute("aria-disabled");
   downloadCta.classList.remove("is-disabled");
-  downloadCta.textContent = "Download For Android";
-  releaseStatus.textContent = "Release APK ready";
+  downloadCta.textContent = "Download for Android";
+  setText(releaseStatus, "Release APK ready");
 
   if (fileSize) {
-    releaseSize.textContent = fileSize;
+    setText(releaseSize, fileSize);
   } else {
-    releaseSize.textContent = "Available";
+    setText(releaseSize, "Available");
   }
 };
 
@@ -42,19 +46,19 @@ const markPendingRelease = () => {
   downloadCta.setAttribute("download", "ihya-arabic-app-release.apk");
   downloadCta.removeAttribute("aria-disabled");
   downloadCta.classList.remove("is-disabled");
-  downloadCta.textContent = "Download For Android";
-  releaseStatus.textContent = "Release APK ready";
-  releaseSize.textContent = "34 MB";
+  downloadCta.textContent = "Download for Android";
+  setText(releaseStatus, "Release APK ready");
+  setText(releaseSize, "34 MB");
 };
 
 const setChecksum = (checksumText) => {
   const normalized = checksumText.trim();
   if (!normalized) {
-    releaseChecksum.textContent = "Checksum file is empty";
+    setText(releaseChecksum, "Checksum unavailable");
     return;
   }
 
-  releaseChecksum.textContent = normalized.split(/\s+/)[0];
+  setText(releaseChecksum, normalized.split(/\s+/)[0]);
 };
 
 const checkApkAvailability = async () => {
@@ -76,13 +80,13 @@ const loadChecksum = async () => {
   try {
     const response = await fetch(CHECKSUM_URL, { cache: "no-store" });
     if (!response.ok) {
-      releaseChecksum.textContent = "Add ihya-arabic-app-release.sha256 to show integrity data";
+      setText(releaseChecksum, "Checksum unavailable");
       return;
     }
 
     setChecksum(await response.text());
   } catch (_error) {
-    releaseChecksum.textContent = "Checksum unavailable";
+    setText(releaseChecksum, "Checksum unavailable");
   }
 };
 
