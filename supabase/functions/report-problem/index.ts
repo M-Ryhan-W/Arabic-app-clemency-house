@@ -7,7 +7,6 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const DAILY_REPORT_LIMIT = 5;
 const REPORT_TO = "ryhan1998@gmail.com";
 const FROM = "Ihya Arabic <noreply@mail.ihyaarabicapp.com>";
 const MAX_BODY_CHARS = 4000;
@@ -75,31 +74,32 @@ serve(async (req) => {
       );
     }
 
-    // ---- Rate limit: 5/day per user ----
-    const today = new Date().toISOString().split("T")[0];
-
-    await supabase
-      .from("daily_usage")
-      .upsert(
-        { user_id: user.id, usage_date: today },
-        { onConflict: "user_id,usage_date", ignoreDuplicates: true }
-      );
-
-    const { data: usage } = await supabase
-      .from("daily_usage")
-      .select("problem_reports")
-      .eq("user_id", user.id)
-      .eq("usage_date", today)
+    // ---- Atomic rate limit ----
+    // Insert the report row first. The DB trigger enforces 5/day per user,
+    // so racing requests can't slip past the limit. Only if the insert
+    // succeeds do we proceed to send the email.
+    const { data: inserted, error: insertErr } = await supabase
+      .from("problem_reports")
+      .insert({ user_id: user.id, message })
+      .select("id")
       .single();
 
-    const currentCount = usage?.problem_reports ?? 0;
-    if (currentCount >= DAILY_REPORT_LIMIT) {
+    if (insertErr) {
+      const errMsg = insertErr.message || "";
+      if (/daily_problem_report_limit_reached/i.test(errMsg)) {
+        const cleaned = errMsg.replace(/^.*daily_problem_report_limit_reached:\s*/i, "").trim();
+        return new Response(
+          JSON.stringify({
+            error: "daily_limit",
+            message: cleaned || "You've reached your daily report limit. Please try again tomorrow.",
+          }),
+          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      console.error("problem_reports insert error:", insertErr);
       return new Response(
-        JSON.stringify({
-          error: "daily_limit",
-          message: `You've reached your daily limit of ${DAILY_REPORT_LIMIT} reports. Please try again tomorrow.`,
-        }),
-        { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ error: "Could not record your report. Please try again later." }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
@@ -133,7 +133,8 @@ serve(async (req) => {
           <tr><td style="padding:8px 32px 24px;">
             <p style="font-size:13px;color:rgba(230,230,230,0.6);margin:0 0 4px;"><strong style="color:#fff;">User:</strong> ${escapeHtml(displayName || "(no display name)")}</p>
             <p style="font-size:13px;color:rgba(230,230,230,0.6);margin:0 0 4px;"><strong style="color:#fff;">Email:</strong> ${escapeHtml(userEmail)}</p>
-            <p style="font-size:13px;color:rgba(230,230,230,0.6);margin:0 0 16px;"><strong style="color:#fff;">User ID:</strong> ${escapeHtml(user.id)}</p>
+            <p style="font-size:13px;color:rgba(230,230,230,0.6);margin:0 0 4px;"><strong style="color:#fff;">User ID:</strong> ${escapeHtml(user.id)}</p>
+            <p style="font-size:13px;color:rgba(230,230,230,0.6);margin:0 0 16px;"><strong style="color:#fff;">Report ID:</strong> ${escapeHtml(inserted?.id ?? "")}</p>
             <div style="border-top:1px solid rgba(224,159,62,0.15);padding-top:16px;">
               <p style="font-size:12px;font-weight:700;color:#E09F3E;text-transform:uppercase;letter-spacing:0.5px;margin:0 0 8px;">Message</p>
               <div style="font-size:14px;line-height:1.6;color:rgba(230,230,230,0.9);white-space:pre-wrap;">${messageHtml}</div>
@@ -144,7 +145,7 @@ serve(async (req) => {
     </table>
   </body>
 </html>`;
-    const text = `Problem report from ${displayName || userEmail}\n\nUser: ${displayName || "(no display name)"}\nEmail: ${userEmail}\nUser ID: ${user.id}\n\n---\n${message}`;
+    const text = `Problem report from ${displayName || userEmail}\n\nUser: ${displayName || "(no display name)"}\nEmail: ${userEmail}\nUser ID: ${user.id}\nReport ID: ${inserted?.id ?? ""}\n\n---\n${message}`;
 
     const resendRes = await fetch("https://api.resend.com/emails", {
       method: "POST",
@@ -172,18 +173,8 @@ serve(async (req) => {
       );
     }
 
-    // Only increment after a successful send so failures don't burn quota.
-    await supabase
-      .from("daily_usage")
-      .update({ problem_reports: currentCount + 1 })
-      .eq("user_id", user.id)
-      .eq("usage_date", today);
-
     return new Response(
-      JSON.stringify({
-        ok: true,
-        remaining: DAILY_REPORT_LIMIT - (currentCount + 1),
-      }),
+      JSON.stringify({ ok: true, id: inserted?.id ?? null }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (e) {

@@ -7630,7 +7630,7 @@ function App() {
                 <Icon icon="solar:bug-bold" className="text-amber-500 text-xl" />
                 <h3 className="font-heading text-lg font-bold">Report a Problem</h3>
               </div>
-              <p className="text-sm text-muted-foreground mb-4">Tell us what went wrong and we'll look into it. Limit 5 reports per day.</p>
+              <p className="text-sm text-muted-foreground mb-4">Tell us what went wrong and we'll look into it.</p>
               <textarea
                 className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/50 mb-1 resize-none"
                 placeholder="Describe the problem..."
