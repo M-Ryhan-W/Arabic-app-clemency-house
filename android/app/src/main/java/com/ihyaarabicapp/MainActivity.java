@@ -1,4 +1,4 @@
-package com.clemencyhouse.arabic;
+package com.ihyaarabicapp;
 
 import android.os.Bundle;
 import android.webkit.PermissionRequest;

@@ -816,6 +816,7 @@ function App() {
   const [reportTarget, setReportTarget] = useState(null);
   const [reportReason, setReportReason] = useState('');
   const [confirmModal, setConfirmModal] = useState(null); // { title, message, variant, onConfirm }
+  const [limitModal, setLimitModal] = useState(null); // { title, message }
   const [deletingCorrectionId, setDeletingCorrectionId] = useState(null);
   const [userReactions, setUserReactions] = useState({}); // { post_id: 'perfect', correction_id: 'upvote' }
   const [playingPostId, setPlayingPostId] = useState(null);
@@ -848,6 +849,9 @@ function App() {
   const [teacherStudentPostsError, setTeacherStudentPostsError] = useState('');
   const [expandedStudentId, setExpandedStudentId] = useState(null);
   const [teacherStudentsVisible, setTeacherStudentsVisible] = useState(50);
+  const [showReportProblem, setShowReportProblem] = useState(false);
+  const [reportProblemText, setReportProblemText] = useState("");
+  const [reportProblemSubmitting, setReportProblemSubmitting] = useState(false);
   const [moderatingTargetKey, setModeratingTargetKey] = useState(null);
   const [recordingCountdown, setRecordingCountdown] = useState(null);
   const recordingTimerRef = useRef(null);
@@ -864,6 +868,30 @@ function App() {
       setInfoToast({ message, icon });
       infoToastTimerRef.current = setTimeout(() => setInfoToast(null), 2500);
     });
+  };
+
+  // Detects rate-limit responses from Edge Functions (429 / { error: "daily_limit" })
+  // or from the corrections trigger (Postgres error containing "daily_correction_limit_reached").
+  // Returns true if a limit was hit and the modal was shown — callers should bail out.
+  const handleRateLimitError = ({ data, error, fallbackTitle = 'Daily limit reached' } = {}) => {
+    const dataMsg = (data && (data.error === 'daily_limit' || data.code === 429)) ? data.message : null;
+    const errMsg = error?.message || '';
+    const isPgLimit = /daily_correction_limit_reached/i.test(errMsg);
+    const isCtxLimit = /\bstatus(?:Code)?\s*[:=]\s*429\b/i.test(JSON.stringify(error || {}));
+    if (dataMsg) {
+      setLimitModal({ title: fallbackTitle, message: dataMsg });
+      return true;
+    }
+    if (isPgLimit) {
+      const cleaned = errMsg.replace(/^.*daily_correction_limit_reached:\s*/i, '').trim();
+      setLimitModal({ title: fallbackTitle, message: cleaned || "You've reached your daily limit. Come back tomorrow!" });
+      return true;
+    }
+    if (isCtxLimit) {
+      setLimitModal({ title: fallbackTitle, message: "You've reached your daily limit. Come back tomorrow!" });
+      return true;
+    }
+    return false;
   };
   const [pictureCompleted, setPictureCompleted] = useState(false);
   const [correctionInputMode, setCorrectionInputMode] = useState('text');
@@ -2444,6 +2472,30 @@ function App() {
     setUserRoles((data || []).map((row) => row.role));
   }
 
+  async function submitReportProblem() {
+    const message = reportProblemText.trim();
+    if (!message || reportProblemSubmitting) return;
+    setReportProblemSubmitting(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("report-problem", {
+        body: { message },
+      });
+      if (error || data?.error) {
+        const errMessage = data?.message || data?.error || error?.message || "Could not send your report.";
+        showInfoToast(errMessage, 'solar:danger-triangle-bold');
+        return;
+      }
+      setReportProblemText("");
+      setShowReportProblem(false);
+      showInfoToast('Report sent — thank you!', 'solar:check-circle-bold');
+    } catch (err) {
+      console.error("submitReportProblem error:", err);
+      showInfoToast('Could not send your report. Please try again.', 'solar:danger-triangle-bold');
+    } finally {
+      setReportProblemSubmitting(false);
+    }
+  }
+
   async function saveUserProfile() {
     if (!user || !profileSetupName.trim()) return;
     const { error } = await supabase
@@ -2987,6 +3039,10 @@ function App() {
         body: JSON.stringify({ post_id: postId }),
       });
       const json = await res.json().catch(() => ({}));
+      if (res.status === 429 && json?.error === 'daily_limit') {
+        setLimitModal({ title: 'AI feedback limit reached', message: json.message || "You've reached your daily limit. Come back tomorrow!" });
+        return;
+      }
       if (!res.ok && !json.skipped) {
         console.error("AI feedback failed:", json);
         alert(json.error || "AI feedback failed. Please try again.");
@@ -3041,6 +3097,7 @@ function App() {
         .single();
 
       if (error) {
+        if (handleRateLimitError({ error, fallbackTitle: 'Correction limit reached' })) return;
         console.error("Error submitting correction:", error);
         alert("Failed to post correction: " + (error.message || "Unknown error"));
         return;
@@ -3790,6 +3847,15 @@ function App() {
       // Clear analysis timer
       if (analysisTimerRef.current) { clearInterval(analysisTimerRef.current); analysisTimerRef.current = null; }
 
+      if (data?.error === 'daily_limit') {
+        setLimitModal({ title: 'Speech check limit reached', message: data.message });
+        setPictureCheckingAnswer(false);
+        return;
+      }
+      if (error && handleRateLimitError({ error, fallbackTitle: 'Speech check limit reached' })) {
+        setPictureCheckingAnswer(false);
+        return;
+      }
       if (error) {
         console.error("Picture speech check error:", error);
         setSpeechError("Failed to process audio: " + error.message);
@@ -3927,7 +3993,13 @@ function App() {
       const { data, error } = await supabase.functions.invoke("ai-feedback", {
         body: { transcript, exerciseType, expectedText, vocabList, lessonContext }
       });
+      if (data?.error === 'daily_limit') {
+        setLimitModal({ title: 'AI feedback limit reached', message: data.message });
+        setLoadingAiFeedback(false);
+        return;
+      }
       if (error) {
+        if (handleRateLimitError({ error, fallbackTitle: 'AI feedback limit reached' })) { setLoadingAiFeedback(false); return; }
         console.error("AI feedback error:", error);
         setLoadingAiFeedback(false);
         return;
@@ -4042,6 +4114,15 @@ function App() {
                 expectedText: expectedText
               }
             });
+            if (data?.error === 'daily_limit') {
+              setLimitModal({ title: 'Speech check limit reached', message: data.message });
+              setChallengeChecking(false);
+              return;
+            }
+            if (error && handleRateLimitError({ error, fallbackTitle: 'Speech check limit reached' })) {
+              setChallengeChecking(false);
+              return;
+            }
             if (!error && data) {
               const parsed = typeof data === "string" ? JSON.parse(data) : data;
               const pass = parsed?.pass === true;
@@ -4480,6 +4561,15 @@ function App() {
         }
       );
 
+      if (data?.error === 'daily_limit') {
+        setLimitModal({ title: 'Speech check limit reached', message: data.message });
+        setIsCheckingAnswer(false);
+        return;
+      }
+      if (error && handleRateLimitError({ error, fallbackTitle: 'Speech check limit reached' })) {
+        setIsCheckingAnswer(false);
+        return;
+      }
       if (error) {
         console.error("Speech check error:", error);
         setSpeechError("Failed to send audio: " + error.message);
@@ -6995,6 +7085,14 @@ function App() {
                   <Icon icon="solar:alt-arrow-right-linear" className="text-muted-foreground ml-auto" />
                 </button>
                 <button
+                  className="w-full bg-card p-4 rounded-2xl border border-border/50 flex items-center gap-4 text-left active:scale-[0.98] transition-all"
+                  onClick={() => { triggerHaptic(); setReportProblemText(""); setShowReportProblem(true); }}
+                >
+                  <Icon icon="solar:bug-bold" className="text-amber-500 text-xl" />
+                  <span className="font-medium text-sm">Report a Problem</span>
+                  <Icon icon="solar:alt-arrow-right-linear" className="text-muted-foreground ml-auto" />
+                </button>
+                <button
                   className="w-full bg-destructive/10 p-4 rounded-2xl border border-destructive/20 flex items-center gap-4 text-left active:scale-[0.98] transition-all"
                   onClick={() => { triggerHaptic(); setShowSignOutConfirm(true); }}
                 >
@@ -7522,6 +7620,47 @@ function App() {
         </nav>
 
         {/* Sign Out Confirmation Modal */}
+        {showReportProblem && (
+          <div
+            className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-6"
+            onClick={() => { if (!reportProblemSubmitting) { triggerHaptic(); setShowReportProblem(false); } }}
+          >
+            <div className="bg-card rounded-3xl p-6 max-w-sm w-full border border-border shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center gap-3 mb-1">
+                <Icon icon="solar:bug-bold" className="text-amber-500 text-xl" />
+                <h3 className="font-heading text-lg font-bold">Report a Problem</h3>
+              </div>
+              <p className="text-sm text-muted-foreground mb-4">Tell us what went wrong and we'll look into it. Limit 5 reports per day.</p>
+              <textarea
+                className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/50 mb-1 resize-none"
+                placeholder="Describe the problem..."
+                rows={5}
+                maxLength={4000}
+                value={reportProblemText}
+                onChange={(e) => setReportProblemText(e.target.value)}
+                disabled={reportProblemSubmitting}
+              />
+              <p className="text-[10px] text-muted-foreground text-right mb-4">{reportProblemText.length}/4000</p>
+              <div className="flex gap-3">
+                <button
+                  className="flex-1 py-3 rounded-xl border border-border font-bold text-sm text-foreground bg-muted active:scale-[0.97] transition-all disabled:opacity-50"
+                  onClick={() => { triggerHaptic(); setShowReportProblem(false); }}
+                  disabled={reportProblemSubmitting}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="flex-1 py-3 rounded-xl font-bold text-sm text-primary-foreground bg-primary active:scale-[0.97] transition-all disabled:opacity-50"
+                  onClick={() => { triggerHaptic(); submitReportProblem(); }}
+                  disabled={reportProblemSubmitting || !reportProblemText.trim()}
+                >
+                  {reportProblemSubmitting ? 'Sending...' : 'Send'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {showSignOutConfirm && (
           <div className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-6" onClick={() => { triggerHaptic(); setShowSignOutConfirm(false); }}>
             <div className="bg-card rounded-3xl p-6 max-w-sm w-full border border-border shadow-2xl" onClick={(e) => e.stopPropagation()}>
@@ -7641,6 +7780,28 @@ function App() {
                   onClick={() => { triggerHaptic(); confirmModal.onConfirm(); setConfirmModal(null); }}
                 >
                   {confirmModal.confirmLabel || 'Delete'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Daily-Limit Reached Modal */}
+        {limitModal && (
+          <div className="confirm-overlay" onClick={() => setLimitModal(null)}>
+            <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
+              <div className="confirm-icon warning">
+                <Icon icon="solar:hourglass-bold" />
+              </div>
+              <h3 className="confirm-title">{limitModal.title || 'Daily limit reached'}</h3>
+              <p className="confirm-message">{limitModal.message}</p>
+              <div className="confirm-actions">
+                <button
+                  className="confirm-btn confirm-btn-warning"
+                  onClick={() => { triggerHaptic(); setLimitModal(null); }}
+                  style={{ width: '100%' }}
+                >
+                  Got it
                 </button>
               </div>
             </div>

@@ -47,6 +47,34 @@ serve(async (req) => {
     }
     const callerId = userData.user.id;
 
+    // ---- Rate limit: per-user daily AI feedback budget ----
+    const DAILY_AI_FEEDBACK_LIMIT = 80;
+    const today = new Date().toISOString().split("T")[0];
+    await supabase.from("daily_usage").upsert(
+      { user_id: callerId, usage_date: today },
+      { onConflict: "user_id,usage_date", ignoreDuplicates: true }
+    );
+    const { data: currentUsage } = await supabase
+      .from("daily_usage")
+      .select("ai_feedback_requests, total_requests")
+      .eq("user_id", callerId)
+      .eq("usage_date", today)
+      .single();
+    if (currentUsage && currentUsage.ai_feedback_requests >= DAILY_AI_FEEDBACK_LIMIT) {
+      return new Response(JSON.stringify({
+        error: "daily_limit",
+        message: `You've reached your daily limit of ${DAILY_AI_FEEDBACK_LIMIT} AI feedback requests. Come back tomorrow!`,
+      }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    await supabase
+      .from("daily_usage")
+      .update({
+        ai_feedback_requests: (currentUsage?.ai_feedback_requests ?? 0) + 1,
+        total_requests: (currentUsage?.total_requests ?? 0) + 1,
+      })
+      .eq("user_id", callerId)
+      .eq("usage_date", today);
+
     // Fetch the post
     const { data: post, error: postErr } = await supabase
       .from("community_posts")

@@ -1,10 +1,13 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
 };
+
+const DAILY_EMAIL_LIMIT = 5;
 
 const FROM = "Ihya Arabic <noreply@mail.ihyaarabicapp.com>";
 const REPLY_TO = "ihyaarabic1@gmail.com";
@@ -73,15 +76,69 @@ serve(async (req) => {
       );
     }
 
-    const body = await req.json();
-    const { type, to, data } = body ?? {};
-
-    if (!type || !to) {
+    // ---- Auth: require a valid Supabase session ----
+    const authHeader = req.headers.get("Authorization") || "";
+    const accessToken = authHeader.replace(/^Bearer\s+/i, "");
+    if (!accessToken) {
       return new Response(
-        JSON.stringify({ error: "Missing required fields: type, to" }),
+        JSON.stringify({ error: "Missing authorization" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+    );
+    const { data: userData, error: userErr } = await supabase.auth.getUser(accessToken);
+    if (userErr || !userData?.user?.email) {
+      return new Response(
+        JSON.stringify({ error: "Invalid session" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    const callerId = userData.user.id;
+    const callerEmail = userData.user.email;
+
+    const body = await req.json();
+    const { type, data } = body ?? {};
+
+    if (!type) {
+      return new Response(
+        JSON.stringify({ error: "Missing required field: type" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+
+    // SECURITY: Force recipient to be the authenticated user's email — never trust
+    // a `to` field from the client, otherwise this endpoint becomes a spam relay.
+    const to = callerEmail;
+
+    // ---- Rate limit per user per day ----
+    const today = new Date().toISOString().split("T")[0];
+    await supabase.from("daily_usage").upsert(
+      { user_id: callerId, usage_date: today },
+      { onConflict: "user_id,usage_date", ignoreDuplicates: true }
+    );
+    const { data: currentUsage } = await supabase
+      .from("daily_usage")
+      .select("emails_sent, total_requests")
+      .eq("user_id", callerId)
+      .eq("usage_date", today)
+      .single();
+    if (currentUsage && currentUsage.emails_sent >= DAILY_EMAIL_LIMIT) {
+      return new Response(JSON.stringify({
+        error: "daily_limit",
+        message: `You've reached your daily limit of ${DAILY_EMAIL_LIMIT} emails. Come back tomorrow!`,
+      }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    await supabase
+      .from("daily_usage")
+      .update({
+        emails_sent: (currentUsage?.emails_sent ?? 0) + 1,
+        total_requests: (currentUsage?.total_requests ?? 0) + 1,
+      })
+      .eq("user_id", callerId)
+      .eq("usage_date", today);
 
     const { subject, html, text } = buildTemplate(type, data ?? {});
 

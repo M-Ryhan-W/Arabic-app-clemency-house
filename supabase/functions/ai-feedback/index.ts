@@ -1,10 +1,59 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers":
         "authorization, x-client-info, apikey, content-type",
 };
+
+const DAILY_AI_FEEDBACK_LIMIT = 80;
+
+async function verifyUserAndCheckLimits(req: Request): Promise<{ userId: string } | Response> {
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) {
+        return new Response(JSON.stringify({ error: "Missing authorization" }), {
+            status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+    }
+    const supabase = createClient(
+        Deno.env.get("SUPABASE_URL")!,
+        Deno.env.get("SUPABASE_ANON_KEY")!,
+        { global: { headers: { Authorization: authHeader } } }
+    );
+    const { data: { user }, error } = await supabase.auth.getUser();
+    if (error || !user) {
+        return new Response(JSON.stringify({ error: "Invalid session" }), {
+            status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+    }
+    const today = new Date().toISOString().split("T")[0];
+    await supabase.from("daily_usage").upsert(
+        { user_id: user.id, usage_date: today },
+        { onConflict: "user_id,usage_date", ignoreDuplicates: true }
+    );
+    const { data: currentUsage } = await supabase
+        .from("daily_usage")
+        .select("ai_feedback_requests, total_requests")
+        .eq("user_id", user.id)
+        .eq("usage_date", today)
+        .single();
+    if (currentUsage && currentUsage.ai_feedback_requests >= DAILY_AI_FEEDBACK_LIMIT) {
+        return new Response(JSON.stringify({
+            error: "daily_limit",
+            message: `You've reached your daily limit of ${DAILY_AI_FEEDBACK_LIMIT} AI feedback requests. Come back tomorrow!`,
+        }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    await supabase
+        .from("daily_usage")
+        .update({
+            ai_feedback_requests: (currentUsage?.ai_feedback_requests ?? 0) + 1,
+            total_requests: (currentUsage?.total_requests ?? 0) + 1,
+        })
+        .eq("user_id", user.id)
+        .eq("usage_date", today);
+    return { userId: user.id };
+}
 
 serve(async (req) => {
     // Handle CORS preflight
@@ -13,6 +62,9 @@ serve(async (req) => {
     }
 
     try {
+        const authResult = await verifyUserAndCheckLimits(req);
+        if (authResult instanceof Response) return authResult;
+
         const body = await req.json();
         const { transcript, exerciseType, expectedText, vocabList, lessonContext } = body;
 
