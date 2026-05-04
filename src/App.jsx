@@ -7,6 +7,7 @@ import 'ldrs/react/Leapfrog.css';
 import { App as CapacitorApp } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
+import { Share } from '@capacitor/share';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import { DotLottieReact } from '@lottiefiles/dotlottie-react';
 import { MdArrowBackIosNew, MdArrowForwardIos } from "react-icons/md";
@@ -8052,8 +8053,8 @@ function App() {
     if (wotdPhase === "complete") {
       const handleShare = async () => {
         triggerHaptic();
-        const shareUrl = 'https://ihyaarabicapp.com/';
-        const shareText = 'I just learnt a new Arabic word, click the link below to sign up to the new Ihya Arabic app!';
+        const shareUrl = 'https://ihyaarabicapp.com/download';
+        const shareText = 'Download the Ihya Arabic App for Android.';
         const shareData = {
           title: 'Ihya Arabic App',
           text: shareText,
@@ -8061,11 +8062,12 @@ function App() {
         };
 
         try {
-          if (navigator.share) {
+          if (Capacitor.isNativePlatform()) {
+            await Share.share(shareData);
+          } else if (navigator.share) {
             await navigator.share(shareData);
           } else {
-            await navigator.clipboard.writeText(`${shareText} ${shareUrl}`);
-            alert('Copied to clipboard!');
+            window.open(shareUrl, '_blank', 'noopener,noreferrer');
           }
         } catch (err) {
           if (err?.name !== 'AbortError') {
