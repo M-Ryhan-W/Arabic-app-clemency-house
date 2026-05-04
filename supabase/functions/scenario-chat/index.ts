@@ -228,10 +228,15 @@ const SCENARIOS = [
     { id: "wedding", emoji: "💒", title: "At a Wedding", titleAr: "في حفل زفاف", setting: "You are a guest at a wedding. The student is also a guest. Chat about the couple, the ceremony, and celebrate together." },
 ];
 
+const SCENARIO_ANCHOR_DATE = "2026-02-05T00:00:00Z";
+
 function getTodayScenario(): typeof SCENARIOS[0] {
     const today = new Date();
-    const dayOfYear = Math.floor((today.getTime() - new Date(today.getFullYear(), 0, 0).getTime()) / 86400000);
-    const index = (dayOfYear * 17 + 7) % SCENARIOS.length;
+    const todayUtc = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+    const anchor = new Date(SCENARIO_ANCHOR_DATE);
+    const anchorUtc = Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), anchor.getUTCDate());
+    const daysDiff = Math.floor((todayUtc - anchorUtc) / 86400000);
+    const index = ((daysDiff % SCENARIOS.length) + SCENARIOS.length) % SCENARIOS.length;
     return SCENARIOS[index];
 }
 

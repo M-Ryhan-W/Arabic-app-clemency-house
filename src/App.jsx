@@ -52,6 +52,11 @@ function getUkDaysSince(startIso) {
   return Math.floor((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
 }
 
+function getCycleOffset(daysDiff, total) {
+  if (!total) return 0;
+  return ((daysDiff % total) + total) % total;
+}
+
 function getUkMidnightUtcIso(date = new Date()) {
   // Returns the UTC ISO string representing UK-local midnight of the given date's UK day.
   const [y, m, d] = getUkDateString(date).split('-').map(Number);
@@ -2548,12 +2553,27 @@ function App() {
 
         if (!exercises.daily_question) {
           const today = getUkDateString();
+          const { count: questionCount, error: countError } = await supabase
+            .from("daily_questions")
+            .select("*", { count: "exact", head: true })
+            .lte("active_date", today);
+
+          if (countError) {
+            console.error("Error counting fallback daily questions:", countError);
+          }
+
+          const questionOffset = getCycleOffset(
+            getUkDaysSince('2026-04-03T00:00:00Z'),
+            questionCount || 0
+          );
+
           const { data: fallbackQuestion, error: fallbackError } = await supabase
             .from("daily_questions")
             .select("id, question_en, question_ar, active_date")
             .lte("active_date", today)
-            .order("active_date", { ascending: false })
-            .limit(1)
+            .order("active_date", { ascending: true })
+            .order("id", { ascending: true })
+            .range(questionOffset, questionOffset)
             .maybeSingle();
 
           if (fallbackError) {
@@ -3356,7 +3376,7 @@ function App() {
         return;
       }
 
-      const rowOffset = ((daysDiff % wordCount) + wordCount) % wordCount;
+      const rowOffset = getCycleOffset(daysDiff, wordCount);
 
       const { data: wordData, error: wordError } = await supabase
         .from("word_of_the_day")
@@ -3469,14 +3489,17 @@ function App() {
       const { count } = await supabase
         .from("picture_describe_lessons")
         .select("*", { count: "exact", head: true });
-      const totalLessons = count || 1;
+      const totalLessons = count || 0;
+      if (!totalLessons) return;
       const daysDiff = getUkDaysSince('2026-02-05T00:00:00Z');
-      const lessonOrderIndex = (daysDiff % totalLessons) + 1;
+      const lessonOffset = getCycleOffset(daysDiff, totalLessons);
       const { data: lesson } = await supabase
         .from("picture_describe_lessons")
         .select("image_url")
-        .eq("order_index", lessonOrderIndex)
-        .single();
+        .order("order_index", { ascending: true })
+        .order("id", { ascending: true })
+        .range(lessonOffset, lessonOffset)
+        .maybeSingle();
       if (lesson?.image_url) setPicturePreviewUrl(lesson.image_url);
     } catch (e) {
       console.error("Error prefetching picture preview:", e);
@@ -3491,18 +3514,21 @@ function App() {
         .from("picture_describe_lessons")
         .select("*", { count: "exact", head: true });
 
-      const totalLessons = count || 1;
+      const totalLessons = count || 0;
+      if (!totalLessons) return;
 
       // Calculate which lesson to show today (UK time)
       const daysDiff = getUkDaysSince('2026-02-05T00:00:00Z');
-      const lessonOrderIndex = (daysDiff % totalLessons) + 1;
+      const lessonOffset = getCycleOffset(daysDiff, totalLessons);
 
       // Fetch today's lesson
       const { data: lesson, error } = await supabase
         .from("picture_describe_lessons")
         .select("*")
-        .eq("order_index", lessonOrderIndex)
-        .single();
+        .order("order_index", { ascending: true })
+        .order("id", { ascending: true })
+        .range(lessonOffset, lessonOffset)
+        .maybeSingle();
 
       if (error || !lesson) {
         console.error("Error loading picture of the day:", error);
