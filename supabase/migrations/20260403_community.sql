@@ -315,7 +315,9 @@ BEGIN
   SELECT json_build_object('id', id, 'question_en', question_en, 'question_ar', question_ar)
   INTO daily_q
   FROM daily_questions
-  WHERE active_date = p_date;
+  WHERE active_date <= p_date
+  ORDER BY active_date DESC
+  LIMIT 1;
 
   RETURN json_build_object(
     'read_aloud', COALESCE(read_aloud_items, '[]'::json),

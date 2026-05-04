@@ -9,12 +9,12 @@ import { Capacitor } from '@capacitor/core';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { Share } from '@capacitor/share';
 import { StatusBar, Style } from '@capacitor/status-bar';
+import { VoiceRecorder } from '@independo/capacitor-voice-recorder';
 import { DotLottieReact } from '@lottiefiles/dotlottie-react';
 import { MdArrowBackIosNew, MdArrowForwardIos } from "react-icons/md";
 import { Icon } from "@iconify/react";
 import { motion, AnimatePresence } from 'motion/react';
 import { TextToSpeech } from '@capacitor-community/text-to-speech';
-// Web MediaRecorder API used instead of Capacitor plugins (outputs WEBM_OPUS for Google STT)
 import "./App.css";
 
 // Initialize status bar for edge-to-edge design
@@ -165,6 +165,7 @@ const playRewardSound = () => {
 const MAX_AUDIO_BASE64_LENGTH = 5 * 1024 * 1024; // ~3.75MB raw audio, reasonable max for speech
 const COMMUNITY_RETENTION_DAYS = 7;
 const COMMUNITY_PAGE_SIZE = 15;
+const ANDROID_DOWNLOAD_URL = 'https://ihyaarabicapp.com/download';
 
 // ===== HAPTIC + SOUND HELPERS =====
 
@@ -414,7 +415,7 @@ function App() {
 
         const metadata = await res.json();
         const minVersion = metadata.android?.minimum_required_version;
-        const updateUrl = metadata.android?.update_url;
+        const updateUrl = ANDROID_DOWNLOAD_URL;
 
         if (minVersion && compareSemver(localVersion, minVersion) < 0) {
           setForceUpdate({ update_url: updateUrl });
@@ -430,7 +431,7 @@ function App() {
           if (cached) {
             const info = await CapacitorApp.getInfo();
             if (compareSemver(info.version, cached.minimum_required_version) < 0) {
-              setForceUpdate({ update_url: cached.update_url });
+              setForceUpdate({ update_url: ANDROID_DOWNLOAD_URL });
             }
           }
         } catch {}
@@ -562,6 +563,8 @@ function App() {
   const [isCheckingAnswer, setIsCheckingAnswer] = useState(false); // Show loading while checking speech
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
+  const nativeRecorderActiveRef = useRef(false);
+  const recordedAudioMimeRef = useRef('audio/webm');
 
   // AUDIO STATE
   const audioRef = useRef(null);
@@ -787,6 +790,7 @@ function App() {
   const [communityView, setCommunityView] = useState('feed'); // 'feed' | 'exercise' | 'post_detail'
   const [dailyExercises, setDailyExercises] = useState(null);
   const [loadingExercises, setLoadingExercises] = useState(false);
+  const [dailyExercisesError, setDailyExercisesError] = useState('');
   const [activeExerciseType, setActiveExerciseType] = useState(null); // 'read_aloud' | 'translate' | 'daily_question'
   const [activeExerciseIndex, setActiveExerciseIndex] = useState(null);
   const [communityPosts, setCommunityPosts] = useState([]);
@@ -2150,6 +2154,15 @@ function App() {
   // ---------- LOAD LESSONS FOR A STAGE ----------
 
   function resetAudio() {
+    try {
+      if (nativeRecorderActiveRef.current) {
+        VoiceRecorder.stopRecording().catch(() => {});
+        nativeRecorderActiveRef.current = false;
+      }
+    } catch (e) {
+      console.warn('Error cleaning up native recorder:', e);
+    }
+
     // Stop any active recording and release microphone
     if (mediaRecorderRef.current) {
       try {
@@ -2170,6 +2183,35 @@ function App() {
     setAudioPlaying(false);
     setAudioCompleted(false);
     setAudioProgress(0);
+  }
+
+  function handleRecordedAudio(base64Audio, mimeType = 'audio/webm', durationSeconds = null) {
+    if (!base64Audio) {
+      setSpeechError("Recording captured no audio. Please try again.");
+      return;
+    }
+
+    const normalizedMime = mimeType || 'audio/webm';
+    const cleanBase64 = String(base64Audio).includes(",")
+      ? String(base64Audio).split(",")[1]
+      : String(base64Audio);
+    const dataUrl = `data:${normalizedMime};base64,${cleanBase64}`;
+
+    recordedAudioMimeRef.current = normalizedMime;
+    setRecordedAudio(dataUrl);
+    setRecordedAudioUrl(dataUrl);
+
+    if (durationSeconds && Number.isFinite(durationSeconds)) {
+      setPreviewDuration(durationSeconds);
+      previewDurationRef.current = durationSeconds;
+    }
+
+    if (communityExerciseRef.current) return;
+
+    const currentSpeakingItem = speakingLessonItems[currentSpeakingItemIndex];
+    const expectedText = currentSpeakingItem?.arabic_text || null;
+    const isSpeakingPractice = !!currentSpeakingItem;
+    sendAudioToBackend(cleanBase64, expectedText, isSpeakingPractice, normalizedMime);
   }
 
   function resetLessonFlow() {
@@ -2495,12 +2537,37 @@ function App() {
 
   async function loadDailyExercises() {
     setLoadingExercises(true);
+    setDailyExercisesError('');
     try {
       const { data, error } = await supabase.rpc('get_daily_exercises');
       if (error) {
         console.error("Error loading daily exercises:", error);
+        setDailyExercisesError("Could not load today's exercises. Please try again.");
       } else {
-        setDailyExercises(data);
+        let exercises = data || {};
+
+        if (!exercises.daily_question) {
+          const today = getUkDateString();
+          const { data: fallbackQuestion, error: fallbackError } = await supabase
+            .from("daily_questions")
+            .select("id, question_en, question_ar, active_date")
+            .lte("active_date", today)
+            .order("active_date", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (fallbackError) {
+            console.error("Error loading fallback daily question:", fallbackError);
+          } else if (fallbackQuestion) {
+            exercises = { ...exercises, daily_question: fallbackQuestion };
+          }
+        }
+
+        setDailyExercises(exercises);
+
+        if (!exercises.daily_question) {
+          setDailyExercisesError("No daily question is available yet.");
+        }
       }
 
       // Check which exercises user already completed today (UK time)
@@ -2524,6 +2591,7 @@ function App() {
       }
     } catch (err) {
       console.error("loadDailyExercises error:", err);
+      setDailyExercisesError("Could not load today's exercises. Please try again.");
     }
     setLoadingExercises(false);
   }
@@ -4108,6 +4176,59 @@ function App() {
     try {
       setSpeechError("");
       audioChunksRef.current = [];
+      cleanupPreviewAudio();
+      setRecordedAudio(null);
+      window.speechSynthesis?.cancel();
+      if (_sharedAudioCtx && _sharedAudioCtx.state === 'running') {
+        try { await _sharedAudioCtx.suspend(); } catch (_) {}
+      }
+      if (mediaRecorderRef.current?.stream) {
+        mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+      }
+      mediaRecorderRef.current = null;
+
+      if (Capacitor.isNativePlatform()) {
+        const permission = await VoiceRecorder.requestAudioRecordingPermission();
+        if (!permission?.value) {
+          setSpeechError("Microphone permission denied. Please enable it in your device settings.");
+          return;
+        }
+
+        const status = await VoiceRecorder.getCurrentStatus().catch(() => ({ status: 'NONE' }));
+        if (status.status === 'RECORDING' || status.status === 'PAUSED' || status.status === 'INTERRUPTED') {
+          await VoiceRecorder.stopRecording().catch(() => null);
+        }
+
+        await VoiceRecorder.startRecording();
+        nativeRecorderActiveRef.current = true;
+        setIsRecording(true);
+        console.log('Native recording started');
+
+        if (practiceMode === 'speaking') {
+          setTimeout(() => {
+            if (nativeRecorderActiveRef.current) {
+              stopRecording();
+            }
+          }, 10000);
+        }
+
+        if (communityExerciseRef.current && (activeExerciseType || correctionRecordingRef.current)) {
+          const maxSec = activeExerciseType === 'daily_question' ? 60 : 20;
+          setRecordingCountdown(maxSec);
+          recordingIntervalRef.current = setInterval(() => {
+            setRecordingCountdown(prev => {
+              if (prev <= 1) return 0;
+              return prev - 1;
+            });
+          }, 1000);
+          recordingTimerRef.current = setTimeout(() => {
+            if (nativeRecorderActiveRef.current) {
+              stopRecording();
+            }
+          }, maxSec * 1000);
+        }
+        return;
+      }
 
       // Request microphone permission explicitly first
       try {
@@ -4121,7 +4242,7 @@ function App() {
         console.log('Permissions API not supported, will request via getUserMedia');
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       // Check if audio/webm is supported, fall back to default
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : '';
@@ -4170,17 +4291,8 @@ function App() {
         reader.onloadend = () => {
           const base64String = reader.result;
           const base64Audio = base64String.split(',')[1];
-          setRecordedAudio(base64Audio);
           console.log('Audio recorded (' + recordedMime + ' base64), length:', base64Audio.length);
-
-          // Skip auto-send when recording for community exercises
-          if (communityExerciseRef.current) return;
-
-          // For Speaking Practice mode, pass the current item's arabic_text
-          const currentSpeakingItem = speakingLessonItems[currentSpeakingItemIndex];
-          const expectedText = currentSpeakingItem?.arabic_text || null;
-          const isSpeakingPractice = !!currentSpeakingItem;
-          sendAudioToBackend(base64Audio, expectedText, isSpeakingPractice);
+          handleRecordedAudio(base64Audio, recordedMime);
         };
         reader.readAsDataURL(audioBlob);
       };
@@ -4217,12 +4329,13 @@ function App() {
       }
     } catch (err) {
       console.error("Start recording error:", err);
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      const errText = String(err?.code || err?.message || err?.name || err);
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError' || errText.includes('MISSING_PERMISSION')) {
         setSpeechError("Microphone access denied. Please allow microphone permission in your device settings.");
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
         setSpeechError("No microphone found on this device.");
-      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-        setSpeechError("Microphone is in use by another app. Please close it and try again.");
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError' || errText.includes('MICROPHONE_BEING_USED')) {
+        setSpeechError("The microphone could not start. Close any voice/audio screen, wait a moment, and try again.");
       } else {
         setSpeechError("Failed to start recording: " + (err.message || err));
       }
@@ -4235,6 +4348,24 @@ function App() {
     if (recordingIntervalRef.current) { clearInterval(recordingIntervalRef.current); recordingIntervalRef.current = null; }
     setRecordingCountdown(null);
     try {
+      if (nativeRecorderActiveRef.current) {
+        const recording = await VoiceRecorder.stopRecording();
+        nativeRecorderActiveRef.current = false;
+        setIsRecording(false);
+
+        const value = recording?.value;
+        if (!recordingCancelledRef.current) {
+          handleRecordedAudio(
+            value?.recordDataBase64,
+            value?.mimeType || 'audio/mp4',
+            value?.msDuration ? value.msDuration / 1000 : null
+          );
+        }
+        recordingCancelledRef.current = false;
+        console.log('Native recording stopped');
+        return;
+      }
+
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
         setIsRecording(false);
@@ -4254,6 +4385,11 @@ function App() {
     if (recordingIntervalRef.current) { clearInterval(recordingIntervalRef.current); recordingIntervalRef.current = null; }
     setRecordingCountdown(null);
     try {
+      if (nativeRecorderActiveRef.current) {
+        recordingCancelledRef.current = true;
+        VoiceRecorder.stopRecording().catch(() => {});
+        nativeRecorderActiveRef.current = false;
+      }
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         recordingCancelledRef.current = true;
         mediaRecorderRef.current.stop();
@@ -4283,7 +4419,7 @@ function App() {
   // Send recorded audio to Supabase Edge Function
   // expectedTextOverride: optional text to compare against (for Speaking Practice mode)
   // isSpeakingPractice: if true, play jingle sounds for feedback
-  const sendAudioToBackend = async (audioBase64, expectedTextOverride = null, isSpeakingPractice = false) => {
+  const sendAudioToBackend = async (audioBase64, expectedTextOverride = null, isSpeakingPractice = false, mimeType = 'audio/webm') => {
     if (!audioBase64) return;
     if (audioBase64.length > MAX_AUDIO_BASE64_LENGTH) {
       setSpeechError("Recording is too long. Please try a shorter recording.");
@@ -4311,6 +4447,7 @@ function App() {
         {
           body: {
             audioBase64: audioBase64,
+            mimeType,
             exerciseType: exType,
             expectedText: expectedText
           }
@@ -4942,10 +5079,10 @@ function App() {
         <img src="/clemency-icon.png" alt="Clemency House" style={{ width: 160, height: 160, objectFit: 'contain', marginBottom: '2.5rem', filter: 'brightness(1.6)' }} />
         <h1 style={{ fontSize: '1.5rem', fontWeight: 700, color: '#F8F9FA', marginBottom: '0.75rem' }}>Update Required</h1>
         <p style={{ fontSize: '1rem', color: '#A3B1C6', lineHeight: 1.6, maxWidth: 320, marginBottom: '2.5rem' }}>
-          A new version of Clemency House is available. Please update to continue using the app.
+          A new version of Ihya Arabic App is available. Please update to continue using the app.
         </p>
         <button
-          onClick={() => { window.open(forceUpdate.update_url, '_system'); }}
+          onClick={() => { window.open(forceUpdate.update_url || ANDROID_DOWNLOAD_URL, '_system'); }}
           className="btn-primary"
           style={{ padding: '1rem 2.5rem', fontSize: '1.1rem' }}
         >
@@ -6330,7 +6467,20 @@ function App() {
                       const current = activeExerciseIndex !== null ? items[activeExerciseIndex] : null;
                       return (
                         <div className="exercise-input-appear space-y-3 pt-2">
-                          {!dailyExercises ? (
+                          {loadingExercises ? (
+                            <div className="flex justify-center py-12"><Leapfrog size="30" speed="2.5" color="var(--primary)" /></div>
+                          ) : dailyExercisesError ? (
+                            <div className="bg-card border border-destructive/30 rounded-2xl p-5 text-center space-y-3">
+                              <Icon icon="solar:danger-triangle-bold" className="text-2xl text-destructive mx-auto" />
+                              <p className="text-sm text-muted-foreground">{dailyExercisesError}</p>
+                              <button
+                                className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-bold"
+                                onClick={() => { triggerHaptic(); loadDailyExercises(); }}
+                              >
+                                Try again
+                              </button>
+                            </div>
+                          ) : !dailyExercises ? (
                             <div className="flex justify-center py-12"><Leapfrog size="30" speed="2.5" color="var(--primary)" /></div>
                           ) : (
                             <>

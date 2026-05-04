@@ -16,10 +16,9 @@ serve(async (req) => {
   // current_version: latest available version (soft prompt if below but above minimum)
   const metadata = {
     android: {
-      current_version: "1.0.0",
-      minimum_required_version: "1.0.0",
-      // Direct APK download URL — change this to wherever you host the APK
-      update_url: "https://efpanaidmaztxszshlmp.supabase.co/storage/v1/object/public/releases/clemency-house-latest.apk",
+      current_version: "1.0.3",
+      minimum_required_version: "1.0.3",
+      update_url: "https://ihyaarabicapp.com/download",
     },
     web: {
       current_build: new Date().toISOString(),

@@ -114,12 +114,14 @@ serve(async (req) => {
     const parts: any[] = [{ text: prompt }];
     if (hasAudio) {
       // audio_url stores raw base64 (no data: prefix); strip if present just in case
-      const rawB64 = String(post.audio_url).includes(",")
-        ? String(post.audio_url).split(",")[1]
-        : String(post.audio_url);
+      const audioValue = String(post.audio_url);
+      const dataUrlMatch = audioValue.match(/^data:([^;]+);base64,/);
+      const rawB64 = audioValue.includes(",")
+        ? audioValue.split(",")[1]
+        : audioValue;
       parts.push({
         inline_data: {
-          mime_type: "audio/webm",
+          mime_type: dataUrlMatch?.[1] || "audio/webm",
           data: rawB64,
         },
       });
