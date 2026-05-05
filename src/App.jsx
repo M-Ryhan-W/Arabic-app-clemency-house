@@ -38,6 +38,8 @@ initStatusBar();
 // All "daily" rotations and completion checks are anchored to Europe/London midnight,
 // so BST vs GMT never causes 1 AM drift.
 const UK_TZ = 'Europe/London';
+const REAUTH_AFTER_UNOPENED_MS = 30 * 24 * 60 * 60 * 1000;
+const LAST_APP_OPENED_STORAGE_KEY = 'ihya_last_app_opened_at';
 
 function getUkDateString(date = new Date()) {
   // Returns YYYY-MM-DD for the given instant in UK local time.
@@ -1419,6 +1421,64 @@ function App() {
       subscription.unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    if (!user) {
+      localStorage.removeItem(LAST_APP_OPENED_STORAGE_KEY);
+      return;
+    }
+
+    let isSigningOut = false;
+    let appStateHandle = null;
+    let disposed = false;
+
+    const signOutAfterLongAbsence = async () => {
+      if (isSigningOut) return;
+      isSigningOut = true;
+      localStorage.removeItem(LAST_APP_OPENED_STORAGE_KEY);
+      setAuthError("Please sign in again. It's been a while since you last opened the app.");
+      await handleSignOut();
+    };
+
+    const checkLastOpened = () => {
+      if (isSigningOut) return;
+      const now = Date.now();
+      const stored = Number(localStorage.getItem(LAST_APP_OPENED_STORAGE_KEY));
+
+      if (Number.isFinite(stored) && stored > 0 && now - stored >= REAUTH_AFTER_UNOPENED_MS) {
+        signOutAfterLongAbsence();
+      } else {
+        localStorage.setItem(LAST_APP_OPENED_STORAGE_KEY, String(now));
+      }
+    };
+
+    const checkAfterResume = () => {
+      if (document.visibilityState === 'hidden') return;
+      checkLastOpened();
+    };
+
+    checkLastOpened();
+
+    document.addEventListener('visibilitychange', checkAfterResume);
+
+    if (Capacitor.isNativePlatform()) {
+      CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+        if (isActive) checkLastOpened();
+      }).then((handle) => {
+        if (disposed) {
+          handle.remove();
+        } else {
+          appStateHandle = handle;
+        }
+      });
+    }
+
+    return () => {
+      disposed = true;
+      document.removeEventListener('visibilitychange', checkAfterResume);
+      appStateHandle?.remove();
+    };
+  }, [user]);
 
   // Keep refs in sync with routing states for the hardware back listener
   useEffect(() => {
