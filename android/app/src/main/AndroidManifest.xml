@@ -12,7 +12,6 @@
             android:name=".MainActivity"
             android:icon="@mipmap/ic_launcher"
             android:label="@string/title_activity_main"
-            android:roundIcon="@mipmap/ic_launcher_round"
             android:theme="@style/AppTheme.NoActionBarLaunch"
             android:launchMode="singleTask"
             android:exported="true">
