@@ -173,6 +173,7 @@ const MAX_AUDIO_BASE64_LENGTH = 5 * 1024 * 1024; // ~3.75MB raw audio, reasonabl
 const COMMUNITY_RETENTION_DAYS = 7;
 const COMMUNITY_PAGE_SIZE = 15;
 const ANDROID_DOWNLOAD_URL = 'https://ihyaarabicapp.com/download';
+const ANDROID_UPDATE_URL = 'https://ihyaarabicapp.com/download?mode=update';
 
 // ===== HAPTIC + SOUND HELPERS =====
 
@@ -422,7 +423,7 @@ function App() {
 
         const metadata = await res.json();
         const minVersion = metadata.android?.minimum_required_version;
-        const updateUrl = ANDROID_DOWNLOAD_URL;
+        const updateUrl = metadata.android?.update_url || ANDROID_UPDATE_URL;
 
         if (minVersion && compareSemver(localVersion, minVersion) < 0) {
           setForceUpdate({ update_url: updateUrl });
@@ -438,7 +439,7 @@ function App() {
           if (cached) {
             const info = await CapacitorApp.getInfo();
             if (compareSemver(info.version, cached.minimum_required_version) < 0) {
-              setForceUpdate({ update_url: ANDROID_DOWNLOAD_URL });
+              setForceUpdate({ update_url: cached.update_url || ANDROID_UPDATE_URL });
             }
           }
         } catch {}
@@ -5258,11 +5259,11 @@ function App() {
           A new version of Ihya Arabic App is available. Please update to continue using the app.
         </p>
         <button
-          onClick={() => { window.open(forceUpdate.update_url || ANDROID_DOWNLOAD_URL, '_system'); }}
+          onClick={() => { window.open(forceUpdate.update_url || ANDROID_UPDATE_URL, '_system'); }}
           className="btn-primary"
           style={{ padding: '1rem 2.5rem', fontSize: '1.1rem' }}
         >
-          Download Update
+          Update now
         </button>
       </div>
     );
