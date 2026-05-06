@@ -223,6 +223,10 @@
   display: flex;
   flex-direction: column;
   padding: 8px 24px 32px;
+  /* Lift the action row above Android nav buttons / iOS home indicator.
+     Android 3-button nav often doesn't report a safe-area inset, so we use
+     a generous baseline (80px) and add the inset on top for devices that do. */
+  padding-bottom: calc(80px + env(safe-area-inset-bottom, 0px));
 }
 
 .prebook-step {
