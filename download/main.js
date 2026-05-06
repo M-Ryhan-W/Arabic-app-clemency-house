@@ -1,7 +1,4 @@
 const APK_URL = "/downloads/ihya-arabic-app-release.apk";
-const params = new URLSearchParams(window.location.search);
-const isUpdateMode = params.get("mode") === "update";
-const primaryCtaText = isUpdateMode ? "Update Android App" : "Download for Android";
 
 const downloadCta = document.querySelector("#downloadCta");
 const releaseStatus = document.querySelector("#releaseStatus");
@@ -32,7 +29,7 @@ const enableDownload = (fileSize) => {
   downloadCta.setAttribute("download", "ihya-arabic-app-release.apk");
   downloadCta.removeAttribute("aria-disabled");
   downloadCta.classList.remove("is-disabled");
-  downloadCta.textContent = primaryCtaText;
+  downloadCta.textContent = "Download for Android";
   setText(releaseStatus, "Release APK ready");
 
   if (fileSize) {
@@ -47,7 +44,7 @@ const markPendingRelease = () => {
   downloadCta.setAttribute("download", "ihya-arabic-app-release.apk");
   downloadCta.removeAttribute("aria-disabled");
   downloadCta.classList.remove("is-disabled");
-  downloadCta.textContent = primaryCtaText;
+  downloadCta.textContent = "Download for Android";
   setText(releaseStatus, "Release APK ready");
   setText(releaseSize, "34 MB");
 };

@@ -18,7 +18,7 @@ serve(async (req) => {
     android: {
       current_version: "1.0.12",
       minimum_required_version: "1.0.12",
-      update_url: "https://ihyaarabicapp.com/download?mode=update",
+      update_url: "https://ihyaarabicapp.com/download",
     },
     web: {
       current_build: new Date().toISOString(),
