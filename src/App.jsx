@@ -3734,10 +3734,32 @@ function App() {
     return { percent, matched, missed };
   }
 
+  // Ensures the OS-level mic permission is granted on native Android/iOS before
+  // calling getUserMedia. Without this, the Capacitor WebView often fails silently
+  // on first use until the user grants permission via the VoiceRecorder plugin
+  // somewhere else in the app (e.g. the lesson speaking exercises).
+  const ensureMicPermission = async () => {
+    if (!Capacitor.isNativePlatform()) return true;
+    try {
+      const permission = await VoiceRecorder.requestAudioRecordingPermission();
+      return !!permission?.value;
+    } catch (e) {
+      console.warn('Mic permission request failed:', e);
+      return false;
+    }
+  };
+
   // Start recording for picture describe
   const startPictureRecording = async () => {
     try {
       setSpeechError("");
+
+      const granted = await ensureMicPermission();
+      if (!granted) {
+        setSpeechError("Microphone permission denied. Please enable it in your device settings.");
+        return;
+      }
+
       audioChunksRef.current = [];
       setPictureRecording(true);
 
@@ -4131,6 +4153,11 @@ function App() {
   // Challenge mic helpers — actually evaluate via Gemini
   const startChallengeRecording = async (stepIdx) => {
     try {
+      const granted = await ensureMicPermission();
+      if (!granted) {
+        setChallengeResult(prev => ({ ...prev, [stepIdx]: { good: false, feedback: "Microphone permission denied. Please enable it in your device settings." } }));
+        return;
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       challengeStreamRef.current = stream;
       const recorder = new MediaRecorder(stream);

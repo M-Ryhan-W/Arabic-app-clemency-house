@@ -6,6 +6,8 @@ import { Leapfrog } from 'ldrs/react';
 import { DotLottieReact } from "@lottiefiles/dotlottie-react";
 import 'ldrs/react/Leapfrog.css';
 import { App as CapacitorApp } from '@capacitor/app';
+import { Capacitor } from '@capacitor/core';
+import { VoiceRecorder } from '@independo/capacitor-voice-recorder';
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from './supabaseClient';
 
 const MAX_AUDIO_BASE64_LENGTH = 5 * 1024 * 1024;
@@ -464,15 +466,30 @@ export default function ScenarioChat({
     }
 
     try {
-      // Request microphone permission explicitly first
-      try {
-        const permResult = await navigator.permissions.query({ name: 'microphone' });
-        if (permResult.state === 'denied') {
-          console.error("Microphone permission denied.");
+      // Request microphone permission explicitly first.
+      // On Capacitor (Android/iOS), getUserMedia alone doesn't reliably trigger
+      // the native OS permission dialog — go through the VoiceRecorder plugin.
+      if (Capacitor.isNativePlatform()) {
+        try {
+          const permission = await VoiceRecorder.requestAudioRecordingPermission();
+          if (!permission?.value) {
+            console.error("Microphone permission denied (native).");
+            return;
+          }
+        } catch (e) {
+          console.warn('Native mic permission request failed:', e);
           return;
         }
-      } catch (permErr) {
-        console.log('Permissions API not supported, will request via getUserMedia');
+      } else {
+        try {
+          const permResult = await navigator.permissions.query({ name: 'microphone' });
+          if (permResult.state === 'denied') {
+            console.error("Microphone permission denied.");
+            return;
+          }
+        } catch (permErr) {
+          console.log('Permissions API not supported, will request via getUserMedia');
+        }
       }
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
@@ -1519,31 +1536,61 @@ export default function ScenarioChat({
                   </AnimatePresence>
 
                   {/* Mic / Stop Button — always in same position */}
-                  <button
-                    onClick={() => {
-                      if (scenarioRecording) {
-                        stopScenarioRecording();
-                      } else if (!scenarioLoading) {
-                        startScenarioRecording();
-                      }
-                    }}
-                    disabled={scenarioLoading}
-                    className={`w-[4.5rem] h-[4.5rem] rounded-full flex items-center justify-center shadow-lg transition-all duration-200 text-white select-none ${scenarioRecording
-                        ? 'bg-red-500 scale-110 shadow-[0_0_30px_rgba(239,68,68,0.4)]'
-                        : scenarioLoading
-                          ? 'bg-muted text-muted-foreground'
-                          : 'bg-primary active:scale-95 shadow-[0_4px_20px_rgba(224,159,62,0.3)]'
-                      }`}
-                  >
-                    {scenarioLoading ? (
-                      <Leapfrog size="24" speed="2.5" color="var(--muted-foreground)" />
-                    ) : (
-                      <Icon
-                        icon={scenarioRecording ? "solar:stop-bold" : "solar:microphone-bold"}
-                        className="text-3xl"
-                      />
+                  <div style={{ position: 'relative', width: 96, height: 96, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    {scenarioRecording && (
+                      <svg
+                        width="96"
+                        height="96"
+                        viewBox="0 0 96 96"
+                        aria-hidden="true"
+                        style={{ position: 'absolute', inset: 0, transform: 'rotate(-90deg)', pointerEvents: 'none' }}
+                      >
+                        <circle cx="48" cy="48" r="44" fill="none" stroke="rgba(139,92,246,0.16)" strokeWidth="4" />
+                        <circle
+                          cx="48"
+                          cy="48"
+                          r="44"
+                          fill="none"
+                          stroke="#8b5cf6"
+                          strokeWidth="4"
+                          strokeLinecap="round"
+                          strokeDasharray="276.46"
+                          strokeDashoffset="276.46"
+                          style={{ animation: 'scenarioRingProgress 20s linear forwards' }}
+                        />
+                      </svg>
                     )}
-                  </button>
+                    <button
+                      onClick={() => {
+                        if (scenarioRecording) {
+                          stopScenarioRecording();
+                        } else if (!scenarioLoading) {
+                          startScenarioRecording();
+                        }
+                      }}
+                      disabled={scenarioLoading}
+                      className={`w-[4.5rem] h-[4.5rem] rounded-full flex items-center justify-center shadow-lg transition-all duration-200 text-white select-none ${scenarioRecording
+                          ? 'bg-red-500 scale-110 shadow-[0_0_30px_rgba(239,68,68,0.4)]'
+                          : scenarioLoading
+                            ? 'bg-muted text-muted-foreground'
+                            : 'bg-primary active:scale-95 shadow-[0_4px_20px_rgba(224,159,62,0.3)]'
+                        }`}
+                      style={
+                        !scenarioRecording && !scenarioLoading && lastAi && !playingAudioUrl
+                          ? { animation: 'scenarioMicPrompt 1.4s ease-in-out infinite' }
+                          : undefined
+                      }
+                    >
+                      {scenarioLoading ? (
+                        <Leapfrog size="24" speed="2.5" color="var(--muted-foreground)" />
+                      ) : (
+                        <Icon
+                          icon={scenarioRecording ? "solar:stop-bold" : "solar:microphone-bold"}
+                          className="text-3xl"
+                        />
+                      )}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

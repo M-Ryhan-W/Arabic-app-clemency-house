@@ -6036,6 +6036,25 @@ button {
   to   { stroke-dashoffset: 0; }
 }
 
+/* Scenario chat mic — circumference for r=44 ≈ 276.46 */
+@keyframes scenarioRingProgress {
+  from { stroke-dashoffset: 276.46; }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* Pulse cue on the scenario mic when AI has finished speaking and the
+   user is expected to respond. Subtle scale + glow to draw the eye. */
+@keyframes scenarioMicPrompt {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 4px 20px rgba(224, 159, 62, 0.30);
+  }
+  50% {
+    transform: scale(1.08);
+    box-shadow: 0 6px 32px rgba(224, 159, 62, 0.55);
+  }
+}
+
 .picture-hint-panel-shell {
   padding: 0 1.25rem;
   padding-top: 0.25rem;
