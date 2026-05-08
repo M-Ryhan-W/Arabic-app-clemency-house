@@ -742,6 +742,10 @@ function App() {
   const [showExitSheet, setShowExitSheet] = useState(false);
 
   // UNIFIED STATE REFS FOR ANDROID BACK HANDLER
+  // pictureBackOneStepRef holds the always-fresh version of pictureBackOneStep
+  // so the Capacitor backButton listener (registered once) doesn't run a stale
+  // closure that misreads picturePhase and skips the confirm dialog.
+  const pictureBackOneStepRef = useRef(() => {});
   const stateRefs = useRef({
     activeLesson: null,
     currentWotd: null,
@@ -1541,9 +1545,11 @@ function App() {
           return;
         }
 
-        // 3. Inside Picture Describe Lesson — step back one phase
+        // 3. Inside Picture Describe Lesson — step back one phase.
+        // Use the ref so we always invoke the current closure (this listener
+        // is registered once at mount and would otherwise see stale state).
         if (state.activePictureLesson) {
-          pictureBackOneStep();
+          pictureBackOneStepRef.current();
           return;
         }
         // (legacy cleanup kept for safety)
@@ -1739,9 +1745,10 @@ function App() {
         return;
       }
 
-      // 3. Inside Picture Describe Lesson — step back one phase
+      // 3. Inside Picture Describe Lesson — step back one phase.
+      // Same staleness concern as the Capacitor listener — go through the ref.
       if (state.activePictureLesson) {
-        pictureBackOneStep();
+        pictureBackOneStepRef.current();
         pushGuard();
         return;
       }
@@ -4156,6 +4163,10 @@ function App() {
   // Step-back navigation through the Picture of the Day flow.
   // Each phase backs up to the previous screen instead of ejecting the entire
   // flow. Phases with active recording / submitted work warn before discarding.
+  // NOTE: this function reads phase / recording state via closure. The Capacitor
+  // hardware-back listener is registered once at mount, so it must call this
+  // through `pictureBackOneStepRef.current` (set below) — otherwise it captures
+  // first-render state and silently exits the flow before any confirm shows.
   function pictureBackOneStep() {
     switch (picturePhase) {
       case "lessons":
@@ -4222,6 +4233,11 @@ function App() {
         resetPictureDescribeFlow();
     }
   }
+
+  // Keep the ref pointing at the latest pictureBackOneStep so listeners
+  // registered once at mount (e.g. Capacitor backButton) always invoke the
+  // version that sees the current phase / recording state.
+  pictureBackOneStepRef.current = pictureBackOneStep;
 
   function resetPictureDescribeFlow() {
     setPicturePhase("lessons");
@@ -5116,6 +5132,30 @@ function App() {
         copy[existingIndex] = newEntry;
         return copy;
       });
+    }
+  }
+
+  async function shareIhyaArabicApp() {
+    triggerHaptic();
+    const shareUrl = 'https://ihyaarabicapp.com/download';
+    const shareData = {
+      title: 'Ihya Arabic App',
+      text: 'Download the Ihya Arabic App for Android.',
+      url: shareUrl,
+    };
+
+    try {
+      if (Capacitor.isNativePlatform()) {
+        await Share.share(shareData);
+      } else if (navigator.share) {
+        await navigator.share(shareData);
+      } else {
+        window.open(shareUrl, '_blank', 'noopener,noreferrer');
+      }
+    } catch (err) {
+      if (err?.name !== 'AbortError') {
+        console.log('Share failed:', err);
+      }
     }
   }
 
@@ -7285,6 +7325,14 @@ function App() {
                 </button>
                 <button
                   className="w-full bg-card p-4 rounded-2xl border border-border/50 flex items-center gap-4 text-left active:scale-[0.98] transition-all"
+                  onClick={shareIhyaArabicApp}
+                >
+                  <Icon icon="solar:share-bold" className="text-primary text-xl" />
+                  <span className="font-medium text-sm">Share Ihya Arabic App</span>
+                  <Icon icon="solar:alt-arrow-right-linear" className="text-muted-foreground ml-auto" />
+                </button>
+                <button
+                  className="w-full bg-card p-4 rounded-2xl border border-border/50 flex items-center gap-4 text-left active:scale-[0.98] transition-all"
                   onClick={() => { triggerHaptic(); setReportProblemText(""); setShowReportProblem(true); }}
                 >
                   <Icon icon="solar:bug-bold" className="text-amber-500 text-xl" />
@@ -8587,31 +8635,6 @@ function App() {
 
     // PHASE: COMPLETE
     if (wotdPhase === "complete") {
-      const handleShare = async () => {
-        triggerHaptic();
-        const shareUrl = 'https://ihyaarabicapp.com/download';
-        const shareText = 'Download the Ihya Arabic App for Android.';
-        const shareData = {
-          title: 'Ihya Arabic App',
-          text: shareText,
-          url: shareUrl,
-        };
-
-        try {
-          if (Capacitor.isNativePlatform()) {
-            await Share.share(shareData);
-          } else if (navigator.share) {
-            await navigator.share(shareData);
-          } else {
-            window.open(shareUrl, '_blank', 'noopener,noreferrer');
-          }
-        } catch (err) {
-          if (err?.name !== 'AbortError') {
-            console.log('Share failed:', err);
-          }
-        }
-      };
-
       return (
         <div className={`h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Decorative top gradient */}
@@ -8657,7 +8680,7 @@ function App() {
           <footer className="px-6 space-y-3 flex-shrink-0" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 24px) + 1.5rem)' }}>
             <button
               className="prebook-continue-btn" style={{ width: "100%" }}
-              onClick={handleShare}
+              onClick={shareIhyaArabicApp}
             >
               <Icon icon="solar:share-bold" />
               Share
