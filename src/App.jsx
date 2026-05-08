@@ -3704,9 +3704,26 @@ function App() {
     setPicturePhase("picture");
   }
 
-  // Calculate vocab match percentage
+  // Strip common Arabic clitic prefixes ("ال", "و", "ف", "ب", "ل", "ك")
+  // so "والكتاب" / "بالكتاب" / "الكتاب" all match against vocab "كتاب".
+  // Also drops a single trailing "ه" / "ي" / "ك" / "نا" possessive suffix.
+  const stripArabicAffixes = (w) => {
+    if (!w) return w;
+    let out = w;
+    // leading prefixes — strip up to one cluster
+    out = out.replace(/^(?:و|ف|ب|ل|ك|س)?(?:ال)?/, "");
+    // trailing single-letter pronoun suffixes
+    out = out.replace(/(?:ه|ي|ك|نا)$/, "");
+    return out;
+  };
+
+  // Calculate vocab match against the lesson's target vocab list.
+  // Match if the (normalized + affix-stripped) vocab word appears as a stem
+  // anywhere in the (normalized) transcript — handling the common ال / و / ف / ب / ل / ك prefixes.
   function calculateVocabMatch(transcript) {
     const normalizedTranscript = normalizeArabic(transcript);
+    const transcriptTokens = normalizedTranscript.split(/\s+/).filter(Boolean);
+    const transcriptStems = transcriptTokens.map(stripArabicAffixes);
 
     let matchCount = 0;
     const matched = [];
@@ -3714,10 +3731,18 @@ function App() {
 
     pictureVocab.forEach(item => {
       const normalizedWord = normalizeArabic(item.arabic_text || item.arabic);
-      // Check if the word appears in transcript (partial match for compound words)
-      const words = normalizedWord.split(/\s+/);
-      const isMatch = words.some(w => normalizedTranscript.includes(w)) ||
-        normalizedTranscript.includes(normalizedWord);
+      const vocabTokens = normalizedWord.split(/\s+/).filter(Boolean);
+
+      // A vocab entry counts as "used" if every token in it has a matching
+      // stem in the transcript (handles single words AND multi-word phrases).
+      const isMatch = vocabTokens.every(vt => {
+        const vStem = stripArabicAffixes(vt);
+        if (!vStem) return false;
+        return (
+          transcriptTokens.some(tt => tt === vt || tt.includes(vStem)) ||
+          transcriptStems.some(ts => ts === vStem || ts.includes(vStem))
+        );
+      });
 
       if (isMatch) {
         matchCount++;
@@ -4019,6 +4044,28 @@ function App() {
         // Remove any AI-generated speak_challenge (we use DB follow-up instead)
         let steps = parsed.steps.filter(s => s.type !== 'speak_challenge');
 
+        // Override the AI's vocab_check with locally-computed values from the
+        // actual vocab list. The model has been observed inventing words that
+        // weren't in pictureVocab; the local check is grounded and trustworthy.
+        const localUsed = matched.map(w => w.arabic_text || w.arabic);
+        const localMissed = missed.map(w => w.arabic_text || w.arabic);
+        let foundVocabStep = false;
+        steps = steps.map(s => {
+          if (s.type === 'vocab_check') {
+            foundVocabStep = true;
+            return { ...s, used: localUsed, missed: localMissed };
+          }
+          return s;
+        });
+        if (!foundVocabStep) {
+          steps.push({
+            type: 'vocab_check',
+            used: localUsed,
+            missed: localMissed,
+            analysis: `You used ${percent}% of the target vocabulary.`,
+          });
+        }
+
         // Append DB follow-up question as the last step
         if (activePictureLesson?.follow_up_question) {
           steps.push({
@@ -4030,11 +4077,8 @@ function App() {
         }
 
         setPictureFeedbackSteps(steps);
-        // Derive vocab stats from the vocab_check step's used[] array (single source of truth)
-        const vocabStep = steps.find(s => s.type === 'vocab_check');
-        const usedCount = vocabStep?.used?.length ?? parsed.vocabUsed ?? 0;
-        const totalCount = parsed.vocabTotal ?? pictureVocab.length;
-        setPictureVocabStats({ vocabUsed: usedCount, vocabTotal: totalCount });
+        // Vocab stats come from the locally-computed match — single source of truth.
+        setPictureVocabStats({ vocabUsed: matched.length, vocabTotal: pictureVocab.length });
       } else {
         // Fallback: create basic feedback from old format
         const fallbackSteps = [];

@@ -11,7 +11,15 @@ const stripAndroidDownloadArtifacts = () => ({
   apply: "build",
   closeBundle: async () => {
     if (!isCapacitorBuild) return;
-    await rm(resolve(__dirname, "dist/downloads"), { recursive: true, force: true });
+    // These paths exist for the web download page but should NEVER ship inside
+    // the Android APK — bundling them causes recursive size bloat (the APK
+    // ending up inside itself) and ships unused PNG backups.
+    const stripPaths = ["dist/downloads", "dist/_webp_backup"];
+    await Promise.all(
+      stripPaths.map((p) =>
+        rm(resolve(__dirname, p), { recursive: true, force: true })
+      )
+    );
   },
 });
 
