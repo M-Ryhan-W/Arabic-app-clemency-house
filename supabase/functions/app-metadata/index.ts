@@ -16,8 +16,8 @@ serve(async (req) => {
   // current_version: latest available version (soft prompt if below but above minimum)
   const metadata = {
     android: {
-      current_version: "1.0.14",
-      minimum_required_version: "1.0.14",
+      current_version: "1.0.15",
+      minimum_required_version: "1.0.15",
       update_url: "https://ihyaarabicapp.com/download",
     },
     web: {

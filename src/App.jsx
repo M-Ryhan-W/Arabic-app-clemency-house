@@ -1541,10 +1541,9 @@ function App() {
           return;
         }
 
-        // 3. Inside Picture Describe Lesson — go back to home
+        // 3. Inside Picture Describe Lesson — step back one phase
         if (state.activePictureLesson) {
-          setTransitionDirection("back");
-          exitPictureToHome();
+          pictureBackOneStep();
           return;
         }
         // (legacy cleanup kept for safety)
@@ -1740,10 +1739,9 @@ function App() {
         return;
       }
 
-      // 3. Inside Picture Describe Lesson
+      // 3. Inside Picture Describe Lesson — step back one phase
       if (state.activePictureLesson) {
-        setTransitionDirection("back");
-        exitPictureToHome();
+        pictureBackOneStep();
         pushGuard();
         return;
       }
@@ -4153,6 +4151,76 @@ function App() {
     }
     setPracticeMode(null);
     resetPictureDescribeFlow();
+  }
+
+  // Step-back navigation through the Picture of the Day flow.
+  // Each phase backs up to the previous screen instead of ejecting the entire
+  // flow. Phases with active recording / submitted work warn before discarding.
+  function pictureBackOneStep() {
+    switch (picturePhase) {
+      case "lessons":
+        // top of the flow — exit Picture of the Day back to the practice menu
+        setPracticeMode(null);
+        resetPictureDescribeFlow();
+        return;
+      case "intro":
+        setTransitionDirection("back");
+        setPicturePhase("lessons");
+        setActivePictureLesson(null);
+        setPictureVocab([]);
+        setPictureVocabIndex(0);
+        return;
+      case "vocab":
+        setTransitionDirection("back");
+        setPicturePhase("intro");
+        return;
+      case "picture": {
+        // If the user is mid-recording or mid-evaluation, warn before discarding.
+        if (pictureRecording || pictureCheckingAnswer) {
+          showConfirm({
+            title: 'Stop and go back?',
+            message: 'Your current recording will be discarded.',
+            variant: 'warning',
+            confirmLabel: 'Discard',
+            onConfirm: () => {
+              try { mediaRecorderRef.current?.stop(); } catch { }
+              if (mediaRecorderRef.current?.stream) {
+                mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop());
+              }
+              setPictureRecording(false);
+              setPictureCheckingAnswer(false);
+              if (analysisTimerRef.current) { clearInterval(analysisTimerRef.current); analysisTimerRef.current = null; }
+              setTransitionDirection("back");
+              setPicturePhase("intro");
+            },
+          });
+          return;
+        }
+        setTransitionDirection("back");
+        setPicturePhase("intro");
+        return;
+      }
+      case "silence":
+      case "not_arabic":
+      case "too_short":
+        setTransitionDirection("back");
+        setPicturePhase("picture");
+        return;
+      case "feedback":
+        // They've already submitted — warn before throwing the feedback away.
+        showConfirm({
+          title: 'Leave feedback?',
+          message: 'Your feedback for this attempt will be lost.',
+          variant: 'warning',
+          confirmLabel: 'Leave',
+          onConfirm: () => { setPracticeMode(null); resetPictureDescribeFlow(); },
+        });
+        return;
+      case "completed":
+      default:
+        setPracticeMode(null);
+        resetPictureDescribeFlow();
+    }
   }
 
   function resetPictureDescribeFlow() {
@@ -8630,7 +8698,7 @@ function App() {
           <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
             <button
               className="w-10 h-10 rounded-full bg-card border border-border/50 flex items-center justify-center"
-              onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(true); }}
+              onClick={() => { triggerHaptic(); pictureBackOneStep(); }}
             >
               <MdArrowBackIosNew className="text-foreground" />
             </button>
@@ -8677,7 +8745,7 @@ function App() {
           <header className="picture-describe-header">
             <button
               className="picture-back-btn"
-              onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(true); }}
+              onClick={() => { triggerHaptic(); pictureBackOneStep(); }}
             >
               <MdArrowBackIosNew style={{ fontSize: '1.1rem' }} />
             </button>
@@ -8821,7 +8889,7 @@ function App() {
           <header className="picture-describe-header">
             <button
               className="picture-back-btn"
-              onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(true); }}
+              onClick={() => { triggerHaptic(); pictureBackOneStep(); }}
             >
               <MdArrowBackIosNew style={{ fontSize: '1.1rem' }} />
             </button>
@@ -9053,7 +9121,7 @@ function App() {
           <header className="picture-describe-header" style={{ position: 'sticky', top: 0, zIndex: 10 }}>
             <button
               className="picture-back-btn"
-              onClick={() => { triggerHaptic(); setTransitionDirection("back"); exitPictureToHome(); }}
+              onClick={() => { triggerHaptic(); pictureBackOneStep(); }}
             >
               <MdArrowBackIosNew style={{ fontSize: '1.1rem' }} />
             </button>
