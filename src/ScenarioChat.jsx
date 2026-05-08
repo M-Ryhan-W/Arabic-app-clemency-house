@@ -1201,7 +1201,7 @@ export default function ScenarioChat({
                       key={idx}
                       className="word-grid-item rounded-xl p-3 flex flex-col items-center justify-center text-center gap-1.5 active:scale-95 transition-all w-full"
                       style={{ animationDelay: `${idx * 0.05}s`, background: 'rgba(13,27,42,0.6)', border: '1px solid rgba(42,59,84,0.3)' }}
-                      onClick={() => { triggerHaptic(); speakArabic(w.ar); }}
+                      onClick={() => { triggerHaptic(); speakAiAudio(w.ar); }}
                     >
                       <span dir="rtl" className="text-base font-bold text-foreground" style={{ fontFamily: "var(--font-arabic)" }}>{w.ar}</span>
                       <span className="text-[10px] text-muted-foreground/50 font-medium tracking-wide">{w.en}</span>
