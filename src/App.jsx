@@ -173,6 +173,7 @@ const MAX_AUDIO_BASE64_LENGTH = 5 * 1024 * 1024; // ~3.75MB raw audio, reasonabl
 const COMMUNITY_RETENTION_DAYS = 7;
 const COMMUNITY_PAGE_SIZE = 15;
 const ANDROID_DOWNLOAD_URL = 'https://ihyaarabicapp.com/download';
+const PRIVACY_POLICY_URL = 'https://ihyaarabicapp.com/privacy';
 
 // ===== HAPTIC + SOUND HELPERS =====
 
@@ -7337,6 +7338,14 @@ function App() {
                 >
                   <Icon icon="solar:bug-bold" className="text-amber-500 text-xl" />
                   <span className="font-medium text-sm">Report a Problem</span>
+                  <Icon icon="solar:alt-arrow-right-linear" className="text-muted-foreground ml-auto" />
+                </button>
+                <button
+                  className="w-full bg-card p-4 rounded-2xl border border-border/50 flex items-center gap-4 text-left active:scale-[0.98] transition-all"
+                  onClick={() => { triggerHaptic(); window.open(PRIVACY_POLICY_URL, '_system'); }}
+                >
+                  <Icon icon="solar:shield-check-bold" className="text-primary text-xl" />
+                  <span className="font-medium text-sm">Privacy Policy</span>
                   <Icon icon="solar:alt-arrow-right-linear" className="text-muted-foreground ml-auto" />
                 </button>
                 <button
