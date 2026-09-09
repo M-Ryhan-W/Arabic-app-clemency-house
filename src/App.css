@@ -1,94 +1,4 @@
-:root {
-  /* ===== DARK NAVY THEME — MATCHING TEMPLATE ===== */
-
-  /* Primary (Warm Gold) */
-  --primary: #E09F3E;
-  --primary-foreground: #0D1B2A;
-  --primary-light: #F4A261;
-
-  /* Secondary (Coral) */
-  --secondary: #E56B6F;
-  --secondary-foreground: #FFFFFF;
-  --secondary-light: #F4A261;
-
-  /* Accent (Orange) */
-  --accent: #F4A261;
-  --accent-foreground: #0D1B2A;
-  --accent-light: #E9C46A;
-
-  /* Destructive */
-  --destructive: #E63946;
-  --destructive-foreground: #FFFFFF;
-
-  /* Background & Cards (dark navy) */
-  --background: #0D1B2A;
-  --card: #142438;
-  --card-foreground: #F8F9FA;
-  --surface-elevated: #1B2A41;
-
-  /* Muted/Neutral */
-  --muted: #1B2A41;
-  --muted-foreground: #A3B1C6;
-
-  /* Borders */
-  --border: #2A3B54;
-  --border-light: #2A3B54;
-
-  /* Text Colors */
-  --foreground: #F8F9FA;
-  --text-primary: #F8F9FA;
-  --text-secondary: #A3B1C6;
-  --text-muted: #7A8BA3;
-
-  /* Semantic colors */
-  --green: #2A9D8F;
-  --green-dark: #1F7A6F;
-  --blue: #4A90E2;
-  --blue-dark: #2563EB;
-  --red: #E63946;
-  --red-dark: #C62828;
-  --yellow: #E09F3E;
-  --yellow-dark: #D97706;
-  --purple: #8B5CF6;
-  --purple-dark: #7C3AED;
-
-  /* Feedback surfaces */
-  --success-bg: rgba(42, 157, 143, 0.12);
-  --error-bg: rgba(230, 57, 70, 0.12);
-  --reward-gold: #E09F3E;
-
-  /* Legacy variable mappings (for existing CSS classes) */
-  --white: #F8F9FA;
-  --bg-app: #0D1B2A;
-  --gray-100: #1B2A41;
-  --gray-200: #2A3B54;
-  --gray-300: #3D5270;
-  --text-main: #F8F9FA;
-  --text-light: #A3B1C6;
-
-  /* Typography */
-  --font-stack: 'Plus Jakarta Sans', system-ui, sans-serif;
-  --font-heading: 'Plus Jakarta Sans', system-ui, sans-serif;
-  --font-display: 'Cormorant Garamond', 'Playfair Display', serif;
-  --font-arabic: 'Noto Naskh Arabic', 'Noto Sans Arabic', 'Amiri', serif;
-
-  /* Spacing & Radius */
-  --radius: 12px;
-  --radius-lg: 16px;
-  --radius-xl: 20px;
-  --header-height: 70px;
-
-  /* Dark-adapted shadows */
-  --shadow-soft: 0 4px 16px rgba(0, 0, 0, 0.3);
-  --shadow-medium: 0 6px 20px rgba(0, 0, 0, 0.4);
-  --shadow-softer: 0 2px 8px rgba(0, 0, 0, 0.2);
-  --shadow-pressed: 0 1px 4px rgba(0, 0, 0, 0.3);
-
-  /* Button Animation Timing */
-  --press-duration: 60ms;
-  --release-duration: 80ms;
-  --press-easing: ease;
-}
+/* Theme tokens are shared with Tailwind in index.css. */
 
 *,
 *::before,
@@ -491,7 +401,7 @@ button {
 }
 
 .confirm-title {
-  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  font-family: var(--font-sans);
   font-size: 1.3rem;
   font-weight: 700;
   color: var(--foreground);
@@ -500,7 +410,7 @@ button {
 }
 
 .confirm-message {
-  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  font-family: var(--font-sans);
   font-size: 0.85rem;
   color: var(--muted-foreground);
   margin: 0 0 1.5rem;
@@ -518,7 +428,7 @@ button {
   border-radius: 12px;
   font-size: 0.85rem;
   font-weight: 700;
-  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  font-family: var(--font-sans);
   letter-spacing: 0.02em;
   cursor: pointer;
   transition: all 120ms ease;
@@ -1197,7 +1107,7 @@ button {
 }
 
 .scene-title {
-  font-family: 'Playfair Display', serif;
+  font-family: var(--font-sans);
   font-size: 1.45rem;
   font-weight: 600;
   color: var(--foreground);
@@ -1235,7 +1145,7 @@ button {
 }
 
 .lesson-description {
-  font-family: 'Nunito', var(--font-stack);
+  font-family: var(--font-sans);
   font-size: 0.92rem;
   color: var(--muted-foreground);
   text-align: center;
@@ -1741,7 +1651,7 @@ button {
 }
 
 .speaker-name {
-  font-family: 'Nunito', var(--font-stack);
+  font-family: var(--font-sans);
   font-size: 0.72rem;
   font-weight: 700;
   color: var(--primary);
@@ -1770,7 +1680,7 @@ button {
 }
 
 .bubble-text {
-  font-family: 'Amiri', var(--font-arabic);
+  font-family: var(--font-arabic);
 }
 
 .bubble-translation {
@@ -2176,7 +2086,7 @@ button {
 }
 
 .paragraph-text {
-  font-family: 'Amiri', var(--font-arabic);
+  font-family: var(--font-arabic);
   font-size: 1.4rem;
   line-height: 1.9;
   color: var(--text-main);
@@ -2206,7 +2116,7 @@ button {
   position: absolute;
   top: -6px;
   right: 16px;
-  font-family: 'Nunito', var(--font-stack);
+  font-family: var(--font-sans);
   font-size: 0.65rem;
   font-weight: 800;
   color: var(--muted-foreground);
@@ -2679,7 +2589,7 @@ button {
 }
 
 .relisten-title {
-  font-family: 'Playfair Display', serif;
+  font-family: var(--font-sans);
   font-size: 1.7rem;
   font-weight: 600;
   color: var(--foreground);
@@ -2688,7 +2598,7 @@ button {
 }
 
 .relisten-subtitle {
-  font-family: 'Nunito', var(--font-stack);
+  font-family: var(--font-sans);
   font-size: 0.92rem;
   color: var(--muted-foreground);
   margin: 0 0 2rem 0;
@@ -2918,7 +2828,7 @@ button {
 .quiz-frame-corner:nth-child(6) { bottom: 20px; right: 20px; border-width: 0 2px 2px 0; }
 
 .quiz-ready-text {
-  font-family: 'Amiri', var(--font-arabic);
+  font-family: var(--font-arabic);
   font-size: 3.2rem;
   font-weight: 700;
   color: var(--primary);
@@ -2972,7 +2882,7 @@ button {
 }
 
 .quiz-subtitle {
-  font-family: 'Nunito', var(--font-stack);
+  font-family: var(--font-sans);
   font-size: 0.95rem;
   color: var(--muted-foreground);
   margin: 0 0 2rem 0;
@@ -2987,7 +2897,7 @@ button {
   border-radius: var(--radius-lg);
   border: none;
   border-bottom: 5px solid rgba(0, 0, 0, 0.15);
-  font-family: 'Amiri', var(--font-arabic);
+  font-family: var(--font-arabic);
   font-size: 1.5rem;
   font-weight: 700;
   cursor: pointer;
@@ -5154,7 +5064,7 @@ button {
   border: 1px solid var(--border);
   font-size: 0.65rem;
   font-weight: 700;
-  font-family: 'Nunito', sans-serif;
+  font-family: var(--font-sans);
   color: var(--muted-foreground);
   margin-bottom: 0.5rem;
   letter-spacing: 0.02em;
@@ -5166,7 +5076,7 @@ button {
   font-weight: 600;
   color: var(--foreground);
   line-height: 1.4;
-  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  font-family: var(--font-sans);
 }
 
 /* Option States */

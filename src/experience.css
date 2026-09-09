@@ -1,0 +1,860 @@
+/* Shared web / Capacitor layout and interaction rules. Theme values live in index.css. */
+:root {
+  --motion-press: 100ms;
+  --motion-fast: 180ms;
+  --motion-page: 260ms;
+  --motion-sheet: 280ms;
+  --motion-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --content-width: 1160px;
+}
+
+body {
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+input,
+textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+[dir="rtl"],
+.arabic-text {
+  letter-spacing: normal;
+  line-height: 1.85;
+}
+button,
+a,
+input,
+textarea,
+select {
+  -webkit-tap-highlight-color: transparent;
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 4px;
+}
+.transition-all {
+  transition-property:
+    transform, opacity, color, background-color, border-color, box-shadow;
+}
+
+/* Authentication: intrinsic height lets the page scroll under a mobile keyboard. */
+.auth-screen {
+  min-height: 100dvh;
+  padding: max(24px, env(safe-area-inset-top)) 24px
+    max(24px, env(safe-area-inset-bottom));
+  display: grid;
+  align-items: center;
+  background: var(--background);
+  overflow-x: clip;
+}
+.auth-layout {
+  width: 100%;
+  max-width: 440px;
+  margin: auto;
+}
+.auth-wordmark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+.auth-wordmark img {
+  object-fit: contain;
+  background: #f0e9da;
+  padding: 5px;
+  border-radius: 14px;
+}
+.auth-wordmark > span {
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+}
+.auth-wordmark > span > span {
+  display: block;
+  color: var(--primary);
+  font-size: 10px;
+  margin-top: 4px;
+  letter-spacing: 0.3em;
+}
+.auth-story-copy {
+  margin: 24px auto 32px;
+  text-align: center;
+}
+.auth-eyebrow {
+  display: none;
+}
+.auth-story h1 {
+  font-size: clamp(28px, 6vw, 36px);
+  letter-spacing: -0.05em;
+  line-height: 1.15;
+  font-weight: 650;
+  margin: 0;
+}
+.auth-story h1 span {
+  display: block;
+  color: var(--primary);
+}
+.auth-story-copy > p:last-child {
+  display: none;
+}
+.auth-lesson-preview,
+.auth-features {
+  display: none;
+}
+.auth-form-panel {
+  width: 100%;
+  animation: surfaceReveal var(--motion-page) var(--motion-ease);
+}
+.auth-form-intro {
+  margin-bottom: 24px;
+}
+.auth-form-ornament {
+  display: none;
+}
+.auth-form-intro h2 {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  line-height: 1.25;
+  margin: 0 0 10px;
+}
+.auth-form-intro p {
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 1.7;
+  margin: 0;
+  max-width: 350px;
+}
+.auth-form fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.auth-field label {
+  display: block;
+  font-size: 13px;
+  font-weight: 650;
+  margin-bottom: 9px;
+  color: var(--foreground);
+}
+.auth-control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-inline-start: 16px;
+  border: 1px solid #536780;
+  border-radius: 14px;
+  background: var(--card);
+  transition:
+    border-color var(--motion-fast),
+    box-shadow var(--motion-fast);
+}
+.auth-control:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgb(224 159 62 / 15%);
+}
+.auth-control > svg {
+  flex: 0 0 20px;
+  color: var(--muted-foreground);
+  width: 20px;
+  height: 20px;
+}
+.auth-control input {
+  min-width: 0;
+  flex: 1;
+  width: 100%;
+  height: 54px;
+  font-family: var(--font-sans);
+  font-size: 16px;
+  padding: 12px 12px 12px 0;
+  background: transparent;
+  color: var(--foreground);
+  border: 0;
+  border-radius: 14px;
+  outline: none;
+}
+.auth-control input:focus-visible {
+  outline: none;
+}
+.auth-control input::placeholder {
+  color: var(--muted-foreground);
+  opacity: 1;
+}
+.auth-control input:-webkit-autofill {
+  -webkit-text-fill-color: var(--foreground);
+  box-shadow: 0 0 0 100px var(--card) inset;
+}
+.auth-password-toggle {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: var(--muted-foreground);
+  margin-inline-end: 3px;
+}
+.auth-password-toggle svg {
+  width: 20px;
+  height: 20px;
+}
+.auth-text-button {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 44px;
+  border-radius: 6px;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.auth-text-button strong {
+  color: var(--primary);
+  font-weight: 650;
+}
+.auth-forgot {
+  align-self: flex-end;
+  margin-top: -12px;
+  margin-bottom: -8px;
+  color: var(--primary);
+}
+.auth-submit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 56px;
+  padding: 15px 20px;
+  border-radius: 14px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 15px;
+  font-weight: 750;
+  transition:
+    transform var(--motion-press),
+    background-color var(--motion-fast);
+}
+.auth-submit:active {
+  transform: scale(0.98);
+}
+.auth-submit {
+  text-transform: none;
+  letter-spacing: normal;
+}
+.auth-submit svg {
+  width: 22px;
+  height: 22px;
+}
+.auth-switch {
+  display: block;
+  width: 100%;
+  margin: 18px 0 0;
+}
+.auth-form-footnote {
+  color: var(--muted-foreground);
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 24px 0 0;
+}
+.auth-message {
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 0;
+}
+.auth-error {
+  color: #ffb4b8;
+  background: rgb(230 57 70 / 12%);
+  border: 1px solid rgb(230 57 70 / 35%);
+}
+.auth-success {
+  color: #8ee0ce;
+  background: rgb(42 157 143 / 12%);
+  border: 1px solid rgb(42 157 143 / 35%);
+}
+.auth-form fieldset:disabled .auth-submit,
+.auth-text-button:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+.startup-screen {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  background: var(--background);
+  color: var(--muted-foreground);
+  font-size: 14px;
+}
+.startup-screen img {
+  object-fit: contain;
+}
+
+/* A stable bottom bar on phones becomes a navigation rail on desktop. */
+.app-dashboard {
+  padding-bottom: calc(100px + env(safe-area-inset-bottom, 0px));
+}
+.dashboard-pane > header {
+  padding-top: calc(20px + env(safe-area-inset-top, 0px));
+  backdrop-filter: none;
+}
+.dashboard-pane > main {
+  max-width: var(--content-width);
+  margin-inline: auto;
+}
+.dashboard-pane {
+  max-width: var(--content-width);
+  margin-inline: auto;
+}
+.primary-navigation {
+  position: fixed;
+  z-index: 50;
+  inset-inline: 12px;
+  bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 25%);
+  padding: 6px;
+}
+.primary-navigation[hidden] {
+  display: none;
+}
+.navigation-items {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 2px;
+}
+.navigation-items button {
+  min-height: 56px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border-radius: 16px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 650;
+  transition:
+    color var(--motion-fast),
+    background-color var(--motion-fast),
+    transform var(--motion-press);
+}
+.navigation-items button > svg {
+  width: 23px;
+  height: 23px;
+}
+.navigation-items button[aria-current="page"] {
+  color: var(--primary);
+  background: rgb(224 159 62 / 10%);
+}
+.navigation-items button:active {
+  transform: scale(0.96);
+}
+.navigation-items button {
+  text-transform: none;
+  letter-spacing: normal;
+}
+.navigation-brand,
+.navigation-note {
+  display: none;
+}
+
+/* Shared motion vocabulary; avoid translating the shell containing fixed controls. */
+@keyframes surfaceReveal {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes lessonForward {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+@keyframes lessonBack {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.tab-slide-left,
+.tab-slide-right {
+  animation: surfaceReveal var(--motion-fast) ease-out;
+}
+.page-transition,
+.page-transition-back {
+  animation: surfaceReveal var(--motion-page) ease-out;
+}
+.swipe-in,
+.swipe-in-right {
+  animation: lessonForward var(--motion-page) var(--motion-ease);
+  will-change: auto;
+}
+.swipe-in-left {
+  animation: lessonBack var(--motion-page) var(--motion-ease);
+  will-change: auto;
+}
+.page-transition > main,
+.page-transition > .app-main {
+  animation: lessonForward var(--motion-page) var(--motion-ease);
+}
+.page-transition-back > main,
+.page-transition-back > .app-main {
+  animation: lessonBack var(--motion-page) var(--motion-ease);
+}
+.transition-overlay {
+  background: rgb(13 27 42 / 70%);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.transition-card {
+  background: var(--card);
+  color: var(--foreground);
+  border: 1px solid var(--border);
+}
+.transition-text {
+  color: var(--muted-foreground);
+}
+.confetti {
+  animation-iteration-count: 1;
+  animation-fill-mode: both;
+}
+.auth-watermark,
+.auth-glow,
+.wotd-intro-icon-wrap,
+.quiz-frame-ring,
+.quiz-frame-ring-inner,
+.relisten-icon-ring {
+  animation: none;
+}
+.upnext-card::before,
+.exercise-glow-tile::before,
+.scenario-surface::before {
+  animation: none;
+}
+.motion-static-indicator {
+  display: grid;
+  place-items: center;
+  font-size: 64px;
+  color: var(--primary);
+}
+.ai-sheet {
+  max-height: 90dvh;
+  animation-duration: var(--motion-sheet);
+}
+.ai-sheet-handle-area {
+  padding-top: 16px;
+  min-height: 44px;
+}
+.ai-sheet-content {
+  overflow-y: auto;
+  min-height: 0;
+}
+.prebook-header {
+  padding-top: calc(16px + env(safe-area-inset-top, 0px));
+}
+.prebook-back {
+  min-width: 44px;
+  min-height: 44px;
+  justify-content: center;
+}
+.learning-screen,
+.scenario-screen {
+  width: 100%;
+  max-width: 960px;
+  margin-inline: auto;
+}
+.learning-screen > header {
+  padding-top: calc(16px + env(safe-area-inset-top, 0px));
+  flex-shrink: 0;
+}
+.learning-screen > main {
+  overflow-y: auto;
+  justify-content: safe center;
+}
+.learning-screen > main > * {
+  flex-shrink: 0;
+}
+.learning-screen > header button {
+  min-height: 44px;
+  min-width: 44px;
+}
+.scenario-screen.pt-12 {
+  padding-top: calc(16px + env(safe-area-inset-top, 0px));
+}
+.scenario-screen > div.overflow-y-auto {
+  min-height: 0;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .auth-submit:hover {
+    background: #edb45d;
+  }
+  .auth-text-button:hover,
+  .auth-password-toggle:hover {
+    color: var(--primary);
+  }
+  .navigation-items button:hover {
+    background: var(--muted);
+    color: var(--foreground);
+  }
+  .navigation-items button[aria-current="page"]:hover {
+    color: var(--primary);
+  }
+}
+
+@media (min-width: 768px) {
+  .primary-navigation {
+    max-width: 520px;
+    margin-inline: auto;
+  }
+  .dashboard-pane > header {
+    padding-inline: 32px;
+  }
+  .dashboard-pane > main {
+    padding-inline: 32px;
+  }
+  .dashboard-pane[data-tab="home"] > main {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 28px;
+    align-items: start;
+  }
+  .dashboard-pane[data-tab="home"] > main > section {
+    margin: 0;
+  }
+  .dashboard-pane[data-tab="home"] > main > section:first-child {
+    grid-column: 1 / -1;
+  }
+  .dashboard-pane[data-tab="home"] > main > section:last-child {
+    grid-column: 1 / -1;
+  }
+  .dashboard-pane[data-tab="home"] > main > section:last-child > div {
+    aspect-ratio: auto;
+    height: 240px;
+  }
+  .dashboard-pane[data-tab="home"] > main > section:last-child h3 {
+    font-size: 18px;
+  }
+  .dashboard-pane[data-tab="home"]
+    > main
+    > section:nth-child(2)
+    > div:last-child,
+  .dashboard-pane[data-tab="home"]
+    > main
+    > section:nth-child(3)
+    > div:last-child {
+    min-height: 176px;
+  }
+  .dashboard-pane[data-tab="courses"] > main {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 28px;
+    align-items: start;
+  }
+  .dashboard-pane[data-tab="courses"] > main > section {
+    margin: 0;
+  }
+  .dashboard-pane[data-tab="profile"] > main {
+    max-width: 800px;
+  }
+  .ai-sheet-overlay {
+    justify-content: center;
+    align-items: center;
+    padding: 32px;
+  }
+  .ai-sheet {
+    width: min(100%, 640px);
+    border-radius: 24px;
+    border: 1px solid var(--border);
+    animation: surfaceReveal var(--motion-fast) ease-out;
+  }
+}
+
+@media (min-width: 1024px) {
+  .auth-screen {
+    padding: 48px;
+  }
+  .auth-layout {
+    max-width: 1160px;
+    display: grid;
+    grid-template-columns: 1.15fr 1fr;
+    align-items: center;
+    gap: clamp(64px, 8vw, 140px);
+  }
+  .auth-story {
+    padding: 16px 0;
+  }
+  .auth-wordmark {
+    justify-content: flex-start;
+  }
+  .auth-story-copy {
+    text-align: start;
+    margin: 48px 0 32px;
+  }
+  .auth-eyebrow {
+    display: block;
+    color: var(--muted-foreground);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    font-weight: 650;
+    margin-bottom: 20px;
+  }
+  .auth-story h1 {
+    font-size: clamp(44px, 4.6vw, 64px);
+  }
+  .auth-story-copy > p:last-child {
+    display: block;
+    font-size: 15px;
+    line-height: 1.8;
+    color: var(--muted-foreground);
+    max-width: 380px;
+    margin-top: 20px;
+  }
+  .auth-lesson-preview {
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    padding: 24px 28px;
+    border: 1px solid #394250;
+    border-radius: 20px;
+    background: linear-gradient(130deg, #182b3b, #172337);
+    max-width: 400px;
+  }
+  .auth-preview-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 9px;
+    font-weight: 650;
+    letter-spacing: 0.15em;
+    color: var(--muted-foreground);
+  }
+  .auth-preview-top svg {
+    color: var(--primary);
+    width: 22px;
+    height: 22px;
+  }
+  .auth-lesson-preview > p {
+    margin: 20px 0 4px;
+    font: 500 42px/1.7 var(--font-arabic);
+    text-align: start;
+    color: #efd3a3;
+  }
+  .auth-transliteration {
+    color: var(--foreground);
+    font-size: 13px;
+  }
+  .auth-translation {
+    color: var(--muted-foreground);
+    font-size: 13px;
+    margin-top: 6px;
+  }
+  .auth-preview-line {
+    height: 1px;
+    background: var(--border);
+    margin: 22px 0 16px;
+  }
+  .auth-preview-note {
+    color: var(--muted-foreground);
+    font-size: 11px;
+  }
+  .auth-features {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    color: var(--muted-foreground);
+    margin-top: 24px;
+    font-size: 11px;
+  }
+  .auth-features span {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .auth-features svg {
+    color: var(--primary);
+    width: 17px;
+    height: 17px;
+  }
+  .auth-form-panel {
+    padding: 36px;
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    background: rgb(20 36 56 / 45%);
+  }
+  .auth-form-ornament {
+    display: block;
+    color: var(--primary);
+    font-size: 26px;
+    margin-bottom: 24px;
+  }
+  .auth-form-intro h2 {
+    font-size: 28px;
+  }
+  .auth-form-intro {
+    margin-bottom: 32px;
+  }
+  .app-dashboard {
+    padding-left: 232px;
+    padding-bottom: 48px;
+  }
+  .app-dashboard:has(.primary-navigation[hidden]) {
+    padding-left: 0;
+  }
+  .primary-navigation {
+    inset: 0 auto 0 0;
+    width: 232px;
+    max-width: none;
+    margin: 0;
+    padding: 32px 16px;
+    border-radius: 0;
+    border: 0;
+    border-right: 1px solid var(--border);
+    box-shadow: none;
+    background: var(--background);
+    display: flex;
+    flex-direction: column;
+  }
+  .navigation-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 12px 40px;
+  }
+  .navigation-brand img {
+    object-fit: contain;
+    background: #f0e9da;
+    border-radius: 12px;
+    padding: 4px;
+  }
+  .navigation-brand span {
+    font-size: 17px;
+    letter-spacing: 0.15em;
+    font-weight: 800;
+  }
+  .navigation-brand small {
+    display: block;
+    color: var(--primary);
+    font-size: 9px;
+    letter-spacing: 0.25em;
+    margin-top: 4px;
+  }
+  .navigation-items {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .navigation-items button {
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 14px;
+    padding: 14px 18px;
+    font-size: 13px;
+    border-radius: 12px;
+  }
+  .navigation-note {
+    display: block;
+    color: var(--muted-foreground);
+    margin: auto 18px 0;
+    font-size: 13px;
+    line-height: 1.8;
+  }
+  .dashboard-pane > header {
+    max-width: var(--content-width);
+    margin-inline: auto;
+    padding-top: 32px;
+    padding-bottom: 24px;
+  }
+  .dashboard-pane > main {
+    padding-bottom: 32px;
+  }
+}
+
+@media (max-height: 640px) and (max-width: 1023px) {
+  .auth-screen {
+    padding-top: max(16px, env(safe-area-inset-top));
+  }
+  .auth-wordmark img {
+    width: 44px;
+    height: 44px;
+  }
+  .auth-story-copy {
+    margin: 16px 0 24px;
+  }
+  .auth-story h1 {
+    font-size: 26px;
+  }
+  .auth-story h1 span {
+    display: inline;
+  }
+  .auth-form-intro {
+    margin-bottom: 18px;
+  }
+  .auth-form-footnote {
+    margin-top: 12px;
+  }
+}
+
+/* Cover CSS, inline keyframes, third-party CSS loaders and smooth scrolling.
+   Keep animation completion events intact for exercise state transitions. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+  .confetti,
+  .auth-watermark,
+  .auth-glow {
+    display: none !important;
+  }
+  .page-transition > main,
+  .page-transition > .app-main,
+  .page-transition-back > main,
+  .page-transition-back > .app-main,
+  .swipe-in,
+  .swipe-in-left,
+  .swipe-in-right {
+    animation: none !important;
+  }
+  .info-toast-float {
+    animation: none !important;
+    transform: translate(-50%, -50%);
+  }
+  .navigation-items button:active,
+  .auth-submit:active {
+    transform: none;
+  }
+}

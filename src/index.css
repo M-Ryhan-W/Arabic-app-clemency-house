@@ -29,6 +29,11 @@
   --font-font-heading: var(--font-heading);
   --font-font-serif: var(--font-serif);
   --font-font-mono: var(--font-mono);
+  --font-sans: var(--font-stack);
+  --font-heading: var(--font-stack);
+  --font-serif: var(--font-stack);
+  --color-green: var(--green);
+  --color-blue: var(--blue);
 
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -61,13 +66,14 @@
   --chart-4: #2A9D8F;
   --chart-5: #E9C46A;
 
-  --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
-  --font-heading: "Plus Jakarta Sans", system-ui, sans-serif;
-  --font-serif: "Playfair Display", serif;
-  --font-mono: "JetBrains Mono", monospace;
-  --font-arabic: 'Noto Naskh Arabic', 'Noto Sans Arabic', 'Amiri', serif;
+  --font-sans: 'Plus Jakarta Sans Variable', system-ui, sans-serif;
+  --font-heading: var(--font-sans);
+  --font-serif: var(--font-sans);
+  --font-display: var(--font-sans);
+  --font-mono: ui-monospace, monospace;
+  --font-arabic: 'Noto Naskh Arabic Variable', serif;
 
-  --radius: 1.5rem;
+  --radius: 16px;
 
   /* Legacy variables used by App.css — mapped to new dark theme */
   --primary-light: #F4A261;
@@ -100,7 +106,13 @@
   --gray-100: #1B2A41;
   --gray-200: #2A3B54;
   --gray-300: #3D5270;
-  --font-stack: "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-stack: 'Plus Jakarta Sans Variable', system-ui, sans-serif;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --press-duration: 100ms;
+  --release-duration: 100ms;
+  --press-easing: ease-out;
+  --shadow-pressed: 0 1px 4px rgba(0, 0, 0, 0.3);
 
   /* Shadows adjusted for dark theme */
   --shadow-softer: 0 2px 8px rgba(0, 0, 0, 0.3);

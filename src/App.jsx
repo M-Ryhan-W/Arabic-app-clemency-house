@@ -1,4 +1,6 @@
-import { useEffect, useState, useRef, useMemo } from "react";
+import { useEffect, useLayoutEffect, useState, useRef, useMemo } from "react";
+import AuthScreen from './components/AuthScreen';
+import PrimaryNavigation from './components/PrimaryNavigation';
 import ScenarioChat from "./ScenarioChat";
 import PreBookLesson from "./PreBookLesson";
 import { SUPABASE_ANON_KEY, SUPABASE_URL, supabase } from "./supabaseClient";
@@ -10,10 +12,9 @@ import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { Share } from '@capacitor/share';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import { VoiceRecorder } from '@independo/capacitor-voice-recorder';
-import { DotLottieReact } from '@lottiefiles/dotlottie-react';
+import DotLottieReact from './components/AccessibleLottie';
 import { MdArrowBackIosNew, MdArrowForwardIos } from "react-icons/md";
 import { Icon } from "@iconify/react";
-import { motion, AnimatePresence } from 'motion/react';
 import { TextToSpeech } from '@capacitor-community/text-to-speech';
 import "./App.css";
 
@@ -21,10 +22,10 @@ import "./App.css";
 const initStatusBar = async () => {
   if (Capacitor.isNativePlatform()) {
     try {
-      // Set status bar to light style (dark icons on light background)
-      await StatusBar.setStyle({ style: Style.Light });
-      // Set background color to match app theme
-      await StatusBar.setBackgroundColor({ color: '#f7f2e8' });
+      // Light status-bar text on the app's dark background.
+      await StatusBar.setStyle({ style: Style.Dark });
+      // Match the navy web surface on Android versions that support this API.
+      await StatusBar.setBackgroundColor({ color: '#0D1B2A' });
     } catch (e) {
       console.log('StatusBar not available');
     }
@@ -175,6 +176,14 @@ const COMMUNITY_PAGE_SIZE = 15;
 const ANDROID_DOWNLOAD_URL = 'https://ihyaarabicapp.com/download';
 const PRIVACY_POLICY_URL = 'https://ihyaarabicapp.com/privacy';
 
+const activateWithKeyboard = (event) => {
+  if (event.target !== event.currentTarget) return;
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    event.currentTarget.click();
+  }
+};
+
 // ===== HAPTIC + SOUND HELPERS =====
 
 // Light tap (buttons, navigation)
@@ -285,83 +294,12 @@ const scoreSimilarity = (a, b) => {
 };
 
 // ============ SPLASH SCREEN COMPONENT ============
-function SplashScreen({ onComplete }) {
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      onComplete();
-    }, 3000);
-
-    return () => clearTimeout(timer);
-  }, [onComplete]);
-
+function SplashScreen() {
   return (
-    <motion.div
-      className="splash-screen"
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.5 }}
-    >
-      {/* Ripple effects */}
-      <motion.div
-        className="splash-ripple"
-        initial={{ scale: 0, opacity: 0.8 }}
-        animate={{ scale: 4, opacity: 0 }}
-        transition={{ duration: 2, ease: "easeOut" }}
-      />
-      <motion.div
-        className="splash-ripple"
-        initial={{ scale: 0, opacity: 0.8 }}
-        animate={{ scale: 4, opacity: 0 }}
-        transition={{ duration: 2, delay: 0.3, ease: "easeOut" }}
-      />
-      <motion.div
-        className="splash-ripple"
-        initial={{ scale: 0, opacity: 0.8 }}
-        animate={{ scale: 4, opacity: 0 }}
-        transition={{ duration: 2, delay: 0.6, ease: "easeOut" }}
-      />
-
-      <div className="splash-content">
-        {/* Logo with explosion effect */}
-        <motion.div
-          className="splash-logo-container"
-          initial={{ scale: 0, rotate: -180 }}
-          animate={{ scale: 1, rotate: 0 }}
-          transition={{
-            type: "spring",
-            stiffness: 200,
-            damping: 15,
-            duration: 1
-          }}
-        >
-          <img
-            src="/clemency-icon.png"
-            alt="IHYA Institute Logo"
-            className="splash-logo"
-          />
-        </motion.div>
-
-        <motion.div
-          className="splash-text"
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.8, duration: 0.5 }}
-        >
-          <h1 className="splash-title">Welcome</h1>
-          <p className="splash-subtitle">أهلاً لنبدأ</p>
-        </motion.div>
-
-        <motion.div
-          className="splash-dots"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 1.2, duration: 0.5 }}
-        >
-          <div className="splash-dot" style={{ animationDelay: '0ms' }}></div>
-          <div className="splash-dot" style={{ animationDelay: '150ms' }}></div>
-          <div className="splash-dot" style={{ animationDelay: '300ms' }}></div>
-        </motion.div>
-      </div>
-    </motion.div>
+    <div className="startup-screen" role="status" aria-label="Opening Ihya Arabic">
+      <img src="/clemency-icon.png" width="80" height="80" alt="" />
+      <p>Opening your learning space…</p>
+    </div>
   );
 }
 
@@ -763,16 +701,26 @@ function App() {
   const [transitioning, setTransitioning] = useState(false);
   const [transitionDirection, setTransitionDirection] = useState("forward"); // "forward" | "back"
   const transitionTimerRef = useRef(null);
+  const transitionRequestRef = useRef(0);
   const [tabTransitionKey, setTabTransitionKey] = useState(0);
   const [tabDirection, setTabDirection] = useState('forward');
+  const tabScrollPositions = useRef({});
+  const restoreTabScroll = useRef(false);
   const tabOrder = { home: 0, courses: 1, community: 2, profile: 3 };
   const switchTab = (newTab) => {
     if (newTab === activeTab) return;
+    tabScrollPositions.current[activeTab] = window.scrollY;
+    restoreTabScroll.current = true;
     setTabDirection(tabOrder[newTab] > tabOrder[activeTab] ? 'forward' : 'back');
     setTabTransitionKey(k => k + 1);
     setActiveTab(newTab);
-    window.scrollTo(0, 0);
   };
+
+  useLayoutEffect(() => {
+    if (!restoreTabScroll.current) return;
+    restoreTabScroll.current = false;
+    window.scrollTo({ top: tabScrollPositions.current[activeTab] || 0, behavior: 'instant' });
+  }, [activeTab]);
 
   // LESSON CONTENT CACHE (for preloading)
   const lessonContentCache = useRef(new Map()); // Map<lessonId, { questions, vocab, explanations, grammarNotes, speakingExercises, blocks }>
@@ -1163,19 +1111,19 @@ function App() {
 
   // ---------- TRANSITION HELPER ----------
 
-  function beginTransition(minMs = 250) {
-    setTransitioning(true);
+  function beginTransition() {
+    const request = ++transitionRequestRef.current;
     if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
-
+    // Cached content can open immediately; only show a loader for a real wait.
+    transitionTimerRef.current = setTimeout(() => setTransitioning(true), 180);
     let doneCalled = false;
 
     return () => {
       if (doneCalled) return;
       doneCalled = true;
-
-      transitionTimerRef.current = setTimeout(() => {
-        setTransitioning(false);
-      }, minMs);
+      if (request !== transitionRequestRef.current) return;
+      clearTimeout(transitionTimerRef.current);
+      setTransitioning(false);
     };
   }
 
@@ -1404,11 +1352,17 @@ function App() {
 
   useEffect(() => {
     async function getUser() {
-      const { data, error } = await supabase.auth.getUser();
-      if (!error && data?.user) {
-        setUser(data.user);
-      } else {
-        setUser(null);
+      try {
+        const { data, error } = await supabase.auth.getUser();
+        if (!error && data?.user) {
+          setUser(data.user);
+        } else {
+          setUser(null);
+        }
+      } catch {
+        setAuthError('Could not restore your session. Please sign in again.');
+      } finally {
+        setShowSplash(false);
       }
     }
     getUser();
@@ -1420,6 +1374,7 @@ function App() {
         setIsPasswordRecovery(true);
       }
       setUser(session?.user ?? null);
+      setShowSplash(false);
     });
 
     return () => {
@@ -5451,294 +5406,31 @@ function App() {
   // ---------- SPLASH SCREEN ----------
 
   if (showSplash) {
-    return (
-      <AnimatePresence mode="wait">
-        <SplashScreen key="splash" onComplete={() => setShowSplash(false)} />
-      </AnimatePresence>
-    );
+    return <SplashScreen />;
   }
 
-  // ---------- PASSWORD RECOVERY SCREEN ----------
-
-  if (isPasswordRecovery) {
+  // ---------- AUTHENTICATION ----------
+  if (isPasswordRecovery || !user) {
+    const mode = isPasswordRecovery ? 'recovery' : authForgotMode ? 'forgot' : authMode;
     return (
-      <div className="h-[100dvh] bg-background text-foreground flex flex-col font-sans relative overflow-hidden">
-        <div className="noise-overlay" />
-        <div className="absolute top-[8%] right-[-15%] auth-watermark" style={{ fontSize: '12rem', fontFamily: "'Amiri', serif", color: 'rgba(224,159,62,0.05)', lineHeight: 1 }}>عربي</div>
-
-        <div className="flex-1 flex flex-col justify-center px-6 py-12 relative z-10 max-w-md mx-auto w-full">
-          <div className="text-center mb-8 auth-fade-up">
-            <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl mb-4" style={{ background: 'linear-gradient(135deg, rgba(224,159,62,0.15), rgba(224,159,62,0.05))', border: '1px solid rgba(224,159,62,0.2)' }}>
-              <Icon icon="solar:lock-password-bold" className="text-2xl" style={{ color: '#E09F3E' }} />
-            </div>
-            <h1 className="text-2xl font-bold tracking-tight" style={{ fontFamily: "var(--font-sans)" }}>Set a new password</h1>
-            <p className="text-muted-foreground/70 text-xs mt-2 tracking-wide">Choose a strong password to finish resetting</p>
-          </div>
-
-          <form onSubmit={handleSetNewPassword} className="space-y-3">
-            <div className="auth-input-group auth-fade-up auth-fade-up-delay-2">
-              <div className="relative group flex items-center rounded-2xl border border-border/20 bg-transparent focus-within:border-primary/40 transition-all duration-300">
-                <div className="pl-4 text-muted-foreground/40 group-focus-within:text-primary transition-colors duration-300 flex-shrink-0">
-                  <Icon icon="solar:lock-password-bold" className="text-[15px]" />
-                </div>
-                <input
-                  type={showPassword ? "text" : "password"}
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  required
-                  className="w-full bg-transparent py-3.5 pl-3 pr-2 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide text-white/90"
-                  placeholder="New password"
-                />
-                <button type="button" className="pr-4 pl-2 text-muted-foreground/40 active:text-primary transition-colors flex-shrink-0" onClick={() => setShowPassword(!showPassword)} tabIndex={-1}>
-                  <Icon icon={showPassword ? "solar:eye-bold" : "solar:eye-closed-bold"} className="text-[15px]" />
-                </button>
-              </div>
-            </div>
-
-            <div className="auth-input-group auth-fade-up auth-fade-up-delay-3">
-              <div className="relative group flex items-center rounded-2xl border border-border/20 bg-transparent focus-within:border-primary/40 transition-all duration-300">
-                <div className="pl-4 text-muted-foreground/40 group-focus-within:text-primary transition-colors duration-300 flex-shrink-0">
-                  <Icon icon="solar:lock-password-bold" className="text-[15px]" />
-                </div>
-                <input
-                  type={showPassword ? "text" : "password"}
-                  value={newPasswordConfirm}
-                  onChange={(e) => setNewPasswordConfirm(e.target.value)}
-                  required
-                  className="w-full bg-transparent py-3.5 pl-3 pr-4 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide text-white/90"
-                  placeholder="Confirm new password"
-                />
-              </div>
-            </div>
-
-            {authError && (
-              <div className="bg-destructive/8 border border-destructive/15 text-destructive text-xs font-semibold p-3 rounded-xl flex items-center justify-center gap-2 text-center backdrop-blur-sm">
-                <Icon icon="solar:danger-bold" className="text-base flex-shrink-0" />
-                <span>{authError}</span>
-              </div>
-            )}
-
-            {recoverySuccess && (
-              <div className="bg-green/8 border border-green/15 text-green text-xs font-semibold p-3 rounded-xl flex items-center justify-center gap-2 text-center backdrop-blur-sm">
-                <Icon icon="solar:check-circle-bold" className="text-base flex-shrink-0" />
-                <span>Password updated! Signing you in...</span>
-              </div>
-            )}
-
-            <div className="auth-fade-up auth-fade-up-delay-4">
-              <button
-                type="submit"
-                disabled={recoverySuccess}
-                className="w-full font-bold py-4 rounded-2xl flex items-center justify-center gap-2.5 active:scale-[0.97] transition-all text-sm tracking-wide relative overflow-hidden group disabled:opacity-60"
-                style={{ background: 'linear-gradient(135deg, #E09F3E, #D4922F)', color: '#0D1B2A', boxShadow: '0 8px 32px rgba(224,159,62,0.25), inset 0 1px 0 rgba(255,255,255,0.15)' }}
-              >
-                <Icon icon="solar:check-circle-bold" className="text-base relative z-10" />
-                <span className="relative z-10">Update Password</span>
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
-    );
-  }
-
-  // ---------- LOGIN LANDING SCREEN ----------
-
-  if (!user) {
-    return (
-      <div className="h-[100dvh] bg-background text-foreground flex flex-col font-sans relative overflow-hidden">
-        {/* Noise texture */}
-        <div className="noise-overlay" />
-
-        {/* Large floating Arabic calligraphy watermark */}
-        <div className="absolute top-[8%] right-[-15%] auth-watermark" style={{ fontSize: '12rem', fontFamily: "'Amiri', serif", color: 'rgba(224,159,62,0.05)', lineHeight: 1 }}>
-          عربي
-        </div>
-        <div className="absolute bottom-[15%] left-[-10%] auth-watermark" style={{ fontSize: '8rem', fontFamily: "'Amiri', serif", color: 'rgba(229,107,111,0.04)', lineHeight: 1, animationDelay: '-3s' }}>
-          لغة
-        </div>
-
-        {/* Warm radial glow behind form */}
-        <div className="absolute top-[20%] left-1/2 -translate-x-1/2 w-[500px] h-[500px] rounded-full auth-glow" style={{ background: 'radial-gradient(circle, rgba(224,159,62,0.08) 0%, transparent 70%)' }} />
-        <div className="absolute bottom-[10%] left-1/2 -translate-x-1/2 w-[400px] h-[300px] rounded-full" style={{ background: 'radial-gradient(circle, rgba(229,107,111,0.04) 0%, transparent 70%)' }} />
-
-        <div className="flex-1 flex flex-col justify-center px-8 w-full max-w-sm mx-auto relative z-10">
-          {/* Logo & Hero */}
-          <div className="text-center mb-10 auth-fade-up">
-            <div className="flex justify-center mb-5">
-              <div className="relative">
-                <div className="absolute inset-0 rounded-full blur-2xl" style={{ background: 'radial-gradient(circle, rgba(224,159,62,0.2) 0%, transparent 70%)', transform: 'scale(2)' }} />
-                <img src="/clemency-icon.png" alt="Ihya Institute" className="w-20 h-20 object-contain brightness-[1.6] relative z-10" />
-              </div>
-            </div>
-            <h1 className="text-[2rem] font-semibold tracking-tight leading-[1.2] mb-3" style={{ fontFamily: "var(--font-sans)" }}>
-              Discover the{' '}
-              <span className="relative inline-block">
-                <span style={{ color: '#E09F3E' }}>soul</span>
-                <span className="absolute -bottom-1 left-0 right-0 h-[2px] rounded-full" style={{ background: 'linear-gradient(90deg, transparent, #E09F3E, transparent)' }} />
-              </span>
-              {' '}of Arabic
-            </h1>
-            <p className="text-muted-foreground text-[13px] leading-relaxed max-w-[260px] mx-auto">
-              Master pronunciation, script & heritage at your own pace
-            </p>
-          </div>
-
-          {/* Form section title */}
-          <div className="text-center mb-5 auth-fade-up auth-fade-up-delay-1">
-            <h2 className="text-lg font-bold tracking-tight" style={{ fontFamily: "var(--font-sans)" }}>
-              {authForgotMode ? "Reset password" : authMode === "signin" ? "Welcome back" : "Create account"}
-            </h2>
-            <p className="text-muted-foreground/70 text-xs mt-1.5 tracking-wide">
-              {authForgotMode
-                ? "We'll send a reset link to your email"
-                : authMode === "signin"
-                ? "Sign in to continue your progress"
-                : "Start your Arabic journey today"}
-            </p>
-          </div>
-
-          <form
-            onSubmit={authForgotMode ? handleForgotPassword : (authMode === "signin" ? handleSignIn : handleSignUp)}
-            className="space-y-3"
-          >
-            {/* Email input */}
-            <div className="auth-input-group auth-fade-up auth-fade-up-delay-2">
-              <div className="relative group flex items-center rounded-2xl border border-border/20 bg-transparent focus-within:border-primary/40 transition-all duration-300">
-                <div className="pl-4 text-muted-foreground/40 group-focus-within:text-primary transition-colors duration-300 flex-shrink-0">
-                  <Icon icon="solar:letter-bold" className="text-[15px]" />
-                </div>
-                <input
-                  type="email"
-                  value={authEmail}
-                  onChange={(e) => setAuthEmail(e.target.value)}
-                  required
-                  className="w-full bg-transparent py-3.5 pl-3 pr-4 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide text-white"
-                  placeholder="your@email.com"
-                />
-              </div>
-            </div>
-
-            {/* Password input */}
-            <div
-              className="auth-input-group auth-fade-up auth-fade-up-delay-3"
-              style={authForgotMode ? { opacity: 0, height: 0, overflow: 'hidden', margin: 0 } : {}}
-            >
-              <div className="relative group flex items-center rounded-2xl border border-border/20 bg-transparent focus-within:border-primary/40 transition-all duration-300">
-                <div className="pl-4 text-muted-foreground/40 group-focus-within:text-primary transition-colors duration-300 flex-shrink-0">
-                  <Icon icon="solar:lock-password-bold" className="text-[15px]" />
-                </div>
-                <input
-                  type={showPassword ? "text" : "password"}
-                  value={authPassword}
-                  onChange={(e) => setAuthPassword(e.target.value)}
-                  required={!authForgotMode}
-                  className="w-full bg-transparent py-3.5 pl-3 pr-2 text-sm focus:outline-none placeholder:text-muted-foreground/25 border-none tracking-wide text-white"
-                  placeholder="••••••••"
-                  tabIndex={authForgotMode ? -1 : 0}
-                />
-                <button
-                  type="button"
-                  className="pr-4 pl-2 text-muted-foreground/40 active:text-primary transition-colors flex-shrink-0"
-                  onClick={() => setShowPassword(!showPassword)}
-                  tabIndex={-1}
-                >
-                  <Icon icon={showPassword ? "solar:eye-bold" : "solar:eye-closed-bold"} className="text-[15px]" />
-                </button>
-              </div>
-            </div>
-
-            {/* Forgot password */}
-            <div className="text-right" style={authMode !== "signin" || authForgotMode ? { opacity: 0, height: 0, overflow: 'hidden', margin: 0 } : {}}>
-              <button
-                type="button"
-                className="text-[11px] text-muted-foreground/50 active:text-primary transition-colors tracking-wide"
-                onClick={() => { triggerHaptic(); setAuthForgotMode(true); setAuthError(""); setResetSent(false); }}
-                tabIndex={authMode !== "signin" || authForgotMode ? -1 : 0}
-              >
-                Forgot password?
-              </button>
-            </div>
-
-            {authError && (
-              <div className="bg-destructive/8 border border-destructive/15 text-destructive text-xs font-semibold p-3 rounded-xl flex items-center justify-center gap-2 text-center backdrop-blur-sm">
-                <Icon icon="solar:danger-bold" className="text-base flex-shrink-0" />
-                <span>{authError}</span>
-              </div>
-            )}
-
-            {resetSent && (
-              <div className="bg-green/8 border border-green/15 text-green text-xs font-semibold p-3 rounded-xl flex items-center justify-center gap-2 text-center backdrop-blur-sm">
-                <Icon icon="solar:check-circle-bold" className="text-base flex-shrink-0" />
-                <span>Reset link sent! Check your email.</span>
-              </div>
-            )}
-
-            <div className="auth-fade-up auth-fade-up-delay-4">
-              <button
-                type="submit"
-                className="w-full font-bold py-4 rounded-2xl flex items-center justify-center gap-2.5 active:scale-[0.97] transition-all text-sm tracking-wide relative overflow-hidden group"
-                style={{ background: 'linear-gradient(135deg, #E09F3E, #D4922F)', color: '#0D1B2A', boxShadow: '0 8px 32px rgba(224,159,62,0.25), inset 0 1px 0 rgba(255,255,255,0.15)' }}
-              >
-                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent translate-x-[-100%] group-active:translate-x-[100%] transition-transform duration-700" />
-                {authForgotMode ? (
-                  <>
-                    <Icon icon="solar:letter-bold" className="text-base relative z-10" />
-                    <span className="relative z-10">Send Reset Link</span>
-                  </>
-                ) : (
-                  <>
-                    <Icon icon={authMode === "signin" ? "solar:login-bold" : "solar:user-plus-bold"} className="text-base relative z-10" />
-                    <span className="relative z-10">{authMode === "signin" ? "Sign In" : "Create Account"}</span>
-                  </>
-                )}
-              </button>
-            </div>
-          </form>
-
-          {/* Back to sign in (forgot mode) */}
-          {authForgotMode && (
-            <div className="text-center mt-4">
-              <button
-                type="button"
-                className="text-xs text-muted-foreground/60 active:text-primary transition-colors tracking-wide"
-                onClick={() => { triggerHaptic(); setAuthForgotMode(false); setAuthError(""); setResetSent(false); }}
-              >
-                ← Back to sign in
-              </button>
-            </div>
-          )}
-
-          {/* Switch auth mode */}
-          {!authForgotMode && (
-            <div className="text-center mt-6 auth-fade-up auth-fade-up-delay-5">
-              <button
-                type="button"
-                className="text-[13px] text-muted-foreground/60 active:text-primary transition-colors"
-                onClick={() => { triggerHaptic(); setAuthMode(authMode === "signin" ? "signup" : "signin"); setAuthError(""); setResetSent(false); }}
-              >
-                {authMode === "signin"
-                  ? <>Don't have an account? <span className="font-bold" style={{ color: '#E09F3E' }}>Sign up</span></>
-                  : <>Already a member? <span className="font-bold" style={{ color: '#E09F3E' }}>Sign in</span></>}
-              </button>
-            </div>
-          )}
-
-          {/* Feature pills */}
-          <div className="flex justify-center gap-2.5 mt-10 auth-fade-up auth-fade-up-delay-5">
-            {[
-              { icon: "solar:pen-bold-duotone", label: "Lessons" },
-              { icon: "solar:microphone-3-bold-duotone", label: "AI Practice" },
-              { icon: "solar:cup-hot-bold-duotone", label: "Culture" },
-            ].map((f) => (
-              <div key={f.label} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-border/20 text-muted-foreground/50 backdrop-blur-sm" style={{ background: 'rgba(20,36,56,0.4)' }}>
-                <Icon icon={f.icon} className="text-xs" style={{ color: 'rgba(224,159,62,0.6)' }} />
-                <span className="text-[10px] font-semibold tracking-wider uppercase">{f.label}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
+      <AuthScreen key={mode} mode={mode}
+        email={authEmail} setEmail={setAuthEmail}
+        password={isPasswordRecovery ? newPassword : authPassword}
+        setPassword={isPasswordRecovery ? setNewPassword : setAuthPassword}
+        confirmPassword={newPasswordConfirm} setConfirmPassword={setNewPasswordConfirm}
+        showPassword={showPassword} setShowPassword={setShowPassword}
+        error={authError}
+        success={isPasswordRecovery && recoverySuccess ? 'Password updated. Returning to your lessons…' : resetSent ? 'Reset link sent! Check your email.' : ''}
+        onSubmit={isPasswordRecovery ? handleSetNewPassword : authForgotMode ? handleForgotPassword : authMode === 'signin' ? handleSignIn : handleSignUp}
+        onModeChange={nextMode => {
+          triggerHaptic();
+          setAuthForgotMode(nextMode === 'forgot');
+          if (nextMode !== 'forgot') setAuthMode(nextMode);
+          setAuthError('');
+          setResetSent(false);
+          setShowPassword(false);
+        }}
+      />
     );
   }
 
@@ -5858,11 +5550,11 @@ function App() {
     const completedLessonCount = lessonProgress.length;
 
     return (
-      <div className="min-h-screen bg-background text-foreground pb-40 font-sans selection:bg-primary/30">
+      <div className="app-dashboard min-h-screen bg-background text-foreground font-sans selection:bg-primary/30">
 
         {/* ========== HOME TAB ========== */}
         {activeTab === "home" && (
-          <div key={`tab-${tabTransitionKey}`} className={tabDirection === 'back' ? 'tab-slide-left' : 'tab-slide-right'}>
+          <div data-tab="home" key={`tab-${tabTransitionKey}`} className={`dashboard-pane ${tabDirection === 'back' ? 'tab-slide-left' : 'tab-slide-right'}`}>
             <header className="px-6 pt-12 pb-4 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
               <div className="flex flex-col items-start">
                 <p className="text-base font-medium text-muted-foreground font-arabic tracking-wide" dir="rtl">مرحباً</p>
@@ -6009,6 +5701,7 @@ function App() {
                     )}
                   </div>
                   <div
+                    role="button" tabIndex={0} onKeyDown={activateWithKeyboard}
                     className={`scenario-surface relative overflow-hidden rounded-2xl cursor-pointer active:scale-[0.97] transition-all duration-300 ${scenarioCompleted ? 'opacity-40 grayscale' : ''}`}
                     onClick={() => {
                       triggerHaptic();
@@ -6049,11 +5742,12 @@ function App() {
               <section className="grid grid-cols-2 gap-3">
                 {/* Word of the Day */}
                 <div
+                  role="button" tabIndex={0} onKeyDown={activateWithKeyboard}
                   className="relative rounded-2xl overflow-hidden cursor-pointer active:scale-[0.98] transition-all aspect-square"
                   style={{ background: 'linear-gradient(135deg, #7c2d12, #431407)' }}
                   onClick={() => { triggerHaptic(); setTransitionDirection("forward"); setPracticeMode("wotd"); loadWordOfTheDay(); }}
                 >
-                  <img src="/images/wotd.webp" alt="" fetchpriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
+                  <img src="/images/wotd.webp" alt="" fetchPriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
                   <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent" />
                   <div className="relative z-10 h-full flex flex-col justify-end p-4">
                     <Icon icon="solar:sun-bold" className="text-amber-400 text-2xl mb-2" />
@@ -6064,6 +5758,7 @@ function App() {
 
                 {/* Picture of the Day */}
                 <div
+                  role="button" tabIndex={0} onKeyDown={activateWithKeyboard}
                   className={`relative rounded-2xl overflow-hidden cursor-pointer active:scale-[0.98] transition-all aspect-square ${pictureCompleted ? 'opacity-50 grayscale' : ''}`}
                   onClick={() => {
                     triggerHaptic();
@@ -6093,7 +5788,7 @@ function App() {
 
         {/* ========== COURSES TAB ========== */}
         {activeTab === "courses" && (
-          <div key={`tab-${tabTransitionKey}`} className={tabDirection === 'back' ? 'tab-slide-left' : 'tab-slide-right'}>
+          <div data-tab="courses" key={`tab-${tabTransitionKey}`} className={`dashboard-pane ${tabDirection === 'back' ? 'tab-slide-left' : 'tab-slide-right'}`}>
             <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
               <div className="flex items-center gap-3">
                 <div className="bg-primary/20 p-2 rounded-xl border border-primary/30">
@@ -6347,7 +6042,7 @@ function App() {
 
         {/* ========== COMMUNITY TAB ========== */}
         {activeTab === "community" && (
-          <div key={`tab-${tabTransitionKey}`} className={tabDirection === 'back' ? 'tab-slide-left' : 'tab-slide-right'}>
+          <div data-tab="community" key={`tab-${tabTransitionKey}`} className={`dashboard-pane ${tabDirection === 'back' ? 'tab-slide-left' : 'tab-slide-right'}`}>
 
             {/* --- POST DETAIL VIEW --- */}
             {communityView === 'post_detail' && selectedPost && (
@@ -6743,7 +6438,7 @@ function App() {
                           communityExerciseRef.current = true;
                         }}
                       >
-                        <img src="/images/daily-question.webp" alt="" fetchpriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
+                        <img src="/images/daily-question.webp" alt="" fetchPriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
                         <div className="absolute inset-0 bg-gradient-to-r from-background via-background/85 to-background/20" />
                         <div className="relative z-10 h-full flex flex-col justify-center p-4">
                           <h3 className="text-lg font-extrabold text-foreground tracking-wide uppercase drop-shadow-lg">Daily Question</h3>
@@ -6773,7 +6468,7 @@ function App() {
                           }}
                         >
                           <div className="relative h-[55px] overflow-hidden">
-                            <img src="/images/read-aloud.webp" alt="" fetchpriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
+                            <img src="/images/read-aloud.webp" alt="" fetchPriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
                             <div className="absolute inset-0 bg-gradient-to-t from-card to-transparent" />
                           </div>
                           <div className="px-3 pt-2 pb-2.5">
@@ -6800,7 +6495,7 @@ function App() {
                           }}
                         >
                           <div className="relative h-[55px] overflow-hidden">
-                            <img src="/images/translate.webp" alt="" fetchpriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
+                            <img src="/images/translate.webp" alt="" fetchPriority="high" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
                             <div className="absolute inset-0 bg-gradient-to-t from-card to-transparent" />
                           </div>
                           <div className="px-3 pt-2 pb-2.5">
@@ -7226,7 +6921,7 @@ function App() {
 
         {/* ========== PROFILE TAB ========== */}
         {activeTab === "profile" && (
-          <div key={`tab-${tabTransitionKey}`} className={tabDirection === 'back' ? 'tab-slide-left' : 'tab-slide-right'}>
+          <div data-tab="profile" key={`tab-${tabTransitionKey}`} className={`dashboard-pane ${tabDirection === 'back' ? 'tab-slide-left' : 'tab-slide-right'}`}>
             <header className="px-6 pt-12 pb-6 flex items-center justify-between sticky top-0 z-20 bg-background backdrop-blur-xl">
               <div className="flex items-center gap-3">
                 <div className="bg-primary/20 p-2 rounded-xl border border-primary/30">
@@ -7841,39 +7536,18 @@ function App() {
             </div>
         )}
 
-        {/* ========== BOTTOM TAB BAR ========== */}
-        <nav className={`fixed left-6 right-6 z-50 ${((communityView === 'post_detail' || communityView === 'exercise') && activeTab === 'community') || (activeTab === 'community' && activeExerciseType) || showMyPosts || showLeaderboard || showTeacherDashboard || showTeacherStudentPosts ? 'hidden' : ''}`} style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.75rem)' }}>
-          <div className="bg-background/80 backdrop-blur-2xl border border-border/50 rounded-full px-6 py-4 flex items-center justify-between shadow-[0_8px_32px_rgba(0,0,0,0.4)]">
-            <button
-              className={`flex flex-col items-center gap-0.5 w-16 transition-all ${activeTab === "home" ? "text-primary" : "text-muted-foreground"}`}
-              onClick={() => { triggerHaptic(); switchTab("home"); }}
-            >
-              <Icon icon={activeTab === "home" ? "solar:home-2-bold" : "solar:home-2-linear"} className="text-2xl" />
-              {activeTab === "home" && <span className="text-[10px] font-bold">Home</span>}
-            </button>
-            <button
-              className={`flex flex-col items-center gap-0.5 w-16 transition-all ${activeTab === "courses" ? "text-primary" : "text-muted-foreground"}`}
-              onClick={() => { triggerHaptic(); switchTab("courses"); }}
-            >
-              <Icon icon={activeTab === "courses" ? "solar:book-bookmark-bold" : "solar:book-bookmark-linear"} className="text-2xl" />
-              {activeTab === "courses" && <span className="text-[10px] font-bold">Courses</span>}
-            </button>
-            <button
-              className={`flex flex-col items-center gap-0.5 w-16 transition-all ${activeTab === "community" ? "text-primary" : "text-muted-foreground"}`}
-              onClick={() => { triggerHaptic(); switchTab("community"); if (!dailyExercises) loadDailyExercises(); loadCommunityPosts(communityFilter); loadLeaderboard(); }}
-            >
-              <Icon icon={activeTab === "community" ? "solar:users-group-rounded-bold" : "solar:users-group-rounded-linear"} className="text-2xl" />
-              {activeTab === "community" && <span className="text-[10px] font-bold">Community</span>}
-            </button>
-            <button
-              className={`flex flex-col items-center gap-0.5 w-16 transition-all ${activeTab === "profile" ? "text-primary" : "text-muted-foreground"}`}
-              onClick={() => { triggerHaptic(); switchTab("profile"); }}
-            >
-              <Icon icon={activeTab === "profile" ? "solar:user-circle-bold" : "solar:user-circle-linear"} className="text-2xl" />
-              {activeTab === "profile" && <span className="text-[10px] font-bold">Profile</span>}
-            </button>
-          </div>
-        </nav>
+        <PrimaryNavigation activeTab={activeTab}
+          hidden={((communityView === 'post_detail' || communityView === 'exercise') && activeTab === 'community') || (activeTab === 'community' && activeExerciseType) || showMyPosts || showLeaderboard || showTeacherDashboard || showTeacherStudentPosts}
+          onNavigate={tab => {
+            triggerHaptic();
+            switchTab(tab);
+            if (tab === 'community') {
+              if (!dailyExercises) loadDailyExercises();
+              loadCommunityPosts(communityFilter);
+              loadLeaderboard();
+            }
+          }}
+        />
 
         {/* Sign Out Confirmation Modal */}
         {showReportProblem && (
@@ -8468,7 +8142,7 @@ function App() {
     // PHASE: INTRO
     if (wotdPhase === "intro") {
       return (
-        <div className={`h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <div className={`learning-screen h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Back button */}
           <header className="px-6 pt-12 pb-6">
             <button
@@ -8503,7 +8177,7 @@ function App() {
     // PHASE: WORD DISPLAY
     if (wotdPhase === "word") {
       return (
-        <div className={`h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <div className={`learning-screen h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Header */}
           <header className="px-6 pt-12 pb-4 flex items-center justify-between bg-background">
             <button
@@ -8570,7 +8244,7 @@ function App() {
       const currentExample = wotdExamples[wotdExampleIndex];
 
       return (
-        <div className={`h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <div className={`learning-screen h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Header */}
           <header className="px-6 pt-12 pb-4 flex items-center justify-between bg-background">
             <button
@@ -8645,7 +8319,7 @@ function App() {
     // PHASE: COMPLETE
     if (wotdPhase === "complete") {
       return (
-        <div className={`h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
+        <div className={`learning-screen h-[100dvh] overflow-hidden bg-background text-foreground font-sans flex flex-col ${transitionDirection === 'back' ? 'page-transition-back' : 'page-transition'}`}>
           {/* Decorative top gradient */}
           <div className="relative w-full pt-16 pb-8 flex flex-col items-center">
             <div className="absolute inset-0 bg-gradient-to-b from-primary/10 via-primary/5 to-transparent" />
@@ -9022,7 +8696,7 @@ function App() {
                           textAlign: 'center', animation: 'slideUp 0.4s ease-out'
                         }}>
                           <div style={{ fontSize: '0.6rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--muted-foreground)', marginBottom: '0.35rem' }}>Did you say?</div>
-                          <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.2rem', fontWeight: 600, color: 'var(--primary)' }}>{randomVocab.arabic_text || randomVocab.arabic}</div>
+                          <div dir="rtl" style={{ fontFamily: 'var(--font-arabic)', fontSize: '1.2rem', fontWeight: 600, color: 'var(--primary)' }}>{randomVocab.arabic_text || randomVocab.arabic}</div>
                           <div style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', marginTop: '0.15rem' }}>{randomVocab.english_text || randomVocab.english}</div>
                         </div>
                       )}
@@ -9189,7 +8863,7 @@ function App() {
             <div style={{ padding: '0 1.25rem', marginBottom: '0.75rem' }}>
               <div style={{ background: 'var(--muted)', borderRadius: '1rem', padding: '0.85rem', border: '1px solid var(--border)' }}>
                 <div style={{ fontSize: '0.65rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--muted-foreground)', marginBottom: '0.35rem' }}>What you said:</div>
-                <p dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.05rem', lineHeight: 1.7, color: 'var(--foreground)', margin: 0 }}>{pictureTranscript}</p>
+                <p dir="rtl" style={{ fontFamily: 'var(--font-arabic)', fontSize: '1.05rem', lineHeight: 1.7, color: 'var(--foreground)', margin: 0 }}>{pictureTranscript}</p>
               </div>
             </div>
           )}
@@ -9204,7 +8878,7 @@ function App() {
                 {/* SEGMENT */}
                 {step.type === 'segment' && (
                   <>
-                    <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.1rem', fontWeight: 600, marginBottom: '0.6rem', color: 'var(--primary)', lineHeight: 1.8 }}>
+                    <div dir="rtl" style={{ fontFamily: 'var(--font-arabic)', fontSize: '1.1rem', fontWeight: 600, marginBottom: '0.6rem', color: 'var(--primary)', lineHeight: 1.8 }}>
                       "{step.snippet}"
                     </div>
                     <p style={{ fontSize: '0.88rem', lineHeight: 1.6, color: 'var(--foreground)', margin: 0 }}>
@@ -9226,7 +8900,7 @@ function App() {
                             onClick={() => { triggerHapticOnly(); speakArabic(step.teach.arabic); }}
                             style={{ background: 'rgba(20,184,166,0.15)', border: 'none', cursor: 'pointer', fontSize: '1.1rem', width: 36, height: 36, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#14b8a6', flexShrink: 0 }}
                           >🔊</button>
-                          <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.1rem', fontWeight: 600, color: '#14b8a6' }}>{step.teach.arabic}</div>
+                          <div dir="rtl" style={{ fontFamily: 'var(--font-arabic)', fontSize: '1.1rem', fontWeight: 600, color: '#14b8a6' }}>{step.teach.arabic}</div>
                         </div>
                         <div style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', paddingLeft: '1.6rem' }}>{step.teach.english}</div>
                       </div>
@@ -9244,7 +8918,7 @@ function App() {
                     <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
                       <div style={{ flex: 1, background: 'rgba(239,68,68,0.08)', borderRadius: '0.75rem', padding: '0.6rem', borderLeft: '3px solid #ef4444' }}>
                         <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#ef4444', marginBottom: '0.25rem' }}>You said:</div>
-                        <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1rem', color: '#ef4444' }}>{step.original}</div>
+                        <div dir="rtl" style={{ fontFamily: 'var(--font-arabic)', fontSize: '1rem', color: '#ef4444' }}>{step.original}</div>
                       </div>
                       <div style={{ flex: 1, background: 'rgba(34,197,94,0.08)', borderRadius: '0.75rem', padding: '0.6rem', borderLeft: '3px solid #22c55e' }}>
                         <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#22c55e', marginBottom: '0.25rem' }}>Say this:</div>
@@ -9253,7 +8927,7 @@ function App() {
                             onClick={() => { triggerHapticOnly(); speakArabic(step.corrected); }}
                             style={{ background: 'rgba(34,197,94,0.15)', border: 'none', cursor: 'pointer', fontSize: '1rem', width: 32, height: 32, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#22c55e', flexShrink: 0 }}
                           >🔊</button>
-                          <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1rem', color: '#22c55e', fontWeight: 600 }}>{step.corrected}</div>
+                          <div dir="rtl" style={{ fontFamily: 'var(--font-arabic)', fontSize: '1rem', color: '#22c55e', fontWeight: 600 }}>{step.corrected}</div>
                         </div>
                       </div>
                     </div>
@@ -9323,20 +8997,20 @@ function App() {
                     <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#8b5cf6', marginBottom: '0.6rem' }}>
                       Follow-up Challenge
                     </div>
-                    <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.05rem', color: 'var(--foreground)', marginBottom: '0.35rem', fontWeight: 600, lineHeight: 1.8, textAlign: 'right', unicodeBidi: 'plaintext' }}>{step.prompt}</div>
+                    <div dir="rtl" style={{ fontFamily: 'var(--font-arabic)', fontSize: '1.05rem', color: 'var(--foreground)', marginBottom: '0.35rem', fontWeight: 600, lineHeight: 1.8, textAlign: 'right', unicodeBidi: 'plaintext' }}>{step.prompt}</div>
                     {step.promptTranslation && (
                       <p style={{ fontSize: '0.83rem', color: 'var(--muted-foreground)', margin: '0 0 0.5rem 0' }}>{step.promptTranslation}</p>
                     )}
                     {step.starterWords?.length > 0 && (
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.6rem', justifyContent: 'flex-end' }}>
                         {step.starterWords.map((word, wi) => (
-                          <span key={wi} dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", background: 'rgba(139,92,246,0.1)', color: '#8b5cf6', padding: '0.3rem 0.7rem', borderRadius: '2rem', fontSize: '0.85rem', fontWeight: 600 }}>{word}</span>
+                          <span key={wi} dir="rtl" style={{ fontFamily: 'var(--font-arabic)', background: 'rgba(139,92,246,0.1)', color: '#8b5cf6', padding: '0.3rem 0.7rem', borderRadius: '2rem', fontSize: '0.85rem', fontWeight: 600 }}>{word}</span>
                         ))}
                       </div>
                     )}
                     {/* Legacy hint fallback */}
                     {!step.starterWords && step.hint && (
-                      <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '0.95rem', color: 'var(--muted-foreground)', marginBottom: '0.6rem', fontStyle: 'italic' }}>
+                      <div dir="rtl" style={{ fontFamily: 'var(--font-arabic)', fontSize: '0.95rem', color: 'var(--muted-foreground)', marginBottom: '0.6rem', fontStyle: 'italic' }}>
                         {step.hint}
                       </div>
                     )}
@@ -9450,7 +9124,7 @@ function App() {
                             onClick={() => { triggerHapticOnly(); speakArabic(step.example); }}
                             style={{ background: 'rgba(59,130,246,0.15)', border: 'none', cursor: 'pointer', fontSize: '1.1rem', width: 36, height: 36, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#3b82f6', flexShrink: 0 }}
                           >🔊</button>
-                          <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.05rem', color: '#3b82f6', fontWeight: 600, lineHeight: 1.8 }}>{step.example}</div>
+                          <div dir="rtl" style={{ fontFamily: 'var(--font-arabic)', fontSize: '1.05rem', color: '#3b82f6', fontWeight: 600, lineHeight: 1.8 }}>{step.example}</div>
                         </div>
                       </div>
                     )}
@@ -9473,14 +9147,14 @@ function App() {
                         {label}
                       </div>
                       {step.used?.length > 0 && (
-                        <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '0.83rem', color: 'var(--muted-foreground)', marginBottom: '0.3rem' }}>
+                        <div dir="rtl" style={{ fontFamily: 'var(--font-arabic)', fontSize: '0.83rem', color: 'var(--muted-foreground)', marginBottom: '0.3rem' }}>
                           {step.used.join('، ')}
                         </div>
                       )}
                       {step.missed?.length > 0 && (
                         <div style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', margin: 0 }}>
                           <span style={{ fontWeight: 600 }}>Missed: </span>
-                          <span dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif" }}>{step.missed.join('، ')}</span>
+                          <span dir="rtl" style={{ fontFamily: 'var(--font-arabic)' }}>{step.missed.join('، ')}</span>
                         </div>
                       )}
                     </>
@@ -9514,7 +9188,7 @@ function App() {
                   background: 'linear-gradient(135deg, rgba(34,197,94,0.1), rgba(59,130,246,0.1))',
                   border: '1px solid rgba(34,197,94,0.2)'
                 }}>
-                  <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '2rem', fontWeight: 700, color: '#22c55e', marginBottom: '0.25rem' }}>أحسنت!</div>
+                  <div dir="rtl" style={{ fontFamily: 'var(--font-arabic)', fontSize: '2rem', fontWeight: 700, color: '#22c55e', marginBottom: '0.25rem' }}>أحسنت!</div>
                   <div style={{ fontSize: '0.85rem', color: 'var(--muted-foreground)' }}>Great job completing this lesson!</div>
                   {pictureScore && (
                     <div style={{ marginTop: '0.5rem' }}>
@@ -9562,7 +9236,7 @@ function App() {
               }}>
                 Congratulations!
               </h1>
-              <div dir="rtl" style={{ fontFamily: "'Noto Sans Arabic', sans-serif", fontSize: '1.5rem', fontWeight: 700, color: '#22c55e' }}>
+              <div dir="rtl" style={{ fontFamily: 'var(--font-arabic)', fontSize: '1.5rem', fontWeight: 700, color: '#22c55e' }}>
                 أحسنت!
               </div>
             </div>

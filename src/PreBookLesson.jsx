@@ -4,7 +4,7 @@ import { Icon } from '@iconify/react';
 import { Capacitor } from '@capacitor/core';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { TextToSpeech } from '@capacitor-community/text-to-speech';
-import { DotLottieReact } from '@lottiefiles/dotlottie-react';
+import DotLottieReact from './components/AccessibleLottie';
 import './PreBookLesson.css';
 
 /* ═══════════ HAPTICS ═══════════ */
