@@ -1,9 +1,9 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Icon } from "@iconify/react";
 import { MdArrowBackIosNew } from "react-icons/md";
-import { motion, AnimatePresence } from "motion/react";
+import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import { Leapfrog } from 'ldrs/react';
-import { DotLottieReact } from "@lottiefiles/dotlottie-react";
+import DotLottieReact from './components/AccessibleLottie';
 import 'ldrs/react/Leapfrog.css';
 import { App as CapacitorApp } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
@@ -282,6 +282,8 @@ export default function ScenarioChat({
   const scenarioStreamRef = useRef(null);
   const scenarioChunksRef = useRef([]);
   const scenarioChatEndRef = useRef(null);
+  const reducedMotion = useReducedMotion();
+  const scenarioScrollPinned = useRef(true);
   const scenarioMessagesRef = useRef([]);
   const scenarioAudioRef = useRef(null);
   const scenarioStartTimeRef = useRef(null);
@@ -1013,10 +1015,10 @@ export default function ScenarioChat({
 
   // Auto-scroll chat
   useEffect(() => {
-    if (scenarioChatEndRef.current) {
-      scenarioChatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    if (scenarioChatEndRef.current && scenarioScrollPinned.current) {
+      scenarioChatEndRef.current.scrollIntoView({ behavior: reducedMotion || displayedStreamText ? 'instant' : 'smooth', block: 'end' });
     }
-  }, [scenarioMessages, scenarioLoading, displayedStreamText]);
+  }, [scenarioMessages, scenarioLoading, displayedStreamText, reducedMotion]);
 
   // When the scenario ends, fetch curated key phrases from the full conversation
   // in a single call. Replaces the per-turn metadata extraction that used to run
@@ -1061,7 +1063,7 @@ export default function ScenarioChat({
     // DIFFICULTY SELECTION
     if (scenarioPhase === "difficulty") {
       return (
-        <div className="min-h-screen bg-background text-foreground font-sans flex flex-col pt-12 relative overflow-hidden">
+        <div className="scenario-screen min-h-[100dvh] bg-background text-foreground font-sans flex flex-col pt-12 relative overflow-hidden">
           {/* Background atmosphere */}
           <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[400px] opacity-[0.06] pointer-events-none" style={{ background: 'radial-gradient(ellipse, #E09F3E, transparent 70%)' }} />
 
@@ -1142,7 +1144,7 @@ export default function ScenarioChat({
       const userSetting = scenarioData?.id ? (scenarioContext[scenarioData.id] || scenarioData?.setting) : scenarioData?.setting;
 
       return (
-        <div className="h-screen bg-background text-foreground font-sans relative flex flex-col pt-12 overflow-hidden">
+        <div className="scenario-screen h-[100dvh] bg-background text-foreground font-sans relative flex flex-col pt-12 overflow-hidden">
           {/* Atmospheric background */}
           <div className="absolute top-[10%] left-1/2 -translate-x-1/2 w-[500px] h-[400px] opacity-[0.05] pointer-events-none" style={{ background: 'radial-gradient(ellipse, #E09F3E, transparent 70%)' }} />
 
@@ -1252,7 +1254,7 @@ export default function ScenarioChat({
     if (scenarioPhase === "chat") {
       const lastAi = [...scenarioMessages].reverse().find(m => m.role === 'ai');
       return (
-        <div className="bg-background text-foreground font-sans flex flex-col h-screen overflow-hidden relative">
+        <div className="scenario-screen bg-background text-foreground font-sans flex flex-col h-[100dvh] overflow-hidden relative">
 
           {/* Exit Confirmation Modal */}
           {showExitConfirm && (
@@ -1290,7 +1292,11 @@ export default function ScenarioChat({
           </header>
 
           {/* Messages Area */}
-          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 z-0">
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 z-0"
+            onScroll={event => {
+              const el = event.currentTarget;
+              scenarioScrollPinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+            }}>
             {scenarioMessages.map((msg, i) => (
               <motion.div
                 key={i}
@@ -1607,7 +1613,7 @@ export default function ScenarioChat({
       const secs = elapsedSec % 60;
 
       return (
-        <div className="min-h-screen bg-background text-foreground font-sans relative" style={{ background: 'linear-gradient(180deg, rgba(34,197,94,0.1) 0%, var(--background) 50%)' }}>
+        <div className="scenario-screen min-h-[100dvh] bg-background text-foreground font-sans relative" style={{ background: 'linear-gradient(180deg, rgba(34,197,94,0.1) 0%, var(--background) 50%)' }}>
 
           <div className="absolute top-10 left-0 w-full flex justify-center pointer-events-none z-0">
             <DotLottieReact src="/animations/done.lottie" loop autoplay style={{ width: 180, height: 180, opacity: 0.15 }} />

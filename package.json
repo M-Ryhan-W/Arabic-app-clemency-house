@@ -25,6 +25,8 @@
     "@capacitor/share": "^8.0.1",
     "@capacitor/status-bar": "^8.0.0",
     "@emotion/is-prop-valid": "^1.4.0",
+    "@fontsource-variable/noto-naskh-arabic": "^5.3.0",
+    "@fontsource-variable/plus-jakarta-sans": "^5.3.0",
     "@iconify/react": "^6.0.2",
     "@independo/capacitor-voice-recorder": "^8.1.0",
     "@lottiefiles/dotlottie-react": "^0.17.12",
